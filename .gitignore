@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+*.pyo
+node_modules/
+dist/
+.DS_Store
+.env
+*.egg-info/
+.vite/
+*.local
