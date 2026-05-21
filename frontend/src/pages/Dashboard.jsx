@@ -1,34 +1,36 @@
 import { useState, useEffect } from 'react';
 import {
-  BarChart,
-  Bar,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-  ResponsiveContainer,
-  PieChart,
-  Pie,
-  Cell,
-  ComposedChart,
-  Line,
+  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
+  PieChart, Pie, Cell, ComposedChart, Line,
 } from 'recharts';
+import { useNavigate } from 'react-router-dom';
 import MetricCard from '../components/MetricCard';
 import { fetchAPI } from '../api';
 
 const PIE_COLORS = ['#6366f1', '#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6'];
+
+const RISK_COLOR = {
+  CRITICAL: '#dc2626',
+  HIGH: '#f97316',
+  MEDIUM: '#f59e0b',
+  LOW: '#22c55e',
+};
+
+const CASE_COLOR = {
+  OPEN: '#f59e0b',
+  INVESTIGATING: '#6366f1',
+  SAR_FILED: '#10b981',
+  ESCALATED: '#e11d48',
+  DISMISSED: '#94a3b8',
+};
 
 function formatCr(value) {
   const cr = value / 10_000_000;
   return `₹${cr.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Cr`;
 }
 
-function formatINR(value) {
-  return `₹${Number(value).toLocaleString('en-IN')}`;
-}
-
 export default function Dashboard() {
+  const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -40,135 +42,99 @@ export default function Dashboard() {
       .finally(() => setLoading(false));
   }, []);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="animate-pulse text-gray-400 text-lg">Loading dashboard...</div>
-      </div>
-    );
-  }
+  if (loading) return <div className="flex items-center justify-center h-full text-gray-400">Loading dashboard...</div>;
+  if (error) return <div className="flex items-center justify-center h-full text-red-600">Error: {error}</div>;
 
-  if (error) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-red-600 text-lg">Error: {error}</div>
-      </div>
-    );
-  }
+  const { kpis, daily_data, pattern_breakdown, risk_distribution, case_status_counts, amount_distribution } = data;
 
-  const { kpis, daily_data, amount_stats, pattern_breakdown, risk_distribution: riskDistObj } = data;
-  const risk_distribution = Object.entries(riskDistObj || {}).map(([level, count]) => ({ level, count }));
-
-  // Build amount distribution from stats
-  const amount_distribution = (() => {
-    const normal = amount_stats?.normal || {};
-    const fraud = amount_stats?.fraud || {};
-    if (!normal.mean) return [];
-    const buckets = [
-      { label: '<₹50K', min: 0, max: 50000 },
-      { label: '₹50K-2L', min: 50000, max: 200000 },
-      { label: '₹2L-10L', min: 200000, max: 1000000 },
-      { label: '₹10L-50L', min: 1000000, max: 5000000 },
-      { label: '>₹50L', min: 5000000, max: Infinity },
-    ];
-    return buckets.map(b => ({ bucket: b.label, normal_count: Math.round(normal['50%'] || 0), fraud_count: Math.round(fraud['50%'] || 0) }));
-  })();
-
-  // Fix pattern_breakdown key names
+  const risk_data = Object.entries(risk_distribution || {}).map(([level, count]) => ({ level, count }));
+  const case_data = Object.entries(case_status_counts || {}).map(([status, count]) => ({ status, count }));
   const pattern_data = (pattern_breakdown || []).map(p => ({
     ...p,
-    pattern: p.fraud_pattern || p.pattern,
+    pattern: (p.fraud_pattern || '').replace(/_/g, ' '),
   }));
 
   return (
     <div className="p-6 space-y-6 max-w-[1600px] mx-auto">
-      {/* Header */}
       <div>
-        <h1 className="text-2xl font-bold text-gray-900">RUDRA Fund Flow Intelligence</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Fund Flow Intelligence — Overview</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Real-time monitoring of transactions, fraud patterns, and risk distribution
+          {kpis.total_transactions.toLocaleString('en-IN')} transactions monitored across {Object.keys(risk_distribution || {}).length}
+          {' '}risk tiers. Click any card to drill in.
         </p>
       </div>
 
-      {/* KPI Cards */}
-      <div className="grid grid-cols-5 gap-4">
+      {/* Primary KPIs */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard label="Total Transactions" value={kpis.total_transactions.toLocaleString('en-IN')} color="indigo" />
+        <MetricCard label="Total Volume" value={formatCr(kpis.total_volume)} color="blue" />
+        <MetricCard label="Fraud Volume" value={formatCr(kpis.fraud_volume)} delta={`${kpis.fraud_rate}% of total`} color="amber" />
         <MetricCard
-          label="Total Transactions"
-          value={Number(kpis.total_transactions).toLocaleString('en-IN')}
-          color="indigo"
-        />
-        <MetricCard
-          label="Total Volume"
-          value={formatCr(kpis.total_volume)}
-          color="blue"
-        />
-        <MetricCard
-          label="Fraud Transactions"
-          value={Number(kpis.fraud_transactions).toLocaleString('en-IN')}
-          delta={`${kpis.fraud_rate}% of total`}
+          label="Open Cases"
+          value={(case_status_counts?.OPEN || 0).toLocaleString('en-IN')}
+          delta={`${kpis.critical_alerts} critical • ${kpis.total_alerts} total`}
           color="red"
-        />
-        <MetricCard
-          label="Fraud Volume"
-          value={formatCr(kpis.fraud_volume)}
-          color="amber"
-        />
-        <MetricCard
-          label="Active Alerts"
-          value={Number(kpis.total_alerts).toLocaleString('en-IN')}
-          delta={`${kpis.critical_alerts} critical`}
-          color="purple"
+          onClick={() => navigate('/cases')}
         />
       </div>
 
-      {/* Charts Grid */}
-      <div className="grid grid-cols-2 gap-6">
-        {/* Top Left: Daily Transaction Counts with Fraud Overlay */}
+      {/* Secondary KPIs */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard
+          label="ML F1 Score"
+          value={kpis.model_f1 != null ? kpis.model_f1.toFixed(3) : '—'}
+          delta={kpis.model_auc != null ? `AUC ${kpis.model_auc.toFixed(3)}` : ''}
+          color="purple"
+          onClick={() => navigate('/model')}
+        />
+        <MetricCard
+          label="High-Risk Entities"
+          value={(kpis.high_risk_entities || 0).toLocaleString('en-IN')}
+          delta="risk score ≥ 0.5"
+          color="amber"
+        />
+        <MetricCard
+          label="SAR Filed"
+          value={(case_status_counts?.SAR_FILED || 0).toLocaleString('en-IN')}
+          delta={`${case_status_counts?.DISMISSED || 0} dismissed`}
+          color="green"
+          onClick={() => navigate('/cases')}
+        />
+        <MetricCard
+          label="Live Stream"
+          value="Inactive"
+          delta="Click to start streaming"
+          color="blue"
+          onClick={() => navigate('/live')}
+        />
+      </div>
+
+      {/* Charts */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">Daily Transaction Trends</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <ComposedChart data={daily_data}>
+          <ResponsiveContainer width="100%" height={280}>
+            <ComposedChart data={daily_data || []}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
               <XAxis dataKey="date" tick={{ fontSize: 11 }} stroke="#9ca3af" />
               <YAxis yAxisId="left" tick={{ fontSize: 11 }} stroke="#9ca3af" />
               <YAxis yAxisId="right" orientation="right" tick={{ fontSize: 11 }} stroke="#ef4444" />
-              <Tooltip
-                contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb' }}
-                formatter={(value, name) => {
-                  if (name === 'fraud_count') return [value, 'Fraud'];
-                  return [Number(value).toLocaleString('en-IN'), name === 'count' ? 'Transactions' : name];
-                }}
-              />
+              <Tooltip />
               <Legend />
               <Bar yAxisId="left" dataKey="count" fill="#6366f1" radius={[3, 3, 0, 0]} name="Transactions" />
-              <Line
-                yAxisId="right"
-                type="monotone"
-                dataKey="fraud_count"
-                stroke="#ef4444"
-                strokeWidth={2}
-                dot={{ r: 3 }}
-                name="Fraud"
-              />
+              <Line yAxisId="right" type="monotone" dataKey="fraud_count" stroke="#ef4444" strokeWidth={2} dot={{ r: 2 }} name="Fraud" />
             </ComposedChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Top Right: Amount Distribution */}
         <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">Amount Distribution</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={amount_distribution}>
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">Amount Distribution (Normal vs Fraud)</h3>
+          <ResponsiveContainer width="100%" height={280}>
+            <BarChart data={amount_distribution || []}>
               <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
               <XAxis dataKey="bucket" tick={{ fontSize: 11 }} stroke="#9ca3af" />
               <YAxis tick={{ fontSize: 11 }} stroke="#9ca3af" />
-              <Tooltip
-                contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb' }}
-                formatter={(value, name) => [
-                  Number(value).toLocaleString('en-IN'),
-                  name === 'normal_count' ? 'Normal' : 'Fraud',
-                ]}
-              />
+              <Tooltip />
               <Legend />
               <Bar dataKey="normal_count" fill="#3b82f6" radius={[3, 3, 0, 0]} name="Normal" />
               <Bar dataKey="fraud_count" fill="#ef4444" radius={[3, 3, 0, 0]} name="Fraud" />
@@ -176,60 +142,63 @@ export default function Dashboard() {
           </ResponsiveContainer>
         </div>
 
-        {/* Bottom Left: Pattern Breakdown Pie */}
         <div className="bg-white rounded-xl border border-gray-200 p-4">
           <h3 className="text-sm font-semibold text-gray-700 mb-3">Fraud Pattern Breakdown</h3>
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height={280}>
             <PieChart>
               <Pie
                 data={pattern_data}
                 dataKey="count"
-                nameKey="fraud_pattern"
+                nameKey="pattern"
                 cx="50%"
                 cy="50%"
-                outerRadius={100}
-                label={({ fraud_pattern, percent }) => `${fraud_pattern} (${(percent * 100).toFixed(0)}%)`}
+                outerRadius={90}
+                label={({ pattern, percent }) => `${pattern} (${(percent * 100).toFixed(0)}%)`}
                 labelLine={{ stroke: '#9ca3af' }}
               >
                 {pattern_data.map((_, index) => (
                   <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />
                 ))}
               </Pie>
-              <Tooltip
-                contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb' }}
-                formatter={(value, name) => [Number(value).toLocaleString('en-IN'), name]}
-              />
-              <Legend />
+              <Tooltip />
+              <Legend wrapperStyle={{ fontSize: 12 }} />
             </PieChart>
           </ResponsiveContainer>
         </div>
 
-        {/* Bottom Right: Risk Distribution */}
         <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">Risk Level Distribution</h3>
-          <ResponsiveContainer width="100%" height={300}>
-            <BarChart data={risk_distribution}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-              <XAxis dataKey="level" tick={{ fontSize: 11 }} stroke="#9ca3af" />
-              <YAxis tick={{ fontSize: 11 }} stroke="#9ca3af" />
-              <Tooltip
-                contentStyle={{ borderRadius: 8, border: '1px solid #e5e7eb' }}
-                formatter={(value) => [Number(value).toLocaleString('en-IN'), 'Count']}
-              />
-              <Legend />
-              <Bar dataKey="count" radius={[3, 3, 0, 0]} name="Count">
-                {risk_distribution.map((entry, index) => {
-                  const colorMap = {
-                    low: '#22c55e',
-                    medium: '#f59e0b',
-                    high: '#f97316',
-                    critical: '#ef4444',
-                  };
-                  return <Cell key={index} fill={colorMap[entry.level?.toLowerCase()] || '#6366f1'} />;
-                })}
-              </Bar>
-            </BarChart>
-          </ResponsiveContainer>
+          <h3 className="text-sm font-semibold text-gray-700 mb-3">Risk Distribution &amp; Case Status</h3>
+          <div className="grid grid-cols-2 gap-3">
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={risk_data}>
+                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                <XAxis dataKey="level" tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                <Tooltip />
+                <Bar dataKey="count" radius={[3, 3, 0, 0]}>
+                  {risk_data.map((entry, i) => (
+                    <Cell key={i} fill={RISK_COLOR[entry.level] || '#6366f1'} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+            <ResponsiveContainer width="100%" height={240}>
+              <BarChart data={case_data} layout="vertical">
+                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+                <XAxis type="number" tick={{ fontSize: 10 }} stroke="#9ca3af" />
+                <YAxis dataKey="status" type="category" tick={{ fontSize: 10 }} width={90} stroke="#9ca3af" />
+                <Tooltip />
+                <Bar dataKey="count" radius={[0, 3, 3, 0]}>
+                  {case_data.map((entry, i) => (
+                    <Cell key={i} fill={CASE_COLOR[entry.status] || '#6366f1'} />
+                  ))}
+                </Bar>
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">
+            Left: entity risk tiers • Right: case workflow state. Click <button onClick={() => navigate('/cases')} className="text-indigo-600 hover:underline">open cases</button> to triage.
+          </p>
         </div>
       </div>
     </div>

@@ -1,106 +1,104 @@
 # RUDRA — Shield Against Deception | Project Context
 
-## Hackathon Info
+## Hackathon
 - **Event:** PSBs Hackathon Series 2026 (iDEA 2.0)
 - **Problem Statement:** PS3 — Fund Flow Tracking
-- **Stage:** Phase 2 — POC (Proof of Concept) submission
+- **Stage:** Phase 2 — POC submission
 - **Organizer:** Government of India, Ministry of Finance, Department of Financial Services
 
 ## Team Bhadra
 | Member | Role | Responsibility |
 |--------|------|---------------|
-| Satyadev Suvesh | Agentic AI | LLM Copilot, RAG pipeline, Auto FIU Evidence |
-| Anant Asati | Agentic AI | LLM integration, KYC delta reasoning, Qwen local explainer |
-| Prashant Gautam | Graphs & ML | PyTorch Geometric, FraudGT, BDH Model, XGBoost, 5-pattern detector |
-| Yash Kumar Maru | Web Development | React/Vite dashboard, FastAPI backend, DB management |
+| Satyadev Suvesh | Agentic AI | LLM Copilot, RAG pipeline, FIU Evidence generation |
+| Anant Asati | Agentic AI | LLM integration, KYC delta reasoning, local explainer |
+| Prashant Gautam | Graphs & ML | Detection engine, FraudGT (planned), XGBoost classifier |
+| Yash Kumar Maru | Web Development | React dashboard, FastAPI backend |
 
 ## Problem
-Banks rely on T+1 batch analysis — fraud discovered the morning after it occurs. By then funds are already layered. Need real-time fund flow tracking with instant pattern detection.
+Banks rely on T+1 batch fraud analysis. By the time a suspicious round-trip is flagged the morning after, funds are already layered. The PS asks for an end-to-end fund-flow tracking system that maps movement across **accounts, products, branches, channels** and lets investigators trace the complete journey of funds + generate FIU evidence packages.
 
-## Solution
-Real-time AML/fraud detection platform:
-1. Live fund flow graph updated per transaction
-2. 5 parallel detectors: Layering, Round-tripping, Structuring, Dormant Activation, KYC Profile Mismatch
-3. LLM copilot with tool-calling over live graph (trace_funds, find_cycles, explain_alert, get_profile_delta)
-4. Auto SAR/FIU evidence package generation
-5. DPI-native: Account Aggregator framework, RBI FRM mandate, DPDP Act 2023
+## Solution (current build)
+Real-time AML/fraud platform with six concrete deliverables:
 
-## POC Requirements (from evaluator email)
-- Working ML model/pipeline on sample/synthetic data
-- Functional dashboard showing output
-- End-to-end flow: input → processing → output
-- Clear what is simulated vs real
-- Code that runs on laptop
-- NOT accepted: Figma mockups, slide decks, ChatGPT wrappers, manual-only demos
+1. **Live fund-flow graph** built per transaction (NetworkX directed weighted).
+2. **6 heuristic detectors** running in parallel — Circular / Layering / Smurfing / Shell Funnel / Dormant Activation / Profile Mismatch.
+3. **XGBoost edge classifier** trained on 31 engineered features (F1, AUC, confusion matrix exposed at `/model`).
+4. **Fund Journey Tracer** (`/journey`) — pick any alert or entity, walk forward/backward through the graph with timeline and red-flag annotation. The killer demo feature.
+5. **Case Workbench** (`/cases`) — investigator triage queue with state machine (Open / Investigating / SAR Filed / Escalated / Dismissed) and full audit log per case.
+6. **FIU Evidence Package** — one-click zip containing SAR PDF + subgraph JSON + transaction chain CSV + PMLA citations + case audit log. This is the actual artefact a PSB compliance officer would file with FIU-IND.
 
-### Evaluation Rubric
-1. **Technical Functionality** — Does the core system work and produce meaningful output?
-2. **Problem Fit** — Tailored to Union Bank problem, not generic AI?
-3. **Innovation & Depth** — Genuine technical work, not just API calls?
-4. **Code Quality & Docs** — Clear README, evaluator can run it, readable code
-5. **Demo Clarity** — Clear demo video, focused pitch deck
-6. **Team & Execution** — Skills to take forward, honest about built vs planned
+Plus: Channel/Branch/Product analytics, live transaction stream with per-txn ML scoring, LLM copilot with tool-calling.
 
-### Minimum Deliverable (from PS3 description)
-"Show graph visualisation of fund flows. Demo a flagged pattern (circular transactions, rapid layering). Minimum: NetworkX/Neo4j + visual graph + ML-flagged suspicious subgraphs."
-
-## Architecture (POC)
+## Architecture
 ```
 rudra/
-├── backend/          # FastAPI Python backend (REST API)
-│   └── main.py       # All API endpoints
-├── frontend/         # React + Vite + TailwindCSS
-│   └── src/          # Pages, components, API client
-├── src/              # Python ML engine (data gen, graph, detection, SAR, copilot)
-│   ├── data_generator.py    # Synthetic banking transactions with embedded fraud
-│   ├── graph_engine.py      # NetworkX directed weighted graph builder
-│   ├── fraud_detector.py    # 4 core detectors (circular, layering, smurfing, funnel)
-│   ├── advanced_detectors.py # Dormant activation + profile mismatch
-│   ├── sar_generator.py     # SAR report generation with PDF export
-│   └── llm_copilot.py      # Gemini + local fallback copilot with tools
-├── data/             # Generated data (transactions.csv, alerts, risk scores, SAR PDFs)
-└── README.md
+├── backend/main.py                     # FastAPI with 30+ endpoints
+├── frontend/                           # React 19 + Vite + Tailwind 4
+│   └── src/pages/                      # 11 pages
+├── src/                                # Detection + ML engine
+│   ├── data_generator.py               # Synthetic txns with channel/product/branch metadata
+│   ├── graph_engine.py                 # NetworkX graph builder (rail_mix/channel_mix per edge)
+│   ├── fraud_detector.py               # 4 core detectors
+│   ├── advanced_detectors.py           # Dormant + Profile mismatch
+│   ├── ml_model.py                     # XGBoost on 31 features + metrics + edge-scoring
+│   ├── fund_tracer.py                  # Journey tracer (entity-mode + alert-mode)
+│   ├── case_manager.py                 # File-backed case store + state machine
+│   ├── fiu_package.py                  # FIU evidence zip builder
+│   ├── sar_generator.py                # SAR text + PDF
+│   ├── llm_copilot.py                  # Gemini + local copilot
+│   └── run_pipeline.py                 # End-to-end pipeline runner
+└── data/                               # Generated outputs
+    ├── transactions.csv                # 2.7k synthetic txns
+    ├── fraud_alerts.json               # ~290 alerts
+    ├── cases.json                      # case state + audit log
+    ├── ml/                             # model.pkl, metrics.json, edge_scores.json
+    └── sar_reports/*.pdf               # 200+ SAR PDFs
 ```
 
-## Data
-- 2,742 synthetic transactions (2,000 normal + 742 fraud)
-- 82 entities (24 businesses, 50 individuals, 8 shell companies)
-- 16 embedded fraud cases across 4 pattern types
-- 10 bank branches across India
-- Fraud patterns: circular_transaction, rapid_layering, smurfing, shell_funnel
+## Data dimensions (what's in each transaction)
+- `sender_id` / `receiver_id` / `_name` / `_type` (individual / business / shell_company)
+- `sender_branch` / `receiver_branch` — 10 branches across India
+- `sender_product` / `receiver_product` — SavingsAccount / CurrentAccount / LoanAccount / etc.
+- `amount` (INR), `transaction_type` (NEFT / RTGS / IMPS / UPI / Wire Transfer)
+- `channel` — Branch / NetBanking / MobileApp / ATM / UPI / ThirdPartyAPI
+- `purpose_code`, `is_fraud`, `fraud_pattern`, `fraud_case_id`
 
-## Detection Pipeline
-1. Generate data (or load existing)
-2. Build NetworkX directed weighted graph (82 nodes, 2027 edges)
-3. Run 5 detectors in parallel → 313 alerts (50 circular, 200 layering, 18 smurfing, 5 funnels, 40 profile mismatch)
-4. Generate SAR reports for HIGH+ severity alerts (206 PDFs)
-5. Copilot available for natural language queries
+## Pipeline
+1. Generate 2.7k synthetic txns (2k normal + 670 fraud across 6 pattern types).
+2. Build NetworkX graph (82 nodes, ~1.8k edges).
+3. Run 6 detectors in parallel → ~290 alerts.
+4. Train XGBoost on 31 edge features → metrics persisted.
+5. Score every edge with the trained model → `edge_scores.json`.
+6. Generate SAR PDFs for HIGH+ alerts.
+7. Backend boots, exposes 30+ REST endpoints, opens a case row for every alert.
 
-## Tech Stack
-- **Backend:** Python, FastAPI, NetworkX, Pandas, NumPy, ReportLab
-- **Frontend:** React, Vite, TailwindCSS, react-force-graph-2d, Recharts
-- **ML/AI:** Graph-based pattern detection, Gemini API (optional), local rule-based fallback
-- **Data:** Synthetic CSV/Parquet (no real bank data)
+## Tech stack
+- **Backend**: Python 3.10+, FastAPI, NetworkX, Pandas, XGBoost, ReportLab
+- **Frontend**: React 19, Vite, Tailwind 4, Recharts, react-force-graph-2d
+- **AI**: Google Gemini (optional) + local rule-based fallback
+- **Data**: Synthetic CSV/Parquet, JSON case store
 
-## Key Design Decisions
-- **No database for POC** — all data in memory, loaded from generated files
-- **Synthetic data only** — no real PII or bank data
-- **Gemini optional** — copilot works locally without API key
-- **Graph visualization** — filtered views (fraud-only, high-risk, subgraph explorer) to avoid hairball effect
-- **Light theme** — clean, professional, banking-appropriate
+## Design decisions
+- **No database for POC** — file-backed (JSON / parquet) keeps the repo self-contained for evaluators.
+- **Synthetic data only** — no real PII or bank data, but with the same schema a real PSB would use.
+- **XGBoost over FraudGT for POC** — XGBoost is honest, runnable on a laptop, and gives a real baseline; FraudGT/BDH is in the PoA roadmap.
+- **Light theme** — banking-appropriate.
 
-## Files That Matter
-- `rudra.pptx` — Original pitch deck with solution outline
-- `iDEA_2_0_PoA.pdf` — Plan of Action document with phase-wise implementation plan
-- `src/fraud_detector.py` — Core detection engine (circular uses bucket-based cycle search, layering uses BFS with limits)
-- `src/llm_copilot.py` — Gemini + local copilot (find_cycles uses targeted DFS)
-- `backend/main.py` — FastAPI REST API
-- `frontend/src/` — React pages and components
+## What's planned but not built (be honest in demo)
+- **Pathway / Kafka streaming ingestion** — PoA Phase 1, currently batch-on-startup.
+- **FraudGT + BDH ensemble** — PoA Phase 2, currently XGBoost baseline.
+- **Account Aggregator integration** — PoA Phase 1, currently synthetic.
+- **PostgreSQL + SQLite audit DB** — PoA Phase 1, currently JSON.
+- **ChromaDB RAG + Gemini tool-calling agent** — PoA Phase 3, currently local fallback with hand-coded tools.
 
-## Known Limitations (be honest in demo)
-1. Graph is dense (30% density) due to random normal transactions — real banking data would be sparser
-2. Cycle detection uses amount-bucket heuristic rather than Johnson's algorithm (too slow on dense graph)
-3. No real-time streaming (Pathway/Kafka planned, not in POC)
-4. No FraudGT/BDH models yet (graph ML detectors are heuristic-based for POC)
-5. No Account Aggregator integration (simulated data only)
-6. No PostgreSQL — in-memory for POC
+## Demo flow (suggested order)
+1. `/` — Dashboard. Open Cases card → click.
+2. `/cases` — Pick a CRITICAL circular alert. Look at audit log. Click "Trace Journey".
+3. `/journey` — See the cycle laid out, click an entity to see its red flags. Show the timeline below.
+4. Back to `/cases` — click "FIU Package" to download the zip. Open it on desktop to show the contents.
+5. `/analytics` — Show channel + branch breakdown. Point at the "fraud rate by channel" chart.
+6. `/model` — Show F1, AUC, confusion matrix, feature importance.
+7. `/live` — Start the stream. Show transactions arriving with ML scores.
+8. `/copilot` — Ask "Show me high-risk entities" and "Trace funds for Apex Trading Co."
+
+Total demo time: 4–5 minutes.

@@ -20,15 +20,15 @@ def main():
     print("=" * 60)
 
     # Step 1: Generate data
-    print("\n[1/4] Generating synthetic transaction data...")
+    print("\n[1/5] Generating synthetic transaction data...")
     generator = TransactionGenerator(seed=42)
     df, fraud_cases = generator.generate_all_data()
 
     data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
-    save_data(df, fraud_cases, data_dir)
+    save_data(df, fraud_cases, data_dir, entities=generator.entities)
 
     # Step 2: Build graph
-    print("\n[2/4] Building fund flow graph...")
+    print("\n[2/5] Building fund flow graph...")
     ffg = FundFlowGraph()
     graph = ffg.build_graph(df)
     stats = ffg.get_graph_stats()
@@ -37,7 +37,7 @@ def main():
     print(f"  Density: {stats['density']}")
 
     # Step 3: Run fraud detection
-    print("\n[3/4] Running fraud detection (core + advanced)...")
+    print("\n[3/5] Running fraud detection (core + advanced)...")
     detector = FraudDetector(graph)
     results = detector.run_all_detections()
 
@@ -77,19 +77,33 @@ def main():
 
     detector.save_results(results, data_dir)
 
-    # Step 4: Generate SAR reports
-    print("\n[4/4] Generating SAR reports...")
+    # Step 4: Train ML model on graph features
+    print("\n[4/5] Training XGBoost classifier on engineered graph features...")
+    try:
+        from ml_model import train_and_save
+        ml_metrics = train_and_save(graph, df, data_dir)
+        print(f"    F1 (held-out): {ml_metrics.get('f1', 0):.3f} | "
+              f"AUC: {ml_metrics.get('auc', 0):.3f} | "
+              f"Precision: {ml_metrics.get('precision', 0):.3f} | "
+              f"Recall: {ml_metrics.get('recall', 0):.3f}")
+    except Exception as e:
+        print(f"    ML training skipped: {e}")
+
+    # Step 5: Generate SAR reports
+    print("\n[5/5] Generating SAR reports...")
     from sar_generator import SARGenerator
     sar_gen = SARGenerator(graph, df, all_alerts, fraud_cases)
     sar_reports = sar_gen.generate_all_sars(min_severity="HIGH")
     sar_dir = os.path.join(data_dir, "sar_reports")
     for sar in sar_reports:
         path = sar_gen.export_sar_pdf(sar, sar_dir)
-        print(f"    Generated: {sar['report_id']} → {path}")
+        print(f"    Generated: {sar['report_id']} -> {path}")
 
     print("\n" + "=" * 60)
-    print("  Pipeline complete! Run the dashboard with:")
-    print("  streamlit run src/app.py")
+    print("  Pipeline complete! Start the backend with:")
+    print("    cd backend && uvicorn main:app --reload --port 8000")
+    print("  Then start the frontend with:")
+    print("    cd frontend && npm run dev")
     print("=" * 60)
 
 

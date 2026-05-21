@@ -5,6 +5,9 @@ Generates realistic fund flow data with embedded fraud patterns:
 - Rapid layering (money moving through multiple accounts quickly)
 - Smurfing (structuring large amounts into small transactions)
 - Shell company funnels
+
+Now includes channel, product, and account_type — matching what banks actually
+track for fraud monitoring across accounts, products, branches, and channels.
 """
 
 import random
@@ -47,12 +50,37 @@ BRANCHES = [
     "Kolkata Park Street", "Ahmedabad CG Road", "Jaipur MI Road",
     "Lucknow Hazratganj",
 ]
-TRANSACTION_TYPES = ["NEFT", "RTGS", "IMPS", "UPI", "Wire Transfer"]
+PAYMENT_RAILS = ["NEFT", "RTGS", "IMPS", "UPI", "Wire Transfer"]
+CHANNELS = ["Branch", "NetBanking", "MobileApp", "ATM", "UPI", "ThirdPartyAPI"]
+PRODUCTS_INDIVIDUAL = ["SavingsAccount", "CurrentAccount", "CreditCardAccount"]
+PRODUCTS_BUSINESS = ["CurrentAccount", "OverdraftAccount", "LoanAccount"]
+PRODUCTS_SHELL = ["CurrentAccount", "OverdraftAccount"]
 PURPOSE_CODES = [
     "Business Payment", "Salary", "Vendor Payment", "Consulting Fee",
     "Import Payment", "Export Receipt", "Loan Disbursement", "Investment",
     "Insurance Premium", "Rent Payment", "Utility Payment", "Tax Payment",
 ]
+
+
+def _pick_product(entity_type: str) -> str:
+    if entity_type == "business":
+        return random.choice(PRODUCTS_BUSINESS)
+    if entity_type == "shell_company":
+        return random.choice(PRODUCTS_SHELL)
+    return random.choice(PRODUCTS_INDIVIDUAL)
+
+
+def _pick_channel(rail: str, entity_type: str) -> str:
+    """Pick a realistic initiation channel given the payment rail and entity type."""
+    if rail == "UPI":
+        return "MobileApp" if random.random() < 0.85 else "UPI"
+    if rail == "RTGS" or rail == "Wire Transfer":
+        return random.choices(["Branch", "NetBanking"], weights=[0.6, 0.4])[0]
+    if rail == "NEFT":
+        return random.choices(["NetBanking", "Branch", "MobileApp"], weights=[0.5, 0.3, 0.2])[0]
+    if rail == "IMPS":
+        return random.choices(["MobileApp", "NetBanking"], weights=[0.7, 0.3])[0]
+    return random.choice(CHANNELS)
 
 
 class TransactionGenerator:
@@ -61,6 +89,8 @@ class TransactionGenerator:
         np.random.seed(seed)
         self.entities = self._generate_entities()
         self.fraud_cases: List[Dict] = []
+        # Map entity_id → declared (KYC) product for behavior-vs-profile checks
+        self._entity_product = {e["entity_id"]: e["primary_product"] for e in self.entities}
 
     def _generate_entities(self) -> List[Dict]:
         entities = []
@@ -72,6 +102,9 @@ class TransactionGenerator:
                 "name": name,
                 "type": "business",
                 "branch": random.choice(BRANCHES),
+                "primary_product": _pick_product("business"),
+                "kyc_declared_monthly_volume": round(random.uniform(2000000, 20000000), 2),
+                "kyc_declared_purpose": random.choice(["Business Payment", "Vendor Payment", "Import Payment", "Export Receipt"]),
                 "risk_score": round(random.uniform(0.1, 0.5), 2),
             })
         entity_id += len(BUSINESS_NAMES)
@@ -82,6 +115,9 @@ class TransactionGenerator:
                 "name": name,
                 "type": "individual",
                 "branch": random.choice(BRANCHES),
+                "primary_product": _pick_product("individual"),
+                "kyc_declared_monthly_volume": round(random.uniform(50000, 500000), 2),
+                "kyc_declared_purpose": random.choice(["Salary", "Rent Payment", "Utility Payment", "Investment"]),
                 "risk_score": round(random.uniform(0.05, 0.3), 2),
             })
         entity_id += len(INDIVIDUAL_NAMES)
@@ -97,6 +133,9 @@ class TransactionGenerator:
                 "name": name,
                 "type": "shell_company",
                 "branch": random.choice(BRANCHES),
+                "primary_product": _pick_product("shell_company"),
+                "kyc_declared_monthly_volume": round(random.uniform(100000, 1000000), 2),
+                "kyc_declared_purpose": random.choice(["Consulting Fee", "Business Payment"]),
                 "risk_score": round(random.uniform(0.6, 0.95), 2),
             })
         return entities
@@ -109,6 +148,34 @@ class TransactionGenerator:
         random_seconds = random.randint(0, int(delta.total_seconds()))
         return start + timedelta(seconds=random_seconds)
 
+    def _build_txn(self, sender: Dict, receiver: Dict, amount: float,
+                   ts: datetime, rail: str, purpose: str,
+                   is_fraud: bool = False, pattern: str = "none",
+                   case_id: str = "") -> Dict:
+        channel = _pick_channel(rail, sender["type"])
+        return {
+            "transaction_id": f"TXN{random.randint(100000, 999999)}",
+            "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
+            "sender_id": sender["entity_id"],
+            "sender_name": sender["name"],
+            "sender_type": sender["type"],
+            "sender_branch": sender["branch"],
+            "sender_product": sender["primary_product"],
+            "receiver_id": receiver["entity_id"],
+            "receiver_name": receiver["name"],
+            "receiver_type": receiver["type"],
+            "receiver_branch": receiver["branch"],
+            "receiver_product": receiver["primary_product"],
+            "amount": amount,
+            "currency": "INR",
+            "transaction_type": rail,
+            "channel": channel,
+            "purpose_code": purpose,
+            "is_fraud": is_fraud,
+            "fraud_pattern": pattern,
+            "fraud_case_id": case_id,
+        }
+
     def generate_normal_transactions(self, n: int = 2000,
                                       start_date: str = "2025-01-01",
                                       end_date: str = "2025-03-31") -> pd.DataFrame:
@@ -116,35 +183,34 @@ class TransactionGenerator:
         end = datetime.strptime(end_date, "%Y-%m-%d")
         transactions = []
 
+        # Normal transactions tend to flow business → individual (salary), individual → business (payments)
         for _ in range(n):
-            sender = random.choice(self.entities)
-            receiver = random.choice(self.entities)
-            while receiver["entity_id"] == sender["entity_id"]:
-                receiver = random.choice(self.entities)
+            r = random.random()
+            if r < 0.4:
+                # Business pays individual (salary, refund)
+                sender = random.choice(self._get_entities_by_type("business"))
+                receiver = random.choice(self._get_entities_by_type("individual"))
+                purpose = random.choice(["Salary", "Vendor Payment", "Consulting Fee"])
+                amount = round(random.lognormvariate(np.log(40000), 1.0), 2)
+            elif r < 0.7:
+                # Individual pays business (purchase, rent)
+                sender = random.choice(self._get_entities_by_type("individual"))
+                receiver = random.choice(self._get_entities_by_type("business"))
+                purpose = random.choice(["Vendor Payment", "Rent Payment", "Utility Payment", "Tax Payment", "Insurance Premium"])
+                amount = round(random.lognormvariate(np.log(25000), 1.2), 2)
+            else:
+                # Business pays business (vendor)
+                sender = random.choice(self._get_entities_by_type("business"))
+                receiver = random.choice(self._get_entities_by_type("business"))
+                while receiver["entity_id"] == sender["entity_id"]:
+                    receiver = random.choice(self._get_entities_by_type("business"))
+                purpose = random.choice(["Vendor Payment", "Business Payment", "Import Payment", "Export Receipt"])
+                amount = round(random.lognormvariate(np.log(150000), 1.4), 2)
 
-            amount = round(random.lognormvariate(np.log(50000), 1.5), 2)
-            amount = min(amount, 5000000)
-
+            amount = min(max(amount, 100), 5000000)
             ts = self._random_datetime(start, end)
-
-            transactions.append({
-                "transaction_id": f"TXN{random.randint(100000, 999999)}",
-                "timestamp": ts.strftime("%Y-%m-%d %H:%M:%S"),
-                "sender_id": sender["entity_id"],
-                "sender_name": sender["name"],
-                "sender_type": sender["type"],
-                "sender_branch": sender["branch"],
-                "receiver_id": receiver["entity_id"],
-                "receiver_name": receiver["name"],
-                "receiver_type": receiver["type"],
-                "receiver_branch": receiver["branch"],
-                "amount": amount,
-                "currency": "INR",
-                "transaction_type": random.choice(TRANSACTION_TYPES),
-                "purpose_code": random.choice(PURPOSE_CODES),
-                "is_fraud": False,
-                "fraud_pattern": "none",
-            })
+            rail = random.choices(PAYMENT_RAILS, weights=[0.25, 0.10, 0.20, 0.40, 0.05])[0]
+            transactions.append(self._build_txn(sender, receiver, amount, ts, rail, purpose))
 
         return pd.DataFrame(transactions)
 
@@ -174,60 +240,24 @@ class TransactionGenerator:
                 "description": f"Circular flow of ₹{base_amount:,.0f} through {ring_size} accounts",
             })
 
-            for step in range(ring_size):
-                sender = participants[step]
-                receiver = participants[(step + 1) % ring_size]
-                step_time = ring_start + timedelta(hours=random.uniform(1, 24))
-                variation = random.uniform(0.95, 1.05)
-                amount = round(base_amount * variation, 2)
-
-                transactions.append({
-                    "transaction_id": f"TXN{random.randint(100000, 999999)}",
-                    "timestamp": step_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "sender_id": sender["entity_id"],
-                    "sender_name": sender["name"],
-                    "sender_type": sender["type"],
-                    "sender_branch": sender["branch"],
-                    "receiver_id": receiver["entity_id"],
-                    "receiver_name": receiver["name"],
-                    "receiver_type": receiver["type"],
-                    "receiver_branch": receiver["branch"],
-                    "amount": amount,
-                    "currency": "INR",
-                    "transaction_type": random.choice(["NEFT", "RTGS", "IMPS"]),
-                    "purpose_code": random.choice(["Business Payment", "Consulting Fee", "Vendor Payment"]),
-                    "is_fraud": True,
-                    "fraud_pattern": "circular_transaction",
-                    "fraud_case_id": case_id,
-                })
-
-            # Add a second round with slightly different amounts
-            for step in range(ring_size):
-                sender = participants[step]
-                receiver = participants[(step + 1) % ring_size]
-                step_time = ring_start + timedelta(days=random.uniform(2, 5), hours=random.uniform(1, 24))
-                variation = random.uniform(0.90, 1.10)
-                amount = round(base_amount * variation, 2)
-
-                transactions.append({
-                    "transaction_id": f"TXN{random.randint(100000, 999999)}",
-                    "timestamp": step_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "sender_id": sender["entity_id"],
-                    "sender_name": sender["name"],
-                    "sender_type": sender["type"],
-                    "sender_branch": sender["branch"],
-                    "receiver_id": receiver["entity_id"],
-                    "receiver_name": receiver["name"],
-                    "receiver_type": receiver["type"],
-                    "receiver_branch": receiver["branch"],
-                    "amount": amount,
-                    "currency": "INR",
-                    "transaction_type": random.choice(["NEFT", "RTGS", "IMPS"]),
-                    "purpose_code": random.choice(["Business Payment", "Consulting Fee", "Vendor Payment"]),
-                    "is_fraud": True,
-                    "fraud_pattern": "circular_transaction",
-                    "fraud_case_id": case_id,
-                })
+            # Two rounds — second one slightly different to look natural
+            for round_num in range(2):
+                for step in range(ring_size):
+                    sender = participants[step]
+                    receiver = participants[(step + 1) % ring_size]
+                    if round_num == 0:
+                        step_time = ring_start + timedelta(hours=random.uniform(1, 24) * (step + 1))
+                        variation = random.uniform(0.95, 1.05)
+                    else:
+                        step_time = ring_start + timedelta(days=random.uniform(2, 5), hours=random.uniform(1, 24))
+                        variation = random.uniform(0.90, 1.10)
+                    amount = round(base_amount * variation, 2)
+                    rail = random.choice(["NEFT", "RTGS", "IMPS"])
+                    purpose = random.choice(["Business Payment", "Consulting Fee", "Vendor Payment"])
+                    transactions.append(self._build_txn(
+                        sender, receiver, amount, step_time, rail, purpose,
+                        is_fraud=True, pattern="circular_transaction", case_id=case_id,
+                    ))
 
         return pd.DataFrame(transactions)
 
@@ -245,10 +275,8 @@ class TransactionGenerator:
         for chain_idx in range(n_chains):
             chain_length = random.randint(4, 7)
             source = random.choice(individuals + businesses)
-            # Build a chain mixing businesses and shell companies
             intermediaries = random.sample(businesses + shells, min(chain_length - 1, len(businesses + shells)))
             final_dest = random.choice(individuals)
-
             chain = [source] + intermediaries + [final_dest]
             base_amount = round(random.uniform(2000000, 10000000), 2)
             chain_start = self._random_datetime(start, end - timedelta(days=3))
@@ -264,40 +292,27 @@ class TransactionGenerator:
             })
 
             current_amount = base_amount
+            current_ts = chain_start
             for step in range(len(chain) - 1):
                 sender = chain[step]
                 receiver = chain[step + 1]
                 # Amount slightly decreases at each step (fees, splitting)
                 current_amount = round(current_amount * random.uniform(0.88, 0.98), 2)
-                step_time = chain_start + timedelta(minutes=random.uniform(5, 120))
-
-                transactions.append({
-                    "transaction_id": f"TXN{random.randint(100000, 999999)}",
-                    "timestamp": step_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "sender_id": sender["entity_id"],
-                    "sender_name": sender["name"],
-                    "sender_type": sender["type"],
-                    "sender_branch": sender["branch"],
-                    "receiver_id": receiver["entity_id"],
-                    "receiver_name": receiver["name"],
-                    "receiver_type": receiver["type"],
-                    "receiver_branch": receiver["branch"],
-                    "amount": current_amount,
-                    "currency": "INR",
-                    "transaction_type": random.choice(["NEFT", "RTGS", "Wire Transfer"]),
-                    "purpose_code": random.choice(["Consulting Fee", "Business Payment", "Vendor Payment", "Import Payment"]),
-                    "is_fraud": True,
-                    "fraud_pattern": "rapid_layering",
-                    "fraud_case_id": case_id,
-                })
-                chain_start = step_time
+                step_time = current_ts + timedelta(minutes=random.uniform(5, 120))
+                rail = random.choice(["NEFT", "RTGS", "Wire Transfer"])
+                purpose = random.choice(["Consulting Fee", "Business Payment", "Vendor Payment", "Import Payment"])
+                transactions.append(self._build_txn(
+                    sender, receiver, current_amount, step_time, rail, purpose,
+                    is_fraud=True, pattern="rapid_layering", case_id=case_id,
+                ))
+                current_ts = step_time
 
         return pd.DataFrame(transactions)
 
     def generate_smurfing_patterns(self, n_patterns: int = 4,
                                     start_date: str = "2025-02-01",
                                     end_date: str = "2025-03-15") -> pd.DataFrame:
-        """Generate smurfing/structuring: large amounts broken into smaller transactions just below reporting thresholds."""
+        """Large amounts broken into smaller transactions just below reporting thresholds."""
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
         transactions = []
@@ -308,18 +323,15 @@ class TransactionGenerator:
             source = random.choice(individuals)
             target = random.choice(businesses)
             total_amount = round(random.uniform(5000000, 20000000), 2)
-            # Split into transactions just below ₹200,000 (common reporting threshold)
             n_splits = int(total_amount / random.uniform(180000, 199000)) + 1
             split_amount = round(total_amount / n_splits, 2)
 
-            # Use multiple mules (smurfs)
             mules = random.sample(individuals, min(n_splits, len(individuals)))
             if len(mules) < n_splits:
                 mules = mules * ((n_splits // len(mules)) + 1)
             mules = mules[:n_splits]
 
             pattern_start = self._random_datetime(start, end - timedelta(days=5))
-
             case_id = f"SMURF_{pattern_idx + 1:03d}"
             self.fraud_cases.append({
                 "case_id": case_id,
@@ -331,62 +343,33 @@ class TransactionGenerator:
             })
 
             for i, mule in enumerate(mules):
-                step_time = pattern_start + timedelta(
-                    hours=random.uniform(1, 48) * (i + 1)
-                )
+                step_time = pattern_start + timedelta(hours=random.uniform(1, 48) * (i + 1))
                 variation = random.uniform(0.95, 1.05)
-                amount = round(split_amount * variation, 2)
-                amount = min(amount, 199999)  # Keep below threshold
-
-                # Source -> Mule
-                transactions.append({
-                    "transaction_id": f"TXN{random.randint(100000, 999999)}",
-                    "timestamp": step_time.strftime("%Y-%m-%d %H:%M:%S"),
-                    "sender_id": source["entity_id"],
-                    "sender_name": source["name"],
-                    "sender_type": source["type"],
-                    "sender_branch": source["branch"],
-                    "receiver_id": mule["entity_id"],
-                    "receiver_name": mule["name"],
-                    "receiver_type": mule["type"],
-                    "receiver_branch": mule["branch"],
-                    "amount": amount,
-                    "currency": "INR",
-                    "transaction_type": random.choice(["UPI", "IMPS", "NEFT"]),
-                    "purpose_code": random.choice(["Business Payment", "Vendor Payment"]),
-                    "is_fraud": True,
-                    "fraud_pattern": "smurfing",
-                    "fraud_case_id": case_id,
-                })
-
-                # Mule -> Target
+                amount = min(round(split_amount * variation, 2), 199999)
+                # Smurfing tends to use UPI/IMPS for speed and to avoid branch scrutiny
+                rail = random.choice(["UPI", "IMPS", "NEFT"])
+                purpose = random.choice(["Business Payment", "Vendor Payment"])
+                # Source → Mule
+                transactions.append(self._build_txn(
+                    source, mule, amount, step_time, rail, purpose,
+                    is_fraud=True, pattern="smurfing", case_id=case_id,
+                ))
+                # Mule → Target
                 step_time2 = step_time + timedelta(minutes=random.uniform(10, 120))
-                transactions.append({
-                    "transaction_id": f"TXN{random.randint(100000, 999999)}",
-                    "timestamp": step_time2.strftime("%Y-%m-%d %H:%M:%S"),
-                    "sender_id": mule["entity_id"],
-                    "sender_name": mule["name"],
-                    "sender_type": mule["type"],
-                    "sender_branch": mule["branch"],
-                    "receiver_id": target["entity_id"],
-                    "receiver_name": target["name"],
-                    "receiver_type": target["type"],
-                    "receiver_branch": target["branch"],
-                    "amount": round(amount * random.uniform(0.90, 0.99), 2),
-                    "currency": "INR",
-                    "transaction_type": random.choice(["UPI", "IMPS", "NEFT"]),
-                    "purpose_code": random.choice(["Business Payment", "Consulting Fee"]),
-                    "is_fraud": True,
-                    "fraud_pattern": "smurfing",
-                    "fraud_case_id": case_id,
-                })
+                rail2 = random.choice(["UPI", "IMPS", "NEFT"])
+                transactions.append(self._build_txn(
+                    mule, target, round(amount * random.uniform(0.90, 0.99), 2),
+                    step_time2, rail2,
+                    random.choice(["Business Payment", "Consulting Fee"]),
+                    is_fraud=True, pattern="smurfing", case_id=case_id,
+                ))
 
         return pd.DataFrame(transactions)
 
     def generate_shell_funnel_patterns(self, n_patterns: int = 3,
                                         start_date: str = "2025-01-25",
                                         end_date: str = "2025-03-25") -> pd.DataFrame:
-        """Generate shell company funnel patterns: multiple sources feed into shell companies."""
+        """Multiple sources feed into shell companies."""
         start = datetime.strptime(start_date, "%Y-%m-%d")
         end = datetime.strptime(end_date, "%Y-%m-%d")
         transactions = []
@@ -399,9 +382,7 @@ class TransactionGenerator:
             n_sources = random.randint(3, 6)
             sources = random.sample(businesses + individuals, n_sources)
             total_funneled = round(random.uniform(10000000, 50000000), 2)
-
             pattern_start = self._random_datetime(start, end - timedelta(days=10))
-
             case_id = f"FUNNEL_{pattern_idx + 1:03d}"
             self.fraud_cases.append({
                 "case_id": case_id,
@@ -412,34 +393,71 @@ class TransactionGenerator:
                 "description": f"₹{total_funneled:,.0f} funneled from {n_sources} entities into shell company '{shell['name']}'",
             })
 
-            for i, source in enumerate(sources):
+            for source in sources:
                 n_txns = random.randint(2, 5)
-                for j in range(n_txns):
+                for _ in range(n_txns):
                     step_time = pattern_start + timedelta(
                         days=random.uniform(0, 10),
-                        hours=random.uniform(8, 20)
+                        hours=random.uniform(8, 20),
                     )
                     amount = round(total_funneled / (n_sources * n_txns) * random.uniform(0.8, 1.2), 2)
+                    rail = random.choice(["NEFT", "RTGS", "Wire Transfer"])
+                    purpose = random.choice(["Consulting Fee", "Vendor Payment", "Business Payment"])
+                    transactions.append(self._build_txn(
+                        source, shell, amount, step_time, rail, purpose,
+                        is_fraud=True, pattern="shell_funnel", case_id=case_id,
+                    ))
 
-                    transactions.append({
-                        "transaction_id": f"TXN{random.randint(100000, 999999)}",
-                        "timestamp": step_time.strftime("%Y-%m-%d %H:%M:%S"),
-                        "sender_id": source["entity_id"],
-                        "sender_name": source["name"],
-                        "sender_type": source["type"],
-                        "sender_branch": source["branch"],
-                        "receiver_id": shell["entity_id"],
-                        "receiver_name": shell["name"],
-                        "receiver_type": shell["type"],
-                        "receiver_branch": shell["branch"],
-                        "amount": amount,
-                        "currency": "INR",
-                        "transaction_type": random.choice(["NEFT", "RTGS", "Wire Transfer"]),
-                        "purpose_code": random.choice(["Consulting Fee", "Vendor Payment", "Business Payment"]),
-                        "is_fraud": True,
-                        "fraud_pattern": "shell_funnel",
-                        "fraud_case_id": case_id,
-                    })
+        return pd.DataFrame(transactions)
+
+    def generate_dormant_activation_pattern(self, n_patterns: int = 3,
+                                             start_date: str = "2025-01-01",
+                                             end_date: str = "2025-03-31") -> pd.DataFrame:
+        """Pick a few entities, give them an initial period of low activity then a sudden spike.
+
+        This adds a per-account time signature that the dormant detector can pick up.
+        """
+        start = datetime.strptime(start_date, "%Y-%m-%d")
+        end = datetime.strptime(end_date, "%Y-%m-%d")
+        transactions = []
+        individuals = self._get_entities_by_type("individual")
+        businesses = self._get_entities_by_type("business")
+
+        for idx in range(n_patterns):
+            target = random.choice(individuals)
+            counterparty = random.choice(businesses)
+            case_id = f"DORM_{idx + 1:03d}"
+
+            # 1–3 small txns at the start of the window
+            for _ in range(random.randint(1, 3)):
+                ts = start + timedelta(days=random.uniform(0, 7), hours=random.uniform(8, 20))
+                small = round(random.uniform(2000, 25000), 2)
+                rail = random.choice(["UPI", "IMPS", "NEFT"])
+                # Not flagged as fraud — just legitimate prior activity
+                transactions.append(self._build_txn(
+                    counterparty, target, small, ts, rail, "Salary",
+                    is_fraud=False, pattern="none", case_id="",
+                ))
+
+            # Big spike near end of window — flagged as fraud
+            spike_count = random.randint(3, 5)
+            spike_start = end - timedelta(days=random.randint(3, 10))
+            for j in range(spike_count):
+                ts = spike_start + timedelta(hours=random.uniform(1, 24) * (j + 1))
+                big = round(random.uniform(800000, 3000000), 2)
+                rail = random.choice(["RTGS", "NEFT"])
+                transactions.append(self._build_txn(
+                    target, counterparty, big, ts, rail, "Investment",
+                    is_fraud=True, pattern="dormant_activation", case_id=case_id,
+                ))
+
+            self.fraud_cases.append({
+                "case_id": case_id,
+                "pattern": "dormant_activation",
+                "entities": [target["entity_id"]],
+                "total_amount": 0,
+                "description": f"Account '{target['name']}' dormant then sudden high-value spike",
+            })
 
         return pd.DataFrame(transactions)
 
@@ -460,11 +478,14 @@ class TransactionGenerator:
         print("Generating shell company funnel patterns...")
         funnels = self.generate_shell_funnel_patterns(n_patterns=3)
 
-        all_data = pd.concat([normal, circular, layering, smurfing, funnels],
-                             ignore_index=True)
-        all_data = all_data.sort_values("timestamp").reset_index(drop=True)
+        print("Generating dormant activation patterns...")
+        dormant = self.generate_dormant_activation_pattern(n_patterns=3)
 
-        # Regenerate unique transaction IDs
+        all_data = pd.concat(
+            [normal, circular, layering, smurfing, funnels, dormant],
+            ignore_index=True,
+        )
+        all_data = all_data.sort_values("timestamp").reset_index(drop=True)
         all_data["transaction_id"] = [f"TXN{i:07d}" for i in range(len(all_data))]
 
         print(f"\nGenerated {len(all_data)} total transactions")
@@ -473,13 +494,14 @@ class TransactionGenerator:
         print(f"  Layering: {len(layering)}")
         print(f"  Smurfing: {len(smurfing)}")
         print(f"  Shell Funnel: {len(funnels)}")
+        print(f"  Dormant Activation: {len(dormant)}")
         print(f"  Fraud cases: {len(self.fraud_cases)}")
 
         return all_data, self.fraud_cases
 
 
 def save_data(df: pd.DataFrame, fraud_cases: List[Dict],
-              data_dir: str = "data"):
+              data_dir: str = "data", entities: List[Dict] = None):
     """Save generated data to files."""
     import os
     os.makedirs(data_dir, exist_ok=True)
@@ -490,18 +512,22 @@ def save_data(df: pd.DataFrame, fraud_cases: List[Dict],
     with open(os.path.join(data_dir, "fraud_cases.json"), "w") as f:
         json.dump(fraud_cases, f, indent=2)
 
-    with open(os.path.join(data_dir, "entities.json"), "w") as f:
+    # Caller may pass entities to avoid re-seeding the generator
+    if entities is None:
         gen = TransactionGenerator()
-        json.dump(gen.entities, f, indent=2)
+        entities = gen.entities
+
+    with open(os.path.join(data_dir, "entities.json"), "w") as f:
+        json.dump(entities, f, indent=2)
 
     print(f"\nData saved to {data_dir}/")
     print(f"  transactions.csv ({len(df)} rows)")
     print(f"  fraud_cases.json ({len(fraud_cases)} cases)")
-    print(f"  entities.json ({len(gen.entities)} entities)")
+    print(f"  entities.json ({len(entities)} entities)")
 
 
 if __name__ == "__main__":
     generator = TransactionGenerator(seed=42)
     df, fraud_cases = generator.generate_all_data()
-    save_data(df, fraud_cases)
-    print("\n✓ Data generation complete!")
+    save_data(df, fraud_cases, entities=generator.entities)
+    print("\n[OK] Data generation complete!")

@@ -21,38 +21,56 @@ class FundFlowGraph:
     def build_graph(self, df: pd.DataFrame) -> nx.DiGraph:
         """Build directed weighted graph from transaction DataFrame."""
         self.graph = nx.DiGraph()
+        has_product = "sender_product" in df.columns
+        has_channel = "channel" in df.columns
 
-        # Add nodes with attributes
+        # Add nodes with attributes (use most common product per entity if present)
         for _, row in df.iterrows():
             sender_attrs = {
                 "name": row["sender_name"],
                 "type": row["sender_type"],
                 "branch": row["sender_branch"],
             }
+            if has_product:
+                sender_attrs["product"] = row["sender_product"]
             receiver_attrs = {
                 "name": row["receiver_name"],
                 "type": row["receiver_type"],
                 "branch": row["receiver_branch"],
             }
+            if has_product:
+                receiver_attrs["product"] = row["receiver_product"]
             self.graph.add_node(row["sender_id"], **sender_attrs)
             self.graph.add_node(row["receiver_id"], **receiver_attrs)
 
         # Add edges with aggregated weights
-        edge_data = df.groupby(["sender_id", "receiver_id"]).agg(
-            total_amount=("amount", "sum"),
-            transaction_count=("amount", "count"),
-            avg_amount=("amount", "mean"),
-            min_amount=("amount", "min"),
-            max_amount=("amount", "max"),
-            std_amount=("amount", "std"),
-            first_seen=("timestamp", "min"),
-            last_seen=("timestamp", "max"),
-            fraud_count=("is_fraud", "sum"),
-        ).reset_index()
-
+        agg_dict = {
+            "total_amount": ("amount", "sum"),
+            "transaction_count": ("amount", "count"),
+            "avg_amount": ("amount", "mean"),
+            "min_amount": ("amount", "min"),
+            "max_amount": ("amount", "max"),
+            "std_amount": ("amount", "std"),
+            "first_seen": ("timestamp", "min"),
+            "last_seen": ("timestamp", "max"),
+            "fraud_count": ("is_fraud", "sum"),
+        }
+        edge_data = df.groupby(["sender_id", "receiver_id"]).agg(**agg_dict).reset_index()
         edge_data["std_amount"] = edge_data["std_amount"].fillna(0)
 
+        # Channel/rail/product mix per edge (computed separately to keep groupby simple)
+        rail_mix = {}
+        channel_mix = {}
+        if has_channel:
+            for (s, r), sub in df.groupby(["sender_id", "receiver_id"]):
+                rail_mix[(s, r)] = sub["transaction_type"].value_counts().to_dict()
+                channel_mix[(s, r)] = sub["channel"].value_counts().to_dict()
+        else:
+            for (s, r), sub in df.groupby(["sender_id", "receiver_id"]):
+                rail_mix[(s, r)] = sub["transaction_type"].value_counts().to_dict()
+
         for _, row in edge_data.iterrows():
+            key = (row["sender_id"], row["receiver_id"])
             self.graph.add_edge(
                 row["sender_id"], row["receiver_id"],
                 total_amount=row["total_amount"],
@@ -64,6 +82,8 @@ class FundFlowGraph:
                 first_seen=row["first_seen"],
                 last_seen=row["last_seen"],
                 fraud_count=int(row["fraud_count"]),
+                rail_mix=rail_mix.get(key, {}),
+                channel_mix=channel_mix.get(key, {}),
             )
 
         return self.graph

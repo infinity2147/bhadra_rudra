@@ -16,13 +16,16 @@ function formatCurrency(value) {
 }
 
 function RiskScoreBar({ score }) {
-  const color = score >= 80 ? 'bg-red-500' : score >= 60 ? 'bg-orange-500' : score >= 40 ? 'bg-yellow-500' : 'bg-green-500';
+  // score from API is 0-1; normalise to a 0-100 width.
+  const value = Number(score ?? 0);
+  const pct = value <= 1 ? Math.round(value * 100) : Math.round(value);
+  const color = pct >= 70 ? 'bg-red-500' : pct >= 50 ? 'bg-orange-500' : pct >= 30 ? 'bg-yellow-500' : 'bg-green-500';
   return (
     <div className="flex items-center gap-2">
       <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
-        <div className={`h-full rounded-full ${color}`} style={{ width: `${score}%` }} />
+        <div className={`h-full rounded-full ${color}`} style={{ width: `${pct}%` }} />
       </div>
-      <span className="text-xs font-medium text-gray-600">{score}</span>
+      <span className="text-xs font-medium text-gray-600 tabular-nums">{pct}</span>
     </div>
   );
 }
@@ -65,12 +68,12 @@ export default function Entities() {
     debounceRef.current = setTimeout(() => setSearch(e.target.value), 300);
   }
 
-  const transactions = detail?.transactions ?? [];
+  const transactions = detail?.transactionHistory ?? detail?.transactions ?? [];
   const chartData = detail
     ? [
-        { name: 'Sent', value: detail.total_sent ?? 0, fill: '#ef4444' },
-        { name: 'Received', value: detail.total_received ?? 0, fill: '#22c55e' },
-        { name: 'Net Flow', value: detail.net_flow ?? 0, fill: '#6366f1' },
+        { name: 'Sent', value: detail.sentVolume ?? detail.total_sent ?? 0, fill: '#ef4444' },
+        { name: 'Received', value: detail.receivedVolume ?? detail.total_received ?? 0, fill: '#22c55e' },
+        { name: 'Net Flow', value: detail.netFlow ?? detail.net_flow ?? 0, fill: '#6366f1' },
       ]
     : [];
 
@@ -172,19 +175,19 @@ export default function Entities() {
                 <div className="grid grid-cols-2 gap-3">
                   <div className="rounded-xl p-4 bg-indigo-50 text-indigo-700">
                     <p className="text-xs font-medium uppercase tracking-wide opacity-70">Risk Score</p>
-                    <p className="text-2xl font-bold mt-1">{detail.risk_score ?? '--'}</p>
+                    <p className="text-2xl font-bold mt-1">{detail.riskScore != null ? Number(detail.riskScore).toFixed(3) : '--'}</p>
                   </div>
                   <div className="rounded-xl p-4 bg-blue-50 text-blue-700">
                     <p className="text-xs font-medium uppercase tracking-wide opacity-70">Total Transactions</p>
-                    <p className="text-2xl font-bold mt-1">{detail.total_transactions ?? '--'}</p>
+                    <p className="text-2xl font-bold mt-1">{detail.totalTransactions ?? '--'}</p>
                   </div>
                   <div className="rounded-xl p-4 bg-red-50 text-red-700">
                     <p className="text-xs font-medium uppercase tracking-wide opacity-70">Fraud Transactions</p>
-                    <p className="text-2xl font-bold mt-1">{detail.fraud_transactions ?? '--'}</p>
+                    <p className="text-2xl font-bold mt-1">{detail.fraudTransactions ?? '--'}</p>
                   </div>
                   <div className="rounded-xl p-4 bg-green-50 text-green-700">
                     <p className="text-xs font-medium uppercase tracking-wide opacity-70">Net Flow</p>
-                    <p className="text-2xl font-bold mt-1">{formatCurrency(detail.net_flow)}</p>
+                    <p className="text-2xl font-bold mt-1">{formatCurrency(detail.netFlow ?? detail.net_flow)}</p>
                   </div>
                 </div>
 
@@ -229,10 +232,10 @@ export default function Entities() {
                         ) : transactions.map((tx, i) => (
                           <tr key={i} className={`border-t border-gray-100 ${tx.is_fraud ? 'bg-red-50/50' : ''}`}>
                             <td className="px-3 py-2 text-gray-500 whitespace-nowrap">{tx.timestamp ? new Date(tx.timestamp).toLocaleString('en-IN') : '--'}</td>
-                            <td className="px-3 py-2">{tx.sender ?? '--'}</td>
-                            <td className="px-3 py-2">{tx.receiver ?? '--'}</td>
+                            <td className="px-3 py-2">{tx.sender_name ?? tx.sender ?? '--'}</td>
+                            <td className="px-3 py-2">{tx.receiver_name ?? tx.receiver ?? '--'}</td>
                             <td className="px-3 py-2 text-right font-medium">{formatCurrency(tx.amount)}</td>
-                            <td className="px-3 py-2 text-gray-600 capitalize">{tx.type ?? '--'}</td>
+                            <td className="px-3 py-2 text-gray-600 capitalize">{tx.transaction_type ?? tx.type ?? '--'}</td>
                             <td className="px-3 py-2 text-center">
                               {tx.is_fraud
                                 ? <span className="text-red-600 font-semibold">Yes</span>

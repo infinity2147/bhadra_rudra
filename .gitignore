@@ -8,3 +8,14 @@ dist/
 *.egg-info/
 .vite/
 *.local
+
+# Generated pipeline outputs — regenerate via `python src/run_pipeline.py`
+data/*
+!data/README.md
+!data/real/
+data/real/*/*.csv
+data/real/*/*.parquet
+
+# Editor
+.idea/
+.vscode/

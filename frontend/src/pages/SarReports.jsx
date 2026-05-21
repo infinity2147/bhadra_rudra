@@ -132,7 +132,7 @@ export default function SarReports() {
                 </div>
                 <div>
                   <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Confidence</p>
-                  <p className="text-sm font-semibold mt-1">{report.confidence != null ? `${(report.confidence * 100).toFixed(1)}%` : '--'}</p>
+                  <p className="text-sm font-semibold mt-1">{report.confidence != null ? `${Number(report.confidence).toFixed(1)}%` : '--'}</p>
                 </div>
                 <div>
                   <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Total Flow</p>

@@ -171,24 +171,24 @@ function TransactionTable({ transactions }) {
         </thead>
         <tbody className="divide-y divide-gray-100">
           {transactions.map((tx, i) => (
-            <tr key={tx.case_id ?? tx.id ?? i} className="hover:bg-gray-50">
+            <tr key={tx.fraud_case_id ?? tx.case_id ?? tx.id ?? i} className="hover:bg-gray-50">
               <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
                 {tx.timestamp ?? tx.date ?? '-'}
               </td>
               <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
-                {tx.sender ?? '-'}
+                {tx.sender_name ?? tx.sender ?? '-'}
               </td>
               <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
-                {tx.receiver ?? '-'}
+                {tx.receiver_name ?? tx.receiver ?? '-'}
               </td>
               <td className="px-4 py-3 text-gray-700 text-right whitespace-nowrap font-medium">
                 {tx.amount != null ? formatINR(tx.amount) : '-'}
               </td>
               <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
-                {tx.type ?? tx.transaction_type ?? '-'}
+                {tx.transaction_type ?? tx.type ?? '-'}
               </td>
               <td className="px-4 py-3 text-gray-700 whitespace-nowrap">
-                {tx.case_id ?? tx.caseId ?? '-'}
+                {tx.fraud_case_id ?? tx.case_id ?? '-'}
               </td>
             </tr>
           ))}
