@@ -326,10 +326,14 @@ class TransactionGenerator:
             n_splits = int(total_amount / random.uniform(180000, 199000)) + 1
             split_amount = round(total_amount / n_splits, 2)
 
-            mules = random.sample(individuals, min(n_splits, len(individuals)))
-            if len(mules) < n_splits:
-                mules = mules * ((n_splits // len(mules)) + 1)
-            mules = mules[:n_splits]
+            # Mules must exclude the source and target (no self-loops).
+            available_mules = [m for m in individuals
+                                 if m["entity_id"] != source["entity_id"]
+                                 and m["entity_id"] != target["entity_id"]]
+            mules = random.sample(available_mules, min(n_splits, len(available_mules)))
+            if len(mules) < n_splits and mules:
+                # Repeat the pool, still skipping source/target
+                mules = (mules * ((n_splits // len(mules)) + 1))[:n_splits]
 
             pattern_start = self._random_datetime(start, end - timedelta(days=5))
             case_id = f"SMURF_{pattern_idx + 1:03d}"

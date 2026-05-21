@@ -332,64 +332,93 @@ class LLMCopilot:
             return self._fallback_response(user_message, str(e))
 
     def _call_gemini(self, user_message: str, tools: List[Dict]) -> Dict:
-        """Call Gemini API with tool-calling."""
+        """Call Gemini API with tool-calling, sending tool results back for synthesis.
+
+        The protocol is: send user message → Gemini may emit function_call(s) →
+        we execute them locally → send the function responses back → Gemini
+        produces a final natural-language answer. Up to 3 rounds of tool calls
+        to support multi-step investigations like "trace funds for X, then
+        explain the alerts you find".
+        """
         import google.generativeai as genai
+        from google.generativeai.types import FunctionDeclaration, Tool
 
         genai.configure(api_key=self.api_key)
 
         system_prompt = (
             "You are RUDRA, an AI fraud investigation copilot for banking. "
             "You have access to a live fund flow graph with transaction data. "
-            "Answer investigator queries by calling the appropriate tools. "
-            "Always provide clear, actionable insights. Use Indian Rupee (₹) currency. "
-            "When explaining fraud patterns, be specific about amounts, entities, and recommendations. "
-            "Reference RBI guidelines and compliance requirements where applicable."
+            "When the investigator asks something you can answer by calling a tool, "
+            "call the appropriate tool. After receiving tool results, synthesise "
+            "a clear actionable answer. Use Indian Rupee (₹). Reference RBI / PMLA "
+            "guidelines where appropriate. Be concise — investigators are busy."
         )
+
+        # Wrap our tools into Gemini's typed format
+        tool_decls = [
+            FunctionDeclaration(name=t["name"], description=t["description"],
+                                  parameters=t["parameters"])
+            for t in tools
+        ]
+        gemini_tools = [Tool(function_declarations=tool_decls)]
 
         model = genai.GenerativeModel(
             model_name="gemini-2.0-flash",
             system_instruction=system_prompt,
-            tools=tools,
+            tools=gemini_tools,
+        )
+        chat = model.start_chat(history=[])
+        context = (
+            f"Graph snapshot: {self.graph.number_of_nodes()} entities, "
+            f"{self.graph.number_of_edges()} connections, "
+            f"{len(self.alerts)} active alerts, {len(self.fraud_cases)} known fraud cases.\n\n"
+            f"Investigator query: {user_message}"
         )
 
-        chat = model.start_chat(history=[])
-
-        # Add context from conversation history
-        context = f"Current graph has {self.graph.number_of_nodes()} entities and {self.graph.number_of_edges()} connections. "
-        context += f"There are {len(self.alerts)} active alerts and {len(self.fraud_cases)} known fraud cases.\n\n"
-        context += f"Investigator query: {user_message}"
-
         response = chat.send_message(context)
-
-        # Process tool calls if any
-        if response.candidates and response.candidates[0].content.parts:
-            tool_results = []
+        tool_calls: List[Dict] = []
+        max_rounds = 3
+        for _ in range(max_rounds):
+            if not (response.candidates and response.candidates[0].content.parts):
+                break
+            calls_this_turn = []
             for part in response.candidates[0].content.parts:
-                if hasattr(part, "function_call") and part.function_call:
-                    result = self._execute_tool(
-                        part.function_call.name,
-                        dict(part.function_call.args) if part.function_call.args else {}
-                    )
-                    tool_results.append({
-                        "tool": part.function_call.name,
-                        "result": result,
-                    })
-                    self.tool_results_log.append(result)
+                fc = getattr(part, "function_call", None)
+                if fc and fc.name:
+                    calls_this_turn.append(fc)
+            if not calls_this_turn:
+                break
+            # Execute every tool call requested this turn
+            function_responses = []
+            for fc in calls_this_turn:
+                args = dict(fc.args) if fc.args else {}
+                result = self._execute_tool(fc.name, args)
+                tool_calls.append({"tool": fc.name, "args": args, "result": result})
+                self.tool_results_log.append(result)
+                function_responses.append({
+                    "function_response": {
+                        "name": fc.name,
+                        "response": result,
+                    },
+                })
+            # Send tool results back for synthesis
+            response = chat.send_message(function_responses)
 
-            if tool_results:
-                # Send tool results back for final answer
-                response_text = str(response.text) if hasattr(response, "text") and response.text else ""
-                return {
-                    "response": response_text or self._summarize_tool_results(tool_results),
-                    "tool_calls": tool_results,
-                    "source": "gemini",
-                }
+        final_text = ""
+        try:
+            final_text = response.text or ""
+        except Exception:
+            # When the response is purely a function call (no text part)
+            final_text = ""
+        if not final_text and tool_calls:
+            final_text = self._summarize_tool_results(tool_calls)
+        elif not final_text:
+            final_text = self._generate_local_response(user_message)
 
-        response_text = response.text if hasattr(response, "text") else ""
         return {
-            "response": response_text or self._generate_local_response(user_message),
-            "tool_calls": [],
-            "source": "gemini",
+            "response": final_text,
+            "tool_calls": tool_calls,
+            "source": "gemini" if tool_calls else "gemini_textonly",
         }
 
     def _get_tool_definitions(self) -> List[Dict]:

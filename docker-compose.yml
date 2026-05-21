@@ -1,0 +1,44 @@
+version: '3.9'
+
+# RUDRA — one-command local stack
+#
+#   docker compose up
+#
+# Backend  → http://localhost:8000
+# Frontend → http://localhost:5173
+#
+# To regenerate data inside the running backend container:
+#   docker compose exec backend python src/run_pipeline.py
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    image: rudra-backend:latest
+    container_name: rudra-backend
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+    volumes:
+      # Persist generated data across restarts
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/').read()\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    image: rudra-frontend:latest
+    container_name: rudra-frontend
+    ports:
+      - "5173:80"
+    depends_on:
+      - backend

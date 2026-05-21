@@ -7,7 +7,7 @@ Advanced Fraud Detectors
 import pandas as pd
 import networkx as nx
 import numpy as np
-from typing import Dict, List
+from typing import Dict, List, Optional
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -17,11 +17,13 @@ class DormantActivationDetector:
 
     def __init__(self, graph: nx.DiGraph, transactions: pd.DataFrame,
                  dormant_threshold_days: int = 30,
-                 z_score_threshold: float = 2.5):
+                 z_score_threshold: float = 2.5,
+                 config: Optional[Dict] = None):
         self.graph = graph
         self.transactions = transactions
-        self.dormant_threshold_days = dormant_threshold_days
-        self.z_score_threshold = z_score_threshold
+        cfg = config or {}
+        self.dormant_threshold_days = cfg.get("dormant_threshold_days", dormant_threshold_days)
+        self.z_score_threshold = cfg.get("dormant_z_score_threshold", z_score_threshold)
 
     def detect(self) -> List[Dict]:
         """Find dormant accounts that were suddenly activated with Z-score anomaly."""

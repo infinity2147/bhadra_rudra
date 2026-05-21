@@ -37,12 +37,19 @@ export default function Live() {
         const next = [...stamped.reverse(), ...prev].slice(0, 200);
         return next;
       });
-      setStats(prev => ({
-        total: prev.total + stamped.length,
-        fraud: prev.fraud + stamped.filter(t => t.isFraud).length,
-        volume: prev.volume + stamped.reduce((s, t) => s + (t.amount || 0), 0),
-        fraud_volume: prev.fraud_volume + stamped.filter(t => t.isFraud).reduce((s, t) => s + (t.amount || 0), 0),
-      }));
+      setStats(prev => {
+        const lat = stamped
+          .map(t => t.latency_ms?.total)
+          .filter(v => typeof v === 'number');
+        const newLatSamples = [...(prev.latency_samples || []), ...lat].slice(-500);
+        return {
+          total: prev.total + stamped.length,
+          fraud: prev.fraud + stamped.filter(t => t.isFraud).length,
+          volume: prev.volume + stamped.reduce((s, t) => s + (t.amount || 0), 0),
+          fraud_volume: prev.fraud_volume + stamped.filter(t => t.isFraud).reduce((s, t) => s + (t.amount || 0), 0),
+          latency_samples: newLatSamples,
+        };
+      });
     } catch (e) {
       // swallow; user sees nothing happens
     }
@@ -101,7 +108,7 @@ export default function Live() {
       </div>
 
       {/* KPIs */}
-      <div className="grid grid-cols-4 gap-4">
+      <div className="grid grid-cols-5 gap-4">
         <div className="rounded-xl bg-indigo-50 text-indigo-700 p-4">
           <p className="text-xs font-medium opacity-70 uppercase tracking-wide">Streamed Txns</p>
           <p className="text-2xl font-bold mt-1">{stats.total.toLocaleString('en-IN')}</p>
@@ -117,6 +124,22 @@ export default function Live() {
         <div className="rounded-xl bg-amber-50 text-amber-800 p-4">
           <p className="text-xs font-medium opacity-70 uppercase tracking-wide">Flagged Volume</p>
           <p className="text-2xl font-bold mt-1">{formatINR(stats.fraud_volume)}</p>
+        </div>
+        <div className="rounded-xl bg-emerald-50 text-emerald-700 p-4">
+          <p className="text-xs font-medium opacity-70 uppercase tracking-wide">Per-Txn Latency</p>
+          {(() => {
+            const lats = stats.latency_samples || [];
+            if (lats.length === 0) return <p className="text-xl font-bold mt-1">— ms</p>;
+            const sorted = [...lats].sort((a, b) => a - b);
+            const mean = lats.reduce((s, v) => s + v, 0) / lats.length;
+            const p95 = sorted[Math.floor(0.95 * sorted.length)];
+            return (
+              <>
+                <p className="text-2xl font-bold mt-1">{mean.toFixed(2)} ms</p>
+                <p className="text-[11px] opacity-70 mt-0.5">p95 {p95?.toFixed(2)} ms • n={lats.length}</p>
+              </>
+            );
+          })()}
         </div>
       </div>
 

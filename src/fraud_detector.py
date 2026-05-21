@@ -18,142 +18,154 @@ import json
 
 
 class FraudDetector:
-    def __init__(self, graph: nx.DiGraph):
+    def __init__(self, graph: nx.DiGraph, config: Optional[Dict] = None):
         self.graph = graph
+        self.config = config or {}
         self.alerts: List[Dict] = []
         self.node_risk_scores: Dict[str, float] = {}
         self.detected_patterns: Dict[str, List] = defaultdict(list)
 
-    def detect_circular_transactions(self,
-                                      amount_tolerance: float = 0.15,
-                                      max_alerts: int = 50) -> List[Dict]:
-        """Detect circular/round-tripping patterns.
+    def _cfg(self, key: str, default):
+        return self.config.get(key, default)
 
-        Strategy: Find groups of 3+ entities where each entity sends to the next
-        and the last sends back to the first, with similar amounts on each edge.
-        Uses a similarity-based edge filter to keep computation tractable.
+    def detect_circular_transactions(self,
+                                      amount_tolerance: Optional[float] = None,
+                                      max_alerts: Optional[int] = None,
+                                      min_total_flow: Optional[float] = None,
+                                      max_cycle_length: Optional[int] = None) -> List[Dict]:
+        amount_tolerance = amount_tolerance if amount_tolerance is not None else self._cfg("circular_amount_tolerance", 0.15)
+        max_alerts = max_alerts if max_alerts is not None else self._cfg("circular_max_alerts", 50)
+        min_total_flow = min_total_flow if min_total_flow is not None else self._cfg("circular_min_total_flow", 100_000)
+        max_cycle_length = max_cycle_length if max_cycle_length is not None else self._cfg("circular_max_cycle_length", 8)
+        """Detect circular / round-tripping patterns using Johnson's algorithm.
+
+        This is the textbook approach for AML cycle detection. We:
+
+          1. Decompose the graph into strongly-connected components (SCCs);
+             only SCCs of size >= 3 can contain a cycle of length >= 3.
+          2. Run nx.simple_cycles (which implements Johnson's algorithm) inside
+             each non-trivial SCC, bounded by max_cycle_length.
+          3. For each cycle, check the amount-variance and total-flow filters
+             a round-trip would satisfy: amounts on every hop should be within
+             `amount_tolerance` of their mean.
+
+        Strongly-connected-component decomposition is what keeps this tractable
+        on dense graphs — without it Johnson's would explode.
         """
         alerts = []
         seen_cycles = set()
 
-        # For each edge, record the average per-transaction amount
-        # Build amount buckets to group similar-amount edges
-        edge_info = {}
-        for u, v, data in self.graph.edges(data=True):
-            avg = data["avg_amount"]
-            edge_info[(u, v)] = {
-                "avg": avg,
-                "total": data["total_amount"],
-                "count": data["transaction_count"],
-                "fraud_count": data.get("fraud_count", 0),
-            }
+        # Johnson's enumerates *every* simple cycle. On a dense graph that's
+        # quickly into the millions — most of them random noise where the
+        # edge amounts vary wildly. AML round-tripping cycles have the
+        # opposite property: every edge in the cycle carries a similar
+        # amount (the laundered tranche). So we filter edges into log-scale
+        # amount buckets first and only enumerate cycles whose edges fall in
+        # the same bucket. This combines Johnson's correctness with a
+        # signal-aware pruning that matches the structure of the fraud we
+        # actually want to detect.
+        max_cycles_per_bucket = 5_000
 
-        # Group edges into amount buckets (log-scale)
-        bucket_size = 0.2  # 20% tolerance in log-space
-        buckets = defaultdict(list)
-        for (u, v), info in edge_info.items():
-            if info["total"] < 100000:  # Skip very small edges
-                continue
-            bucket_key = int(np.log10(max(info["total"], 1)) / bucket_size)
-            buckets[bucket_key].append((u, v, info))
-
-        # For each bucket, look for cycles among its edges
-        for bucket_key, edges in buckets.items():
+        for scc in nx.strongly_connected_components(self.graph):
             if len(alerts) >= max_alerts:
                 break
-            if len(edges) < 3:
+            if len(scc) < 3:
                 continue
+            sub = self.graph.subgraph(scc)
 
-            # Build a small subgraph from these similar-amount edges
-            sg = nx.DiGraph()
-            for u, v, info in edges:
-                sg.add_edge(u, v, **info)
-            for node in sg.nodes():
-                if self.graph.has_node(node):
-                    sg.nodes[node].update(self.graph.nodes[node])
+            # Group edges by log-amount bucket (0.2 = ±20% in log10 space).
+            edges_by_bucket: Dict[int, List[Tuple[str, str]]] = defaultdict(list)
+            for u, v in sub.edges():
+                amt = self.graph[u][v]["total_amount"]
+                if amt < min_total_flow / max(max_cycle_length, 1):
+                    continue
+                bucket = int(np.log10(max(amt, 1)) / 0.2)
+                edges_by_bucket[bucket].append((u, v))
 
-            if sg.number_of_nodes() < 3:
-                continue
-
-            # Find cycles in this small graph using SCC decomposition
-            for scc in nx.strongly_connected_components(sg):
+            for bucket_edges in edges_by_bucket.values():
                 if len(alerts) >= max_alerts:
                     break
-                if len(scc) < 3:
+                if len(bucket_edges) < 3:
+                    continue
+                bucket_graph = nx.DiGraph()
+                bucket_graph.add_edges_from(bucket_edges)
+                if bucket_graph.number_of_nodes() < 3:
                     continue
 
-                scc_subgraph = sg.subgraph(scc)
-                for start in scc:
-                    if len(alerts) >= max_alerts:
+                try:
+                    cycles_iter = nx.simple_cycles(bucket_graph, length_bound=max_cycle_length)
+                except TypeError:
+                    def _bounded():
+                        for c in nx.simple_cycles(bucket_graph):
+                            if 3 <= len(c) <= max_cycle_length:
+                                yield c
+                    cycles_iter = _bounded()
+
+                examined = 0
+                for cycle in cycles_iter:
+                    examined += 1
+                    if examined >= max_cycles_per_bucket or len(alerts) >= max_alerts:
                         break
+                    if len(cycle) < 3:
+                        continue
+                    cycle_key = frozenset(cycle)
+                    if cycle_key in seen_cycles:
+                        continue
+                    seen_cycles.add(cycle_key)
 
-                    queue = [(start, [start], {start})]
-                    local_found = 0
-                    while queue and local_found < 5 and len(alerts) < max_alerts:
-                        current, path, visited = queue.pop(0)
-                        if len(path) > 8:
-                            continue
+                    # 3. Validate with the real edge amounts.
+                    edge_amounts = []
+                    valid = True
+                    for i in range(len(cycle)):
+                        u, v = cycle[i], cycle[(i + 1) % len(cycle)]
+                        if self.graph.has_edge(u, v):
+                            edge_amounts.append(self.graph[u][v]["total_amount"])
+                        else:
+                            valid = False
+                            break
+                    if not valid or not edge_amounts:
+                        continue
 
-                        for nb in scc_subgraph.successors(current):
-                            if nb == start and len(path) >= 3:
-                                cycle_key = frozenset(path)
-                                if cycle_key in seen_cycles:
-                                    continue
-                                seen_cycles.add(cycle_key)
-                                local_found += 1
+                    total_flow = float(sum(edge_amounts))
+                    if total_flow < min_total_flow:
+                        continue
+                    avg_amount = float(np.mean(edge_amounts))
+                    max_dev = max(abs(a - avg_amount) / max(avg_amount, 1) for a in edge_amounts)
+                    if max_dev > amount_tolerance:
+                        continue
 
-                                # Validate with original graph amounts
-                                edge_amounts = []
-                                valid = True
-                                for i in range(len(path)):
-                                    u, v = path[i], path[(i + 1) % len(path)]
-                                    if self.graph.has_edge(u, v):
-                                        edge_amounts.append(self.graph[u][v]["total_amount"])
-                                    else:
-                                        valid = False; break
-
-                                if not valid or not edge_amounts:
-                                    continue
-
-                                avg_amount = np.mean(edge_amounts)
-                                max_dev = max(abs(a - avg_amount) / max(avg_amount, 1) for a in edge_amounts)
-
-                                if max_dev > amount_tolerance:
-                                    continue
-
-                                score = round(1.0 - max_dev, 4)
-                                total_flow = sum(edge_amounts)
-                                node_names = [self.graph.nodes[n].get("name", n) for n in path]
-
-                                alert = {
-                                    "alert_id": f"ALERT_CIRC_{len(alerts) + 1:04d}",
-                                    "pattern_type": "Circular Transaction",
-                                    "severity": "HIGH" if total_flow > 5000000 else "MEDIUM",
-                                    "confidence": round(score * 100, 1),
-                                    "entities": list(path),
-                                    "entity_names": node_names,
-                                    "cycle_length": len(path),
-                                    "total_flow": round(total_flow, 2),
-                                    "avg_flow_per_edge": round(avg_amount, 2),
-                                    "amount_variance": round(max_dev * 100, 1),
-                                    "description": (
-                                        f"Circular flow of ₹{total_flow:,.0f} detected through "
-                                        f"{len(path)} entities: {' → '.join(node_names)} → {node_names[0]}"
-                                    ),
-                                    "recommendation": "Flag accounts for enhanced due diligence. Verify business relationships between cycle participants.",
-                                }
-                                alerts.append(alert)
-                                self.detected_patterns["circular"].append(alert)
-                            elif nb not in visited and len(path) < 8:
-                                queue.append((nb, path + [nb], visited | {nb}))
+                    score = round(1.0 - max_dev, 4)
+                    node_names = [self.graph.nodes[n].get("name", n) for n in cycle]
+                    alerts.append({
+                        "alert_id": f"ALERT_CIRC_{len(alerts) + 1:04d}",
+                        "pattern_type": "Circular Transaction",
+                        "severity": "HIGH" if total_flow > 5_000_000 else "MEDIUM",
+                        "confidence": round(score * 100, 1),
+                        "entities": list(cycle),
+                        "entity_names": node_names,
+                        "cycle_length": len(cycle),
+                        "total_flow": round(total_flow, 2),
+                        "avg_flow_per_edge": round(avg_amount, 2),
+                        "amount_variance": round(max_dev * 100, 1),
+                        "algorithm": "johnson_simple_cycles",
+                        "description": (
+                            f"Circular flow of ₹{total_flow:,.0f} detected through "
+                            f"{len(cycle)} entities: {' → '.join(node_names)} → {node_names[0]}"
+                        ),
+                        "recommendation": "Flag accounts for enhanced due diligence. Verify business relationships between cycle participants.",
+                    })
+                    self.detected_patterns["circular"].append(alerts[-1])
 
         self.alerts.extend(alerts)
         return alerts
 
     def detect_rapid_layering(self,
                                time_window_hours: int = 48,
-                               min_chain_length: int = 3) -> List[Dict]:
+                               min_chain_length: Optional[int] = None) -> List[Dict]:
         """Detect rapid layering by finding chains of sequential transactions."""
+        min_chain_length = min_chain_length if min_chain_length is not None else self._cfg("layering_min_chain_length", 3)
+        decrease_ratio = self._cfg("layering_decrease_ratio", 0.85)
+        max_chains_cfg = self._cfg("layering_max_chains", 200)
         alerts = []
 
         # Build adjacency with temporal info
@@ -176,7 +188,7 @@ class FraudDetector:
 
         # Find chains where money moves rapidly through multiple accounts
         visited_chains = set()
-        max_chains = 200
+        max_chains = max_chains_cfg
 
         for start_node in self.graph.nodes():
             if len(visited_chains) >= max_chains:
@@ -206,7 +218,7 @@ class FraudDetector:
                                 amounts.append(self.graph[chain[i]][chain[i + 1]]["total_amount"])
 
                         is_decreasing = len(amounts) >= 2 and all(
-                            amounts[i] >= amounts[i + 1] * 0.85
+                            amounts[i] >= amounts[i + 1] * decrease_ratio
                             for i in range(len(amounts) - 1)
                         )
 
@@ -262,9 +274,11 @@ class FraudDetector:
         return alerts
 
     def detect_smurfing(self,
-                         threshold: float = 200000,
-                         cluster_tolerance: float = 0.10) -> List[Dict]:
+                         threshold: Optional[float] = None,
+                         cluster_tolerance: Optional[float] = None) -> List[Dict]:
         """Detect smurfing/structuring by finding clusters of similar amounts below threshold."""
+        threshold = threshold if threshold is not None else self._cfg("smurfing_threshold", 200_000)
+        cluster_tolerance = cluster_tolerance if cluster_tolerance is not None else self._cfg("smurfing_cluster_tolerance", 0.10)
         alerts = []
 
         # Find edges with amounts just below reporting threshold
@@ -326,9 +340,11 @@ class FraudDetector:
         return alerts
 
     def detect_shell_funnels(self,
-                              flow_imbalance_threshold: float = 0.7,
-                              min_in_degree: int = 3) -> List[Dict]:
+                              flow_imbalance_threshold: Optional[float] = None,
+                              min_in_degree: Optional[int] = None) -> List[Dict]:
         """Detect shell company funnels using centrality and flow analysis."""
+        flow_imbalance_threshold = flow_imbalance_threshold if flow_imbalance_threshold is not None else self._cfg("funnel_imbalance_threshold", 0.7)
+        min_in_degree = min_in_degree if min_in_degree is not None else self._cfg("funnel_min_in_degree", 3)
         alerts = []
 
         for node in self.graph.nodes():

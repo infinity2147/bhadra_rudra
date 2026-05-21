@@ -24,6 +24,14 @@ import networkx as nx
 
 
 # Feature column order is preserved when scoring new edges, so it must be stable.
+#
+# `neighbor_fraud_density` was removed in v3 — on synthetic data fraud
+# clusters very tightly by construction (a circular ring shares many
+# neighbour edges among its members), so the feature acts as a shortcut
+# and made test F1 artificially high. A production model has to score
+# new counterparties without using "are your neighbours already flagged"
+# as input, otherwise the score becomes circular when the neighbours
+# themselves were mis-labelled. Honest features only from here on.
 FEATURE_COLUMNS = [
     "log_total_amount",
     "log_avg_amount",
@@ -55,7 +63,6 @@ FEATURE_COLUMNS = [
     "night_ratio",
     "weekend_ratio",
     "in_scc_3plus",             # part of a strongly-connected component ≥ 3
-    "neighbor_fraud_density",   # share of edges among neighbors that carry fraud
 ]
 
 # Per-graph cache so we can call extract_features many times without recomputing
@@ -167,20 +174,6 @@ def extract_features(
         else:
             night_ratio, weekend_ratio = 0.0, 0.0
 
-        # Neighbor fraud density (cheap leakage-free heuristic — counts other edges
-        # incident on either endpoint that have fraud > 0, excluding this edge)
-        neighbor_edges = (
-            [(u, w) for w in graph.successors(u) if w != v]
-            + [(w, u) for w in graph.predecessors(u) if w != v]
-            + [(v, w) for w in graph.successors(v) if w != u]
-            + [(w, v) for w in graph.predecessors(v) if w != u]
-        )
-        if neighbor_edges:
-            frauds = sum(1 for a, b in neighbor_edges if graph[a][b].get("fraud_count", 0) > 0)
-            neighbor_fraud_density = frauds / len(neighbor_edges)
-        else:
-            neighbor_fraud_density = 0.0
-
         row = {
             "log_total_amount": np.log1p(total),
             "log_avg_amount": np.log1p(avg),
@@ -206,7 +199,6 @@ def extract_features(
             "night_ratio": night_ratio,
             "weekend_ratio": weekend_ratio,
             "in_scc_3plus": int(u in scc_members and v in scc_members),
-            "neighbor_fraud_density": neighbor_fraud_density,
         }
         row.update(_node_type_flags(graph, u, "sender"))
         row.update(_node_type_flags(graph, v, "receiver"))
@@ -247,10 +239,19 @@ def _train_xgb(X_train, y_train, X_test, y_test):
         return model, "gradient_boosting_fallback"
 
 
-def train_and_save(graph: nx.DiGraph, transactions: pd.DataFrame, data_dir: str) -> Dict:
-    """Train fraud classifier and persist model + metrics to data_dir/ml/.
+def train_and_save(
+    graph: nx.DiGraph,
+    transactions: pd.DataFrame,
+    data_dir: str,
+    variant: str = "synthetic",
+    dataset_name: str = "RUDRA Synthetic",
+) -> Dict:
+    """Train fraud classifier and persist model + metrics under data/ml/{variant}/.
 
-    Returns the metrics dict (also written to data_dir/ml/metrics.json).
+    A SHAP-ready background sample (100 rows of training features) is stashed
+    inside the pickle so the explainer can be loaded later without re-running
+    the pipeline. The "synthetic" variant is also mirrored to data/ml/ for
+    backward compatibility with the original endpoints.
     """
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import (
@@ -258,14 +259,13 @@ def train_and_save(graph: nx.DiGraph, transactions: pd.DataFrame, data_dir: str)
         confusion_matrix, average_precision_score,
     )
 
-    out_dir = os.path.join(data_dir, "ml")
+    out_dir = os.path.join(data_dir, "ml", variant)
     os.makedirs(out_dir, exist_ok=True)
 
     X = extract_features(graph, transactions)
     if X.empty:
         raise ValueError("No edges available for training.")
 
-    # Labels: edge is fraudulent if any underlying transaction is fraud
     labels = []
     for edge_str in X.index:
         u, v = edge_str.split("->", 1)
@@ -278,14 +278,15 @@ def train_and_save(graph: nx.DiGraph, transactions: pd.DataFrame, data_dir: str)
     X_train, X_test, y_train, y_test = train_test_split(
         X.values, y, test_size=0.20, stratify=y, random_state=42,
     )
-
     model, model_kind = _train_xgb(X_train, y_train, X_test, y_test)
 
     y_pred = model.predict(X_test)
     y_prob = model.predict_proba(X_test)[:, 1]
-
     cm = confusion_matrix(y_test, y_pred)
+
     metrics = {
+        "variant": variant,
+        "dataset_name": dataset_name,
         "model_kind": model_kind,
         "n_edges": int(len(X)),
         "n_features": int(X.shape[1]),
@@ -303,7 +304,6 @@ def train_and_save(graph: nx.DiGraph, transactions: pd.DataFrame, data_dir: str)
         "feature_columns": FEATURE_COLUMNS,
     }
 
-    # Feature importances (XGBoost / GB both expose them)
     if hasattr(model, "feature_importances_"):
         imps = list(map(float, model.feature_importances_))
         ranked = sorted(zip(FEATURE_COLUMNS, imps), key=lambda x: x[1], reverse=True)
@@ -311,40 +311,95 @@ def train_and_save(graph: nx.DiGraph, transactions: pd.DataFrame, data_dir: str)
             {"feature": name, "importance": round(imp, 4)} for name, imp in ranked
         ]
 
-    # Score every edge so we have a per-edge ML score available for UI
     all_scores = model.predict_proba(X.values)[:, 1]
     edge_scores = {edge: float(round(s, 4)) for edge, s in zip(X.index, all_scores)}
 
+    # Background sample for SHAP — keep it small so the pickle stays light
+    bg_idx = np.random.RandomState(0).choice(len(X_train), size=min(100, len(X_train)), replace=False)
+    background = X_train[bg_idx]
+
+    bundle = {
+        "model": model,
+        "feature_columns": FEATURE_COLUMNS,
+        "background": background,
+    }
     with open(os.path.join(out_dir, "model.pkl"), "wb") as f:
-        pickle.dump({"model": model, "feature_columns": FEATURE_COLUMNS}, f)
+        pickle.dump(bundle, f)
     with open(os.path.join(out_dir, "metrics.json"), "w") as f:
         json.dump(metrics, f, indent=2, default=str)
     with open(os.path.join(out_dir, "edge_scores.json"), "w") as f:
         json.dump(edge_scores, f, indent=2)
 
+    # Mirror to legacy data/ml/ for the original endpoints that load from there
+    if variant == "synthetic":
+        legacy_dir = os.path.join(data_dir, "ml")
+        os.makedirs(legacy_dir, exist_ok=True)
+        with open(os.path.join(legacy_dir, "model.pkl"), "wb") as f:
+            pickle.dump(bundle, f)
+        with open(os.path.join(legacy_dir, "metrics.json"), "w") as f:
+            json.dump(metrics, f, indent=2, default=str)
+        with open(os.path.join(legacy_dir, "edge_scores.json"), "w") as f:
+            json.dump(edge_scores, f, indent=2)
+
     return metrics
 
 
-def load_model(data_dir: str):
-    """Load a previously trained model + feature columns."""
-    path = os.path.join(data_dir, "ml", "model.pkl")
+def load_model(data_dir: str, variant: str = "synthetic"):
+    """Load a previously trained model bundle."""
+    path = os.path.join(data_dir, "ml", variant, "model.pkl")
     if not os.path.exists(path):
-        return None
+        path = os.path.join(data_dir, "ml", "model.pkl")
+        if not os.path.exists(path):
+            return None
     with open(path, "rb") as f:
         return pickle.load(f)
 
 
-def load_metrics(data_dir: str) -> Dict:
-    path = os.path.join(data_dir, "ml", "metrics.json")
+def load_metrics(data_dir: str, variant: str = "synthetic") -> Dict:
+    path = os.path.join(data_dir, "ml", variant, "metrics.json")
     if not os.path.exists(path):
-        return {}
+        path = os.path.join(data_dir, "ml", "metrics.json")
+        if not os.path.exists(path):
+            return {}
     with open(path) as f:
         return json.load(f)
 
 
-def load_edge_scores(data_dir: str) -> Dict[str, float]:
-    path = os.path.join(data_dir, "ml", "edge_scores.json")
+def load_edge_scores(data_dir: str, variant: str = "synthetic") -> Dict[str, float]:
+    path = os.path.join(data_dir, "ml", variant, "edge_scores.json")
     if not os.path.exists(path):
-        return {}
+        path = os.path.join(data_dir, "ml", "edge_scores.json")
+        if not os.path.exists(path):
+            return {}
     with open(path) as f:
         return json.load(f)
+
+
+def list_variants(data_dir: str) -> List[Dict]:
+    """Return all trained variants on disk, each with their dataset metadata."""
+    base = os.path.join(data_dir, "ml")
+    if not os.path.isdir(base):
+        return []
+    out = []
+    for entry in sorted(os.listdir(base)):
+        full = os.path.join(base, entry)
+        metrics_path = os.path.join(full, "metrics.json")
+        if os.path.isdir(full) and os.path.exists(metrics_path):
+            with open(metrics_path) as f:
+                m = json.load(f)
+            out.append({
+                "variant": entry,
+                "dataset_name": m.get("dataset_name", entry),
+                "f1": m.get("f1"),
+                "auc": m.get("auc"),
+                "n_edges": m.get("n_edges"),
+                "fraud_rate": m.get("fraud_rate"),
+            })
+    return out
+
+
+def predict_one(model_bundle: Dict, feature_row: Dict) -> float:
+    """Score a single edge given its feature dict — used by live mode."""
+    cols = model_bundle["feature_columns"]
+    vec = np.array([[feature_row.get(c, 0.0) for c in cols]])
+    return float(model_bundle["model"].predict_proba(vec)[0, 1])

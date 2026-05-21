@@ -5,11 +5,12 @@ Bundles everything an investigator needs to file a Suspicious Transaction Report
 with FIU-IND (Financial Intelligence Unit, India) into a single downloadable zip:
 
   evidence_summary.md     — human-readable case summary + reasoning
+  STR.xml                 — schema-shaped STR XML matching the FIU-IND format
   SAR_<id>.pdf            — the formal SAR document
   subgraph.json           — NetworkX-format export of the fraud subgraph
   transaction_chain.csv   — every transaction in the case, in order
   pmla_citations.txt      — PMLA / RBI sections relevant to the pattern
-  cases_audit_log.json    — full audit trail for regulatory review
+  case_audit_log.json     — full audit trail for regulatory review
 
 This package matches the structure of what a real STR submission to FIU
 contains, minus the PII fields we intentionally do not store.
@@ -23,6 +24,7 @@ import os
 import zipfile
 from datetime import datetime
 from typing import Dict, List, Optional
+from xml.sax.saxutils import escape as _xml_escape
 
 import pandas as pd
 import networkx as nx
@@ -192,6 +194,144 @@ def _build_citations_txt(pattern: str) -> bytes:
     return "\n".join(_citations_for(pattern)).encode("utf-8")
 
 
+# ── STR XML (FIU-IND format) ──────────────────────────────────────────────────
+#
+# FIU-IND's STR format requires a structured XML with reporting entity,
+# subject(s), suspicious activity description, and transactions. We model the
+# canonical fields. Real submissions also include PII (PAN, Aadhaar) which we
+# deliberately omit per DPDP Act data-minimisation — the redaction is
+# explicitly noted in the XML so a compliance officer knows what to enrich
+# before filing.
+
+_REPORT_TYPE_MAP = {
+    "Circular Transaction": "STR_CIRCULAR",
+    "Rapid Layering": "STR_LAYERING",
+    "Smurfing / Structuring": "STR_STRUCTURING",
+    "Shell Company Funnel": "STR_SHELL_FUNNEL",
+    "Dormant Activation": "STR_DORMANT",
+    "Profile Mismatch": "STR_PROFILE_MISMATCH",
+}
+
+
+def _xml(tag: str, content="", **attrs) -> str:
+    """Tiny XML element builder with safe escaping."""
+    attr_str = "".join(f' {k}="{_xml_escape(str(v))}"' for k, v in attrs.items())
+    if content == "":
+        return f"<{tag}{attr_str}/>"
+    return f"<{tag}{attr_str}>{_xml_escape(str(content))}</{tag}>"
+
+
+def _build_str_xml(
+    alert: Dict,
+    graph: nx.DiGraph,
+    entity_txns: pd.DataFrame,
+    case: Optional[Dict],
+) -> bytes:
+    """Build a schema-shaped FIU-IND STR XML document.
+
+    Field names follow the FIU-IND STR convention as published in their
+    Reporting Entity Guidelines. We mark every PII field as REDACTED with a
+    reason — banks file STRs with the PII filled in; investigators add it
+    just before submission. Doing it this way keeps RUDRA DPDP-clean.
+    """
+    aid = alert.get("alert_id", "")
+    pattern = alert.get("pattern_type", "")
+    severity = alert.get("severity", "HIGH")
+    entities = alert.get("entities", [])
+    total_flow = alert.get("total_flow", 0)
+    desc = alert.get("description", "")
+    confidence = alert.get("confidence", 0)
+
+    fraud_txns = entity_txns[entity_txns["is_fraud"]].sort_values("timestamp")
+
+    lines: List[str] = []
+    lines.append('<?xml version="1.0" encoding="UTF-8"?>')
+    lines.append(f'<FIUINDReport version="2.1" reportType="{_REPORT_TYPE_MAP.get(pattern, "STR_GENERIC")}">')
+
+    # 1. Report header
+    lines.append('  <ReportHeader>')
+    lines.append('    ' + _xml("ReportID", f"STR-{aid}"))
+    lines.append('    ' + _xml("GeneratedAt", datetime.now().isoformat()))
+    lines.append('    ' + _xml("FilingDeadlineDays", 7))
+    lines.append('    ' + _xml("RegulatoryFramework", "PMLA 2002 Section 12 read with PMLA Rules 2005 Rule 3"))
+    lines.append('  </ReportHeader>')
+
+    # 2. Reporting entity (the bank)
+    lines.append('  <ReportingEntity>')
+    lines.append('    ' + _xml("EntityType", "ScheduledCommercialBank"))
+    lines.append('    ' + _xml("EntityCategory", "PublicSectorBank"))
+    lines.append('    ' + _xml("EntityName", "[Public Sector Bank — Demo]"))
+    lines.append('    ' + _xml("BranchCode", "REDACTED", reason="DPDP_DataMinimisation"))
+    lines.append('    ' + _xml("ReportingOfficerName", "REDACTED", reason="DPDP_DataMinimisation"))
+    lines.append('  </ReportingEntity>')
+
+    # 3. Suspicious activity classification
+    lines.append('  <SuspiciousActivity>')
+    lines.append('    ' + _xml("ActivityType", pattern))
+    lines.append('    ' + _xml("Severity", severity))
+    lines.append('    ' + _xml("DetectionConfidencePct", confidence))
+    lines.append('    ' + _xml("TotalSuspiciousAmount", f"{total_flow:.2f}"))
+    lines.append('    ' + _xml("Currency", "INR"))
+    lines.append('    ' + _xml("Description", desc))
+    lines.append('    ' + _xml("DetectionMethod", "Graph-based pattern analysis with ML edge classifier"))
+    lines.append('  </SuspiciousActivity>')
+
+    # 4. Subjects
+    lines.append('  <Subjects>')
+    for i, eid in enumerate(entities, start=1):
+        if not graph.has_node(eid):
+            continue
+        nd = graph.nodes[eid]
+        lines.append(f'    <Subject sequenceNumber="{i}">')
+        lines.append('      ' + _xml("InternalEntityID", eid))
+        lines.append('      ' + _xml("Name", nd.get("name", "")))
+        lines.append('      ' + _xml("SubjectType", nd.get("type", "individual")))
+        lines.append('      ' + _xml("AccountProduct", nd.get("product", "")))
+        lines.append('      ' + _xml("AccountBranch", nd.get("branch", "")))
+        # PII fields kept as placeholders for the bank to fill in just before submission
+        lines.append('      ' + _xml("PAN", "REDACTED", reason="DPDP_DataMinimisation_FillBeforeFiling"))
+        lines.append('      ' + _xml("Aadhaar", "REDACTED", reason="DPDP_DataMinimisation_FillBeforeFiling"))
+        lines.append('      ' + _xml("Address", "REDACTED", reason="DPDP_DataMinimisation_FillBeforeFiling"))
+        lines.append('    </Subject>')
+    lines.append('  </Subjects>')
+
+    # 5. Transactions — only the flagged ones, in chronological order
+    lines.append('  <Transactions>')
+    for _, t in fraud_txns.head(200).iterrows():
+        lines.append('    <Transaction>')
+        lines.append('      ' + _xml("InternalTxnID", t.get("transaction_id", "")))
+        lines.append('      ' + _xml("Timestamp", str(t.get("timestamp", ""))))
+        lines.append('      ' + _xml("Amount", f"{float(t.get('amount', 0)):.2f}"))
+        lines.append('      ' + _xml("Currency", t.get("currency", "INR")))
+        lines.append('      ' + _xml("Rail", t.get("transaction_type", "")))
+        lines.append('      ' + _xml("Channel", t.get("channel", "")))
+        lines.append('      ' + _xml("PurposeCode", t.get("purpose_code", "")))
+        lines.append('      ' + _xml("FromEntityID", t.get("sender_id", "")))
+        lines.append('      ' + _xml("ToEntityID", t.get("receiver_id", "")))
+        lines.append('    </Transaction>')
+    lines.append('  </Transactions>')
+
+    # 6. Grounds for suspicion (PMLA citations)
+    lines.append('  <GroundsForSuspicion>')
+    for c in _citations_for(pattern):
+        lines.append('    ' + _xml("Citation", c))
+    lines.append('  </GroundsForSuspicion>')
+
+    # 7. Audit trail — just the head hash, not the full chain
+    if case and case.get("audit_log"):
+        log = case["audit_log"]
+        head_entry = log[-1] if log else {}
+        lines.append('  <AuditTrail>')
+        lines.append('    ' + _xml("Entries", len(log)))
+        lines.append('    ' + _xml("HeadHash", head_entry.get("this_hash", "")))
+        lines.append('    ' + _xml("LastAction", head_entry.get("action", "")))
+        lines.append('    ' + _xml("LastTimestamp", head_entry.get("timestamp", "")))
+        lines.append('  </AuditTrail>')
+
+    lines.append('</FIUINDReport>')
+    return "\n".join(lines).encode("utf-8")
+
+
 def build_package(
     graph: nx.DiGraph,
     transactions: pd.DataFrame,
@@ -214,10 +354,12 @@ def build_package(
     chain_csv = _build_transaction_chain_csv(transactions, entities)
     citations_txt = _build_citations_txt(alert.get("pattern_type", ""))
     audit_json = json.dumps(case or {}, indent=2, default=str).encode("utf-8")
+    str_xml = _build_str_xml(alert, graph, entity_txns, case)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("evidence_summary.md", summary_md)
+        z.writestr("STR.xml", str_xml)
         z.writestr("subgraph.json", subgraph_json)
         z.writestr("transaction_chain.csv", chain_csv)
         z.writestr("pmla_citations.txt", citations_txt)

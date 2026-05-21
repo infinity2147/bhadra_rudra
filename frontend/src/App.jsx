@@ -1,7 +1,8 @@
-import { Component } from 'react';
+import { Component, useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import Cases from './pages/Cases';
+import Incidents from './pages/Incidents';
 import Journey from './pages/Journey';
 import Graph from './pages/Graph';
 import Analytics from './pages/Analytics';
@@ -11,6 +12,9 @@ import Patterns from './pages/Patterns';
 import Entities from './pages/Entities';
 import Copilot from './pages/Copilot';
 import SarReports from './pages/SarReports';
+import Settings from './pages/Settings';
+import AccountAggregator from './pages/AccountAggregator';
+import { getRole, setRole } from './api';
 
 class ErrorBoundary extends Component {
   state = { error: null };
@@ -30,9 +34,9 @@ class ErrorBoundary extends Component {
   }
 }
 
-// Inline SVG icon paths so we don't pull in an icon library.
 const ICONS = {
   dashboard: 'M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-4 0a1 1 0 01-1-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 01-1 1',
+  incidents: 'M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z',
   cases: 'M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2',
   journey: 'M13 7l5 5m0 0l-5 5m5-5H6',
   graph: 'M13.828 10.172a4 4 0 00-5.656 0l-4 4a4 4 0 105.656 5.656l1.102-1.101m-.758-4.899a4 4 0 005.656 0l4-4a4 4 0 00-5.656-5.656l-1.1 1.1',
@@ -43,6 +47,8 @@ const ICONS = {
   entities: 'M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0z',
   copilot: 'M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z',
   sar: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
+  settings: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
+  aa: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4',
 };
 
 const NAV_GROUPS = [
@@ -50,6 +56,7 @@ const NAV_GROUPS = [
     title: 'Investigate',
     items: [
       { to: '/', label: 'Dashboard', icon: ICONS.dashboard },
+      { to: '/incidents', label: 'Incidents', icon: ICONS.incidents },
       { to: '/cases', label: 'Case Workbench', icon: ICONS.cases },
       { to: '/journey', label: 'Fund Journey', icon: ICONS.journey },
       { to: '/graph', label: 'Network Graph', icon: ICONS.graph },
@@ -61,7 +68,7 @@ const NAV_GROUPS = [
       { to: '/analytics', label: 'Channel / Branch', icon: ICONS.analytics },
       { to: '/patterns', label: 'Pattern Library', icon: ICONS.patterns },
       { to: '/entities', label: 'Entity Explorer', icon: ICONS.entities },
-      { to: '/model', label: 'ML Model', icon: ICONS.model },
+      { to: '/model', label: 'ML Models', icon: ICONS.model },
     ],
   },
   {
@@ -72,7 +79,39 @@ const NAV_GROUPS = [
       { to: '/sar', label: 'SAR Reports', icon: ICONS.sar },
     ],
   },
+  {
+    title: 'Integrate',
+    items: [
+      { to: '/aa', label: 'Account Aggregator', icon: ICONS.aa },
+      { to: '/settings', label: 'Detector Settings', icon: ICONS.settings },
+    ],
+  },
 ];
+
+const ROLES = ['INVESTIGATOR', 'SUPERVISOR', 'ADMIN'];
+
+function RoleSwitcher() {
+  const [role, setLocalRole] = useState(getRole());
+  function change(r) {
+    setRole(r);
+    setLocalRole(r);
+    // Reload to refetch under the new role's permissions
+    window.location.reload();
+  }
+  return (
+    <div className="px-3 py-2 border-t border-gray-200">
+      <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Role</p>
+      <select
+        value={role}
+        onChange={(e) => change(e.target.value)}
+        className="w-full text-xs px-2 py-1.5 border border-gray-300 rounded bg-white"
+      >
+        {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+      </select>
+      <p className="text-[10px] text-gray-400 mt-1">Demo gate — production uses IDP</p>
+    </div>
+  );
+}
 
 export default function App() {
   return (
@@ -111,6 +150,7 @@ export default function App() {
                 </div>
               ))}
             </nav>
+            <RoleSwitcher />
             <div className="p-3 border-t border-gray-200 text-center">
               <p className="text-[10px] text-gray-400">PSBs Hackathon 2026</p>
               <p className="text-[10px] text-gray-500 font-medium">Team Bhadra</p>
@@ -119,6 +159,7 @@ export default function App() {
           <main className="flex-1 overflow-y-auto">
             <Routes>
               <Route path="/" element={<Dashboard />} />
+              <Route path="/incidents" element={<Incidents />} />
               <Route path="/cases" element={<Cases />} />
               <Route path="/journey" element={<Journey />} />
               <Route path="/graph" element={<Graph />} />
@@ -129,6 +170,8 @@ export default function App() {
               <Route path="/live" element={<Live />} />
               <Route path="/copilot" element={<Copilot />} />
               <Route path="/sar" element={<SarReports />} />
+              <Route path="/settings" element={<Settings />} />
+              <Route path="/aa" element={<AccountAggregator />} />
             </Routes>
           </main>
         </div>

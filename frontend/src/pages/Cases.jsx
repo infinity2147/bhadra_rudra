@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react';
-import { useNavigate } from 'react-router-dom';
-import { fetchAPI, postAPI, downloadFromAPI } from '../api';
+import { useNavigate, useSearchParams } from 'react-router-dom';
+import { fetchAPI, postAPI, downloadFromAPI, getRole } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
 
 const STATUS_TABS = [
@@ -54,17 +54,22 @@ function MLScoreBar({ score }) {
 
 export default function Cases() {
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
+  const focusedId = params.get('focus');
+  const role = getRole();
+
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [activeStatus, setActiveStatus] = useState('OPEN');
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedId, setSelectedId] = useState(focusedId || null);
   const [caseDetail, setCaseDetail] = useState(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
   const [note, setNote] = useState('');
   const [search, setSearch] = useState('');
+  const [explanation, setExplanation] = useState(null);
+  const [chainStatus, setChainStatus] = useState(null);
 
-  // Load alerts on mount
   useEffect(() => {
     setLoading(true);
     fetchAPI('/api/alerts')
@@ -78,17 +83,21 @@ export default function Cases() {
     setAlerts(data.alerts || []);
   }, []);
 
-  // Load case detail when selected
   useEffect(() => {
     if (!selectedId) {
-      setCaseDetail(null);
-      setNote('');
+      setCaseDetail(null); setNote(''); setExplanation(null); setChainStatus(null);
       return;
     }
     setDetailLoading(true);
-    fetchAPI(`/api/cases/${selectedId}`)
-      .then(setCaseDetail)
-      .catch(() => setCaseDetail(null))
+    Promise.all([
+      fetchAPI(`/api/cases/${selectedId}`),
+      fetchAPI(`/api/alerts/${selectedId}/explain`).catch(() => null),
+    ])
+      .then(([c, e]) => {
+        setCaseDetail(c);
+        setExplanation(e && !e.error ? e : null);
+      })
+      .catch(() => { setCaseDetail(null); setExplanation(null); })
       .finally(() => setDetailLoading(false));
   }, [selectedId]);
 
@@ -135,6 +144,8 @@ export default function Cases() {
       await refreshAlerts();
       const c = await fetchAPI(`/api/cases/${selectedId}`);
       setCaseDetail(c);
+    } catch (e) {
+      alert(e.message);
     } finally {
       setActionLoading(false);
     }
@@ -162,16 +173,34 @@ export default function Cases() {
     }
   }
 
+  async function verifyChain() {
+    if (!selectedId) return;
+    setActionLoading(true);
+    try {
+      const c = await fetchAPI(`/api/cases/${selectedId}/verify`);
+      setChainStatus(c);
+    } catch (e) {
+      setChainStatus({ error: e.message });
+    } finally {
+      setActionLoading(false);
+    }
+  }
+
+  // Compute which actions are allowed given current role
+  const canSAR = role === 'SUPERVISOR' || role === 'ADMIN';
+  const canDismiss = role === 'SUPERVISOR' || role === 'ADMIN';
+  const canVerify = role === 'SUPERVISOR' || role === 'ADMIN';
+
   return (
     <div className="h-full flex flex-col">
       <div className="px-6 pt-6 pb-3">
         <h1 className="text-2xl font-bold text-gray-900">Case Workbench</h1>
         <p className="text-sm text-gray-500 mt-1">
-          Triage fraud alerts, record decisions, and generate FIU evidence packages
+          Triage fraud alerts, record decisions, generate FIU evidence packages. SHAP shows why the ML model flagged each one.
         </p>
       </div>
 
-      {/* Status tabs + counts */}
+      {/* Status tabs + search */}
       <div className="px-6 border-b border-gray-200 bg-white">
         <nav className="flex gap-1 -mb-px overflow-x-auto">
           {STATUS_TABS.map(t => (
@@ -203,7 +232,6 @@ export default function Cases() {
         </nav>
       </div>
 
-      {/* Body — split: list + detail */}
       <div className="flex-1 flex min-h-0">
         {/* Cases list */}
         <div className={`${selectedId ? 'w-3/5' : 'w-full'} overflow-y-auto bg-gray-50 border-r border-gray-200 transition-all`}>
@@ -215,11 +243,13 @@ export default function Cases() {
             <ul className="divide-y divide-gray-200 bg-white">
               {filtered.map(a => {
                 const isSelected = a.alert_id === selectedId;
-                const age = a.case_status ? '' : ''; // age would need timestamp from case
                 return (
                   <li
                     key={a.alert_id}
-                    onClick={() => setSelectedId(a.alert_id)}
+                    onClick={() => {
+                      setSelectedId(a.alert_id);
+                      setParams({ focus: a.alert_id });
+                    }}
                     className={`px-6 py-4 cursor-pointer transition-colors ${
                       isSelected ? 'bg-indigo-50' : 'hover:bg-gray-50'
                     }`}
@@ -233,6 +263,14 @@ export default function Cases() {
                         <div className="flex items-baseline gap-2 flex-wrap">
                           <span className="text-sm font-semibold text-gray-900">{a.pattern_type}</span>
                           <span className="text-xs text-gray-400 font-mono">{a.alert_id}</span>
+                          {a.incident_id && (
+                            <button
+                              onClick={(e) => { e.stopPropagation(); navigate(`/incidents`); }}
+                              className="text-xs text-indigo-600 hover:underline"
+                            >
+                              {a.incident_id}
+                            </button>
+                          )}
                         </div>
                         <p className="text-sm text-gray-600 mt-1 line-clamp-2">{a.description}</p>
                         <div className="flex items-center gap-4 mt-2 text-xs text-gray-500">
@@ -240,7 +278,7 @@ export default function Cases() {
                           <span>•</span>
                           <span className="font-medium text-gray-700">{formatINR(a.total_flow)}</span>
                           <span>•</span>
-                          <span>Confidence {a.confidence}%</span>
+                          <span>Conf. {a.confidence}%</span>
                         </div>
                       </div>
                       <div className="text-right shrink-0">
@@ -262,7 +300,6 @@ export default function Cases() {
               <div className="p-12 text-center text-gray-400">Loading case...</div>
             ) : (
               <div className="p-6 space-y-5">
-                {/* Header */}
                 <div className="flex items-start justify-between">
                   <div>
                     <p className="text-xs font-mono text-gray-400">{selectedAlert.alert_id}</p>
@@ -270,37 +307,34 @@ export default function Cases() {
                     <div className="flex items-center gap-2 mt-2">
                       <SeverityBadge severity={selectedAlert.severity} />
                       <StatusPill status={caseDetail?.status} />
+                      {caseDetail?.incident_id && (
+                        <button
+                          onClick={() => navigate('/incidents')}
+                          className="text-xs text-indigo-600 hover:underline"
+                        >
+                          {caseDetail.incident_id}
+                        </button>
+                      )}
                     </div>
                   </div>
                   <button
-                    onClick={() => setSelectedId(null)}
+                    onClick={() => { setSelectedId(null); setParams({}); }}
                     className="text-gray-400 hover:text-gray-600 text-xl leading-none"
-                  >
-                    &times;
-                  </button>
+                  >&times;</button>
                 </div>
 
-                {/* Description */}
                 <div>
-                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">
-                    Description
-                  </h3>
+                  <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1">Description</h3>
                   <p className="text-sm text-gray-700 leading-relaxed">{selectedAlert.description}</p>
                 </div>
 
-                {/* Recommendation */}
                 {selectedAlert.recommendation && (
                   <div className="rounded-lg bg-amber-50 border border-amber-200 px-3 py-2">
-                    <p className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">
-                      Recommended Action
-                    </p>
-                    <p className="text-xs text-amber-900 mt-1 leading-relaxed">
-                      {selectedAlert.recommendation}
-                    </p>
+                    <p className="text-[11px] font-semibold text-amber-700 uppercase tracking-wide">Recommended Action</p>
+                    <p className="text-xs text-amber-900 mt-1 leading-relaxed">{selectedAlert.recommendation}</p>
                   </div>
                 )}
 
-                {/* Stats */}
                 <div className="grid grid-cols-2 gap-3 text-sm">
                   <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
                     <p className="text-[11px] uppercase tracking-wide text-gray-500">Total Flow</p>
@@ -320,12 +354,26 @@ export default function Cases() {
                   </div>
                 </div>
 
-                {/* Entity chain */}
+                {/* SHAP */}
+                {explanation && (
+                  <div className="rounded-lg bg-violet-50 border border-violet-200 p-3">
+                    <div className="flex items-center justify-between">
+                      <p className="text-xs font-semibold text-violet-900 uppercase tracking-wide">Why this score? (SHAP)</p>
+                      <p className="text-xs text-violet-700">
+                        Predicted: <strong>{(explanation.predicted_proba * 100).toFixed(1)}%</strong>
+                      </p>
+                    </div>
+                    <ul className="mt-2 space-y-0.5 text-xs">
+                      {(explanation.narrative || []).slice(0, 5).map((n, i) => (
+                        <li key={i} className="text-violet-900">• {n}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
                 {selectedAlert.entity_names && selectedAlert.entity_names.length > 0 && (
                   <div>
-                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                      Entity Chain
-                    </h3>
+                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-1.5">Entity Chain</h3>
                     <div className="flex flex-wrap gap-1.5">
                       {selectedAlert.entity_names.map((n, i) => (
                         <span key={i} className="inline-flex items-center px-2 py-1 rounded-md bg-indigo-50 text-indigo-700 text-xs font-medium">
@@ -336,31 +384,23 @@ export default function Cases() {
                   </div>
                 )}
 
-                {/* Action buttons */}
                 <div className="space-y-2 pt-2 border-t border-gray-200">
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={() => navigate(`/journey?alert=${selectedId}`)}
-                      className="px-3 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors flex items-center justify-center gap-1.5"
+                      className="px-3 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
                     >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
-                      </svg>
                       Trace Journey
                     </button>
                     <button
                       onClick={downloadFiuPackage}
                       disabled={actionLoading}
-                      className="px-3 py-2 text-sm bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors flex items-center justify-center gap-1.5 disabled:opacity-50"
+                      className="px-3 py-2 text-sm bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
                     >
-                      <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                        <path strokeLinecap="round" strokeLinejoin="round" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
-                      </svg>
                       FIU Package
                     </button>
                   </div>
 
-                  {/* Note input */}
                   <textarea
                     value={note}
                     onChange={e => setNote(e.target.value)}
@@ -369,7 +409,6 @@ export default function Cases() {
                     className="w-full px-3 py-2 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-1 focus:ring-indigo-500"
                   />
 
-                  {/* Disposition buttons */}
                   <div className="grid grid-cols-2 gap-2">
                     <button
                       onClick={() => disposeCase('INVESTIGATING')}
@@ -380,10 +419,11 @@ export default function Cases() {
                     </button>
                     <button
                       onClick={() => disposeCase('SAR_FILED')}
-                      disabled={actionLoading}
-                      className="px-3 py-2 text-sm bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors disabled:opacity-50"
+                      disabled={actionLoading || !canSAR}
+                      title={!canSAR ? 'Requires SUPERVISOR role' : undefined}
+                      className="px-3 py-2 text-sm bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200 rounded-lg hover:bg-emerald-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      File SAR
+                      File SAR {!canSAR && '🔒'}
                     </button>
                     <button
                       onClick={() => disposeCase('ESCALATED')}
@@ -394,10 +434,11 @@ export default function Cases() {
                     </button>
                     <button
                       onClick={() => disposeCase('DISMISSED')}
-                      disabled={actionLoading}
-                      className="px-3 py-2 text-sm bg-gray-50 text-gray-700 ring-1 ring-gray-200 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50"
+                      disabled={actionLoading || !canDismiss}
+                      title={!canDismiss ? 'Requires SUPERVISOR role' : undefined}
+                      className="px-3 py-2 text-sm bg-gray-50 text-gray-700 ring-1 ring-gray-200 rounded-lg hover:bg-gray-100 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      Dismiss
+                      Dismiss {!canDismiss && '🔒'}
                     </button>
                   </div>
                   {note && (
@@ -411,12 +452,30 @@ export default function Cases() {
                   )}
                 </div>
 
-                {/* Audit log */}
-                {caseDetail?.audit_log && caseDetail.audit_log.length > 0 && (
-                  <div className="pt-3 border-t border-gray-200">
-                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">
-                      Audit Log
-                    </h3>
+                {/* Hash chain verify */}
+                <div className="pt-3 border-t border-gray-200">
+                  <div className="flex items-center justify-between mb-2">
+                    <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Audit Log (tamper-evident)</h3>
+                    <button
+                      onClick={verifyChain}
+                      disabled={!canVerify || actionLoading}
+                      title={!canVerify ? 'Requires SUPERVISOR role' : undefined}
+                      className="text-xs px-2 py-1 border border-gray-300 rounded hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      Verify chain {!canVerify && '🔒'}
+                    </button>
+                  </div>
+                  {chainStatus && (
+                    <div className={`mb-2 rounded-md px-3 py-2 text-xs ${
+                      chainStatus.verified ? 'bg-emerald-50 text-emerald-900 ring-1 ring-emerald-200'
+                                            : 'bg-red-50 text-red-900 ring-1 ring-red-200'
+                    }`}>
+                      {chainStatus.verified
+                        ? `✓ Chain intact — ${chainStatus.entries} entries. Head: ${chainStatus.head_hash?.slice(0, 12)}…`
+                        : `✗ Tampering detected at entry ${chainStatus.tampered_at}: ${chainStatus.message}`}
+                    </div>
+                  )}
+                  {caseDetail?.audit_log && caseDetail.audit_log.length > 0 && (
                     <ol className="space-y-2">
                       {[...caseDetail.audit_log].reverse().map((entry, i) => (
                         <li key={i} className="text-xs border-l-2 border-indigo-200 pl-3">
@@ -428,11 +487,16 @@ export default function Cases() {
                             <span className="text-indigo-600 font-medium">{entry.action}</span>
                           </div>
                           {entry.note && <p className="text-gray-700 mt-1">{entry.note}</p>}
+                          {entry.this_hash && (
+                            <p className="text-[10px] font-mono text-gray-400 mt-0.5">
+                              hash: {entry.this_hash.slice(0, 16)}…
+                            </p>
+                          )}
                         </li>
                       ))}
                     </ol>
-                  </div>
-                )}
+                  )}
+                </div>
               </div>
             )}
           </div>

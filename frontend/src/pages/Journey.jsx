@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import ForceGraph2D from 'react-force-graph-2d';
 import { fetchAPI, downloadFromAPI } from '../api';
+import Sankey from '../components/Sankey';
 
 const NODE_FILL = {
   individual: '#3b82f6',
@@ -61,6 +62,9 @@ export default function Journey() {
   const [alertOptions, setAlertOptions] = useState([]);
   const [entityOptions, setEntityOptions] = useState([]);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [viewMode, setViewMode] = useState('auto'); // 'auto' | 'sankey' | 'force'
+  const [explanation, setExplanation] = useState(null);
+  const [explainLoading, setExplainLoading] = useState(false);
 
   const fgRef = useRef();
 
@@ -108,6 +112,26 @@ export default function Journey() {
       fetchTrace();
     }
   }, [mode, alertId, entityId, direction, hops, minAmount, includeNeighbors, fetchTrace]);
+
+  // SHAP explain when an alert is loaded
+  useEffect(() => {
+    if (mode !== 'alert' || !alertId) { setExplanation(null); return; }
+    setExplainLoading(true);
+    fetchAPI(`/api/alerts/${alertId}/explain`)
+      .then((d) => setExplanation(d && !d.error ? d : null))
+      .catch(() => setExplanation(null))
+      .finally(() => setExplainLoading(false));
+  }, [mode, alertId]);
+
+  // Decide effective view mode: force graph for cycles, Sankey otherwise
+  const effectiveView = useMemo(() => {
+    if (viewMode !== 'auto') return viewMode;
+    if (!data) return 'force';
+    const sides = new Set((data.nodes || []).map((n) => n.side));
+    // Multi-column? Sankey looks great. Single column? Force (better for cycles)
+    const hasMulti = sides.size > 1;
+    return hasMulti ? 'sankey' : 'force';
+  }, [data, viewMode]);
 
   // Build graph data with positions:
   //   - entity-mode trace: upstream/focus/downstream get layered columns
@@ -325,10 +349,29 @@ export default function Journey() {
           </>
         )}
 
+        {/* View mode toggle */}
+        <div className="inline-flex rounded-lg border border-gray-300 p-0.5 ml-auto">
+          {['auto', 'sankey', 'force'].map((m) => (
+            <button
+              key={m}
+              onClick={() => setViewMode(m)}
+              className={`px-2.5 py-1 text-xs rounded-md transition-colors capitalize ${
+                effectiveView === m && viewMode !== 'auto'
+                  ? 'bg-indigo-600 text-white'
+                  : viewMode === 'auto' && m === 'auto'
+                  ? 'bg-indigo-600 text-white'
+                  : 'text-gray-600 hover:bg-gray-50'
+              }`}
+            >
+              {m}
+            </button>
+          ))}
+        </div>
+
         {mode === 'alert' && alertId && (
           <button
             onClick={() => downloadFromAPI(`/api/fiu/package/${alertId}`, `FIU_${alertId}.zip`)}
-            className="ml-auto px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700"
+            className="px-3 py-1.5 text-sm bg-emerald-600 text-white rounded-md hover:bg-emerald-700"
           >
             Download FIU Package
           </button>
@@ -375,6 +418,51 @@ export default function Journey() {
         </div>
       )}
 
+      {/* SHAP explanation */}
+      {mode === 'alert' && (explanation || explainLoading) && (
+        <div className="px-6 py-3 bg-violet-50 border-b border-violet-200">
+          <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-violet-900">ML Score Explanation (SHAP)</h3>
+            {explanation && (
+              <span className="text-xs text-violet-700">
+                Predicted fraud probability: <strong>{(explanation.predicted_proba * 100).toFixed(1)}%</strong>
+                {' '}for edge <span className="font-mono">{explanation.edge}</span>
+              </span>
+            )}
+          </div>
+          {explainLoading && (
+            <p className="text-xs text-violet-700">Computing SHAP values...</p>
+          )}
+          {explanation && (
+            <div className="space-y-1.5">
+              {(explanation.top_features || []).slice(0, 6).map((f) => {
+                const pct = Math.abs(f.shap) / Math.max(...(explanation.top_features || []).map(x => Math.abs(x.shap))) * 100;
+                const positive = f.shap > 0;
+                return (
+                  <div key={f.feature} className="flex items-center gap-3 text-xs">
+                    <span className="w-56 text-violet-900">{f.feature}</span>
+                    <span className="font-mono text-violet-700 w-16 text-right">val: {Number(f.value).toFixed(2)}</span>
+                    <div className="flex-1 relative h-2 bg-violet-200 rounded">
+                      <div
+                        className={`absolute top-0 h-2 rounded ${positive ? 'left-1/2 bg-red-500' : 'right-1/2 bg-emerald-500'}`}
+                        style={{ width: `${pct / 2}%` }}
+                      />
+                      <div className="absolute top-0 left-1/2 w-px h-2 bg-violet-400" />
+                    </div>
+                    <span className={`font-mono w-16 text-right ${positive ? 'text-red-700' : 'text-emerald-700'}`}>
+                      {f.shap > 0 ? '+' : ''}{f.shap.toFixed(3)}
+                    </span>
+                  </div>
+                );
+              })}
+              <p className="text-[10px] text-violet-600 mt-2 italic">
+                Positive (red) = pushed score up. Negative (green) = pulled it down. Top features only.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Main: graph + detail + timeline */}
       <div className="flex-1 flex min-h-0">
         {/* Graph canvas */}
@@ -394,7 +482,21 @@ export default function Journey() {
               Pick an alert or entity to begin tracing.
             </div>
           )}
-          {data && (
+          {data && effectiveView === 'sankey' && (
+            <div className="absolute inset-0 overflow-auto p-4">
+              <Sankey
+                nodes={data.nodes}
+                links={data.links}
+                height={Math.max(400, (data.nodes?.length || 0) * 18 + 40)}
+                onNodeClick={(n) => setSelectedNodeId(n.id)}
+                onLinkClick={(l) => {
+                  const sId = typeof l.source === 'object' ? l.source.id : l.source;
+                  setSelectedNodeId(sId);
+                }}
+              />
+            </div>
+          )}
+          {data && effectiveView === 'force' && (
             <>
               <ForceGraph2D
                 ref={fgRef}
