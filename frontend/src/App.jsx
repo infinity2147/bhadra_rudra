@@ -156,7 +156,8 @@ export default function App() {
               <p className="text-[10px] text-gray-500 font-medium">Team Bhadra</p>
             </div>
           </aside>
-          <main className="flex-1 overflow-y-auto">
+          <main className="flex-1 min-h-0 overflow-hidden">
+            <div className="h-full overflow-y-auto overflow-x-hidden">
             <Routes>
               <Route path="/" element={<Dashboard />} />
               <Route path="/incidents" element={<Incidents />} />
@@ -173,6 +174,7 @@ export default function App() {
               <Route path="/settings" element={<Settings />} />
               <Route path="/aa" element={<AccountAggregator />} />
             </Routes>
+            </div>
           </main>
         </div>
       </BrowserRouter>

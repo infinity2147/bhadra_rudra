@@ -17,6 +17,21 @@ function formatINR(value) {
   return `₹${Number(value).toLocaleString('en-IN')}`;
 }
 
+/** Scale API nodes for layout + smaller on-screen circles */
+function normalizeGraphPayload(data) {
+  const links = data.links || data.edges || [];
+  const nodes = (data.nodes || []).map((n) => {
+    const degree = n.degree ?? 1;
+    return {
+      ...n,
+      risk_score: n.risk_score ?? n.riskScore,
+      is_fraud: n.is_fraud ?? n.isFraud,
+      val: Math.min(4, 1.5 + Math.sqrt(degree) * 0.5),
+    };
+  });
+  return { nodes, links };
+}
+
 export default function Graph() {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [loading, setLoading] = useState(true);
@@ -57,11 +72,7 @@ export default function Graph() {
     const url = `/api/graph${qs ? `?${qs}` : ''}`;
 
     fetchAPI(url)
-      .then(data => {
-        // Normalize: API may return { nodes, links } or { nodes, edges }
-        const links = data.links || data.edges || [];
-        setGraphData({ nodes: data.nodes || [], links });
-      })
+      .then((data) => setGraphData(normalizeGraphPayload(data)))
       .catch(err => setError(err.message))
       .finally(() => setLoading(false));
   }, [fraudOnly, highRiskOnly, minAmount]);
@@ -72,6 +83,19 @@ export default function Graph() {
     setNodeDetails(null);
     setSubgraphData(null);
   }, [fraudOnly, highRiskOnly, minAmount]);
+
+  // Fit graph in view after data loads
+  useEffect(() => {
+    if (loading || !graphData.nodes.length || !mainGraphRef.current) return;
+    const t = setTimeout(() => {
+      try {
+        mainGraphRef.current.zoomToFit(400, 72);
+      } catch {
+        /* ignore */
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [loading, graphData]);
 
   const handleNodeClick = useCallback((node) => {
     setSelectedNode(node);
@@ -95,8 +119,7 @@ export default function Graph() {
     setSubgraphData(null);
     try {
       const data = await fetchAPI(`/api/graph/${entityId}`);
-      const links = data.links || data.edges || [];
-      setSubgraphData({ nodes: data.nodes || [], links });
+      setSubgraphData(normalizeGraphPayload(data));
     } catch (err) {
       console.error('Failed to load subgraph:', err);
     } finally {
@@ -104,27 +127,32 @@ export default function Graph() {
     }
   }, []);
 
-  // Custom node canvas object
+  // Custom node canvas object — small circles; labels when zoomed in or selected
   const paintNode = useCallback((node, ctx, globalScale) => {
-    const label = node.name || node.id;
-    const fontSize = Math.max(12 / globalScale, 2);
-    const nodeSize = Math.max(4, Math.min(12, (node.val || 3)));
+    const degree = node.degree ?? node.val ?? 1;
+    const isSelected = selectedNode?.id === node.id;
+    const nodeSize = isSelected
+      ? Math.max(3, Math.min(5.5, 2 + Math.sqrt(degree) * 0.35))
+      : Math.max(2, Math.min(4, 1.5 + Math.sqrt(degree) * 0.3));
 
-    // Draw circle
     ctx.beginPath();
     ctx.arc(node.x, node.y, nodeSize, 0, 2 * Math.PI);
     ctx.fillStyle = NODE_COLORS[node.type] || '#6366f1';
     ctx.fill();
-    ctx.strokeStyle = selectedNode?.id === node.id ? '#1e1b4b' : 'rgba(255,255,255,0.8)';
-    ctx.lineWidth = selectedNode?.id === node.id ? 2 / globalScale : 0.5 / globalScale;
+    ctx.strokeStyle = isSelected ? '#1e1b4b' : 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = isSelected ? 1.5 / globalScale : 0.4 / globalScale;
     ctx.stroke();
 
-    // Draw label
-    ctx.font = `${fontSize}px Sans-Serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillStyle = '#374151';
-    ctx.fillText(label, node.x, node.y + nodeSize + 1);
+    const showLabel = isSelected || globalScale >= 1.25;
+    if (showLabel) {
+      const label = (node.name || node.id).slice(0, isSelected ? 22 : 14);
+      const fontSize = Math.max(8 / globalScale, 2);
+      ctx.font = `${isSelected ? '600 ' : ''}${fontSize}px Sans-Serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'top';
+      ctx.fillStyle = '#374151';
+      ctx.fillText(label, node.x, node.y + nodeSize + 1);
+    }
   }, [selectedNode]);
 
   // Custom link canvas object
@@ -243,15 +271,17 @@ export default function Graph() {
                 ref={mainGraphRef}
                 graphData={graphData}
                 nodeVal="val"
+                nodeRelSize={2}
                 nodeCanvasObject={paintNode}
                 nodeCanvasObjectMode={() => 'replace'}
                 linkCanvasObject={paintLink}
                 linkCanvasObjectMode={() => 'replace'}
-                linkDirectionalArrowLength={3}
+                linkDirectionalArrowLength={2.5}
                 linkDirectionalArrowRelPos={1}
                 onNodeClick={handleNodeClick}
                 backgroundColor="#fafafa"
-                cooldownTicks={100}
+                cooldownTicks={120}
+                d3VelocityDecay={0.55}
                 enableNodeDrag={true}
                 enableZoomInteraction={true}
                 enablePanInteraction={true}
@@ -280,14 +310,16 @@ export default function Graph() {
                   ref={subGraphRef}
                   graphData={subgraphData}
                   nodeVal="val"
+                  nodeRelSize={2}
                   nodeCanvasObject={paintNode}
                   nodeCanvasObjectMode={() => 'replace'}
                   linkCanvasObject={paintLink}
                   linkCanvasObjectMode={() => 'replace'}
-                  linkDirectionalArrowLength={3}
+                  linkDirectionalArrowLength={2.5}
                   linkDirectionalArrowRelPos={1}
                   backgroundColor="#ffffff"
-                  cooldownTicks={50}
+                  cooldownTicks={80}
+                  d3VelocityDecay={0.55}
                   enableNodeDrag={true}
                   enableZoomInteraction={true}
                   enablePanInteraction={true}

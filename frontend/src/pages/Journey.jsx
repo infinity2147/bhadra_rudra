@@ -41,6 +41,28 @@ function FlagPill({ text, tone = 'amber' }) {
   );
 }
 
+function GraphLegend() {
+  return (
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-gray-600">
+      <span className="flex items-center gap-1.5">
+        <span className="w-2.5 h-2.5 rounded-full bg-blue-500 shrink-0" /> Individual
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="w-2.5 h-2.5 rounded-full bg-green-500 shrink-0" /> Business
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="w-2.5 h-2.5 rounded-full bg-red-500 shrink-0" /> Shell Co.
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="w-5 h-0.5 bg-red-600 shrink-0" /> Fraud edge
+      </span>
+      <span className="flex items-center gap-1.5">
+        <span className="w-5 h-0.5 bg-amber-500 shrink-0" /> High ML score
+      </span>
+    </div>
+  );
+}
+
 export default function Journey() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
@@ -67,6 +89,22 @@ export default function Journey() {
   const [explainLoading, setExplainLoading] = useState(false);
 
   const fgRef = useRef();
+  const graphPanelRef = useRef(null);
+  const [panelSize, setPanelSize] = useState({ width: 800, height: 300 });
+
+  useEffect(() => {
+    const el = graphPanelRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver(([entry]) => {
+      const { width, height } = entry.contentRect;
+      setPanelSize({
+        width: Math.max(280, Math.floor(width)),
+        height: Math.max(200, Math.floor(height)),
+      });
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   // Load alert and entity options
   useEffect(() => {
@@ -155,11 +193,16 @@ export default function Journey() {
         groups[col].push(n);
       }
       nodes = [];
+      const colKeys = Object.keys(groups).map(Number);
+      const minCol = Math.min(...colKeys);
+      const maxCol = Math.max(...colKeys);
+      const colSpan = maxCol - minCol || 1;
+      const hSpread = panelSize.width * 0.82;
       Object.keys(groups).forEach(col => {
         const arr = groups[col];
-        const colX = (Number(col) - 1) * 350;
+        const colX = ((Number(col) - minCol) / colSpan - 0.5) * hSpread;
         arr.forEach((n, i) => {
-          const colY = (i - arr.length / 2) * 60;
+          const colY = (i - arr.length / 2) * 56;
           nodes.push({ ...n, fx: colX, fy: colY });
         });
       });
@@ -167,14 +210,26 @@ export default function Journey() {
     const nodeIds = new Set(nodes.map(n => n.id));
     const links = (data.links || []).filter(l => nodeIds.has(l.source) && nodeIds.has(l.target));
     return { nodes, links };
-  }, [data]);
+  }, [data, panelSize.width]);
+
+  // Fit force graph inside the lower panel when data or size changes
+  useEffect(() => {
+    if (effectiveView !== 'force' || !fgRef.current || !graphData.nodes.length) return;
+    const t = setTimeout(() => {
+      try {
+        fgRef.current.zoomToFit(400, 48);
+      } catch {
+        /* graph may not be mounted yet */
+      }
+    }, 150);
+    return () => clearTimeout(t);
+  }, [graphData, effectiveView, panelSize.width, panelSize.height]);
 
   // Node paint
   const paintNode = useCallback((node, ctx, globalScale) => {
     const isFocus = node.side === 'focus' || node.side === 'alert';
     const isShell = node.type === 'shell_company';
-    const hasFraud = (node.flags || []).includes('contains_fraud_txn');
-    const r = isFocus ? 12 : 7;
+    const r = isFocus ? 7 : 4.5;
 
     ctx.beginPath();
     ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
@@ -200,8 +255,8 @@ export default function Journey() {
       ctx.stroke();
     }
 
-    const label = (node.name || node.id).slice(0, 22);
-    const fontSize = Math.max(11 / globalScale, 2);
+    const label = (node.name || node.id).slice(0, 18);
+    const fontSize = Math.max(9 / globalScale, 2);
     ctx.font = `${fontSize}px ui-sans-serif`;
     ctx.fillStyle = '#111827';
     ctx.textAlign = 'center';
@@ -248,7 +303,7 @@ export default function Journey() {
   ) || [];
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="w-full max-w-full overflow-x-hidden">
       {/* Header */}
       <div className="px-6 pt-6 pb-3">
         <h1 className="text-2xl font-bold text-gray-900">Fund Journey Tracer</h1>
@@ -439,10 +494,10 @@ export default function Journey() {
                 const pct = Math.abs(f.shap) / Math.max(...(explanation.top_features || []).map(x => Math.abs(x.shap))) * 100;
                 const positive = f.shap > 0;
                 return (
-                  <div key={f.feature} className="flex items-center gap-3 text-xs">
-                    <span className="w-56 text-violet-900">{f.feature}</span>
-                    <span className="font-mono text-violet-700 w-16 text-right">val: {Number(f.value).toFixed(2)}</span>
-                    <div className="flex-1 relative h-2 bg-violet-200 rounded">
+                  <div key={f.feature} className="flex flex-wrap items-center gap-2 sm:gap-3 text-xs min-w-0">
+                    <span className="min-w-0 flex-1 basis-40 text-violet-900 truncate">{f.feature}</span>
+                    <span className="font-mono text-violet-700 shrink-0">val: {Number(f.value).toFixed(2)}</span>
+                    <div className="w-full sm:flex-1 sm:min-w-[120px] relative h-2 bg-violet-200 rounded">
                       <div
                         className={`absolute top-0 h-2 rounded ${positive ? 'left-1/2 bg-red-500' : 'right-1/2 bg-emerald-500'}`}
                         style={{ width: `${pct / 2}%` }}
@@ -463,31 +518,155 @@ export default function Journey() {
         </div>
       )}
 
-      {/* Main: graph + detail + timeline */}
-      <div className="flex-1 flex min-h-0">
-        {/* Graph canvas */}
-        <div className="flex-1 relative min-h-0 bg-gradient-to-b from-white to-gray-50">
+      {/* Timeline */}
+      {data && data.timeline && data.timeline.length > 0 && (
+        <div className="border-t border-gray-200 bg-white w-full max-w-full overflow-hidden">
+          <div className="px-6 py-2 border-b border-gray-100">
+            <h3 className="text-sm font-semibold text-gray-800">
+              Transaction Timeline ({data.timeline.length})
+            </h3>
+          </div>
+          <div className="overflow-x-hidden w-full">
+            <table className="w-full table-fixed text-xs">
+              <thead className="bg-gray-50">
+                <tr className="text-left text-gray-500">
+                  <th className="w-[18%] px-4 py-1.5 font-medium">Timestamp</th>
+                  <th className="w-[18%] px-2 py-1.5 font-medium">Sender</th>
+                  <th className="w-[18%] px-2 py-1.5 font-medium">Receiver</th>
+                  <th className="w-[12%] px-2 py-1.5 font-medium text-right">Amount</th>
+                  <th className="w-[12%] px-2 py-1.5 font-medium">Channel</th>
+                  <th className="w-[10%] px-2 py-1.5 font-medium">Rail</th>
+                  <th className="w-[12%] px-2 py-1.5 font-medium">Flag</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-gray-100">
+                {data.timeline.slice().reverse().map((t, i) => (
+                  <tr key={i} className={t.is_fraud ? 'bg-red-50/40' : ''}>
+                    <td className="px-4 py-1.5 font-mono text-gray-600 truncate">{(t.timestamp || '').slice(0, 19)}</td>
+                    <td className="px-2 py-1.5 truncate" title={t.sender_name}>{t.sender_name}</td>
+                    <td className="px-2 py-1.5 truncate" title={t.receiver_name}>{t.receiver_name}</td>
+                    <td className="px-2 py-1.5 text-right font-medium truncate">{formatINR(t.amount)}</td>
+                    <td className="px-2 py-1.5 text-gray-600 truncate">{t.channel}</td>
+                    <td className="px-2 py-1.5 text-gray-600 truncate">{t.transaction_type}</td>
+                    <td className="px-2 py-1.5 truncate">
+                      {t.is_fraud
+                        ? <span className="text-red-700 font-medium">{t.fraud_pattern?.replace(/_/g, ' ')}</span>
+                        : <span className="text-gray-400">normal</span>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* Selected entity detail (upper panel) */}
+      {selectedNode && data && (
+        <div className="px-6 py-4 border-t border-gray-200 bg-white w-full max-w-full">
+          <div className="flex items-start justify-between gap-3 mb-3 min-w-0">
+            <div className="min-w-0">
+              <p className="text-[10px] font-mono text-gray-400 truncate">{selectedNode.id}</p>
+              <h3 className="font-semibold text-gray-900 truncate">{selectedNode.name}</h3>
+              <p className="text-xs text-gray-500 capitalize mt-0.5 truncate">
+                {selectedNode.type} • {selectedNode.branch}
+              </p>
+            </div>
+            <button onClick={() => setSelectedNodeId(null)} className="text-gray-400 text-lg leading-none shrink-0">&times;</button>
+          </div>
+          <div className="space-y-3 text-sm min-w-0">
+            <div className="flex items-center gap-2 flex-wrap">
+              {(selectedNode.flags || []).map((f, i) => (
+                <FlagPill
+                  key={i}
+                  text={f.replace(/_/g, ' ')}
+                  tone={f === 'shell_company' || f === 'part_of_cycle' ? 'red' : 'amber'}
+                />
+              ))}
+              {SIDE_LABEL[selectedNode.side] && <FlagPill text={SIDE_LABEL[selectedNode.side]} tone="indigo" />}
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">Risk Score</p>
+                <p className="font-semibold">{(selectedNode.risk_score || 0).toFixed(3)}</p>
+              </div>
+              <div>
+                <p className="text-[10px] uppercase tracking-wide text-gray-500">Product</p>
+                <p className="font-semibold truncate">{selectedNode.product || 'N/A'}</p>
+              </div>
+            </div>
+            <button
+              onClick={() => navigate('/entities')}
+              className="text-xs px-3 py-1.5 border border-gray-300 rounded-md hover:bg-gray-50"
+            >
+              Open in Entity Explorer
+            </button>
+            {selectedEdges.length > 0 && (
+              <div className="pt-2 border-t border-gray-200">
+                <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
+                  Incident Edges ({selectedEdges.length})
+                </h4>
+                <ul className="space-y-1.5">
+                  {selectedEdges.slice(0, 12).map((l, i) => {
+                    const otherId = l.source === selectedNode.id ? l.target : l.source;
+                    const other = data.nodes.find(n => n.id === otherId);
+                    const isFraud = (l.flags || []).includes('contains_fraud_txn');
+                    return (
+                      <li key={i} className="text-xs border-l-2 pl-2 min-w-0"
+                          style={{ borderColor: isFraud ? '#dc2626' : '#cbd5e1' }}>
+                        <p className="font-medium text-gray-800 truncate">
+                          {l.source === selectedNode.id ? '→' : '←'} {other?.name || otherId}
+                        </p>
+                        <p className="text-gray-500 truncate">
+                          {formatINR(l.amount)} over {l.txn_count} txn{l.txn_count > 1 ? 's' : ''}
+                          {l.ml_score != null && <> • ML {(l.ml_score * 100).toFixed(0)}</>}
+                        </p>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Lower panel — graph + legend (part of page scroll) */}
+      <div className="border-t border-gray-200 bg-gray-50 flex flex-col h-[min(42vh,400px)] min-h-[280px] w-full max-w-full overflow-hidden">
+        <div className="shrink-0 px-4 py-2 border-b border-gray-200 bg-white flex flex-wrap items-center gap-x-4 gap-y-2 min-w-0">
+          <h3 className="text-sm font-semibold text-gray-800 shrink-0">Fund Flow</h3>
+          <GraphLegend />
+          {data && (
+            <span className="text-xs text-gray-500 ml-auto shrink-0 capitalize">
+              View: {effectiveView}
+            </span>
+          )}
+        </div>
+        <div
+          ref={graphPanelRef}
+          className="flex-1 min-h-0 min-w-0 w-full relative overflow-hidden bg-gradient-to-b from-white to-gray-50"
+        >
           {loading && (
-            <div className="absolute inset-0 flex items-center justify-center text-gray-400">
+            <div className="absolute inset-0 z-20 flex items-center justify-center text-gray-400">
               Tracing fund journey...
             </div>
           )}
           {error && (
-            <div className="absolute inset-0 flex items-center justify-center text-red-600">
+            <div className="absolute inset-0 z-20 flex items-center justify-center text-red-600 px-4 text-center">
               {error}
             </div>
           )}
           {!loading && !data && (
-            <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
-              Pick an alert or entity to begin tracing.
+            <div className="absolute inset-0 z-20 flex items-center justify-center text-gray-400 text-sm px-4 text-center">
+              Pick an alert or entity above to trace the fund flow.
             </div>
           )}
           {data && effectiveView === 'sankey' && (
-            <div className="absolute inset-0 overflow-auto p-4">
+            <div className="absolute inset-0 min-h-0">
               <Sankey
                 nodes={data.nodes}
                 links={data.links}
-                height={Math.max(400, (data.nodes?.length || 0) * 18 + 40)}
+                width={panelSize.width}
                 onNodeClick={(n) => setSelectedNodeId(n.id)}
                 onLinkClick={(l) => {
                   const sId = typeof l.source === 'object' ? l.source.id : l.source;
@@ -497,7 +676,7 @@ export default function Journey() {
             </div>
           )}
           {data && effectiveView === 'force' && (
-            <>
+            <div className="absolute inset-0">
               <ForceGraph2D
                 ref={fgRef}
                 graphData={graphData}
@@ -513,147 +692,14 @@ export default function Journey() {
                 cooldownTicks={50}
                 d3VelocityDecay={0.5}
                 enableNodeDrag={false}
-                backgroundColor="rgba(0,0,0,0)"
+                enableZoomInteraction={true}
+                enablePanInteraction={true}
+                backgroundColor="#fafafa"
               />
-              {/* Legend */}
-              <div className="absolute bottom-3 left-3 bg-white/95 backdrop-blur rounded-lg border border-gray-200 px-3 py-2 text-xs space-y-1 shadow-sm">
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-full bg-blue-500" /> Individual
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-full bg-green-500" /> Business
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-3 h-3 rounded-full bg-red-500" /> Shell Company
-                </div>
-                <hr className="border-gray-200" />
-                <div className="flex items-center gap-2">
-                  <span className="w-6 h-0.5 bg-red-600" /> Fraud edge
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="w-6 h-0.5 bg-amber-500" /> High ML score
-                </div>
-              </div>
-            </>
+            </div>
           )}
         </div>
-
-        {/* Right detail rail */}
-        {selectedNode && (
-          <div className="w-80 border-l border-gray-200 bg-white overflow-y-auto p-4 shrink-0">
-            <div className="flex items-start justify-between mb-3">
-              <div>
-                <p className="text-[10px] font-mono text-gray-400">{selectedNode.id}</p>
-                <h3 className="font-semibold text-gray-900">{selectedNode.name}</h3>
-                <p className="text-xs text-gray-500 capitalize mt-0.5">
-                  {selectedNode.type} • {selectedNode.branch}
-                </p>
-              </div>
-              <button onClick={() => setSelectedNodeId(null)} className="text-gray-400 text-lg leading-none">&times;</button>
-            </div>
-            <div className="space-y-3 text-sm">
-              <div className="flex items-center gap-2 flex-wrap">
-                {(selectedNode.flags || []).map((f, i) => (
-                  <FlagPill
-                    key={i}
-                    text={f.replace(/_/g, ' ')}
-                    tone={f === 'shell_company' || f === 'part_of_cycle' ? 'red' : 'amber'}
-                  />
-                ))}
-                {SIDE_LABEL[selectedNode.side] && <FlagPill text={SIDE_LABEL[selectedNode.side]} tone="indigo" />}
-              </div>
-              <div className="grid grid-cols-2 gap-2 pt-2">
-                <div>
-                  <p className="text-[10px] uppercase tracking-wide text-gray-500">Risk Score</p>
-                  <p className="font-semibold">{(selectedNode.risk_score || 0).toFixed(3)}</p>
-                </div>
-                <div>
-                  <p className="text-[10px] uppercase tracking-wide text-gray-500">Product</p>
-                  <p className="font-semibold">{selectedNode.product || 'N/A'}</p>
-                </div>
-              </div>
-              <button
-                onClick={() => navigate(`/entities`)}
-                className="w-full text-xs px-2 py-1.5 border border-gray-300 rounded-md hover:bg-gray-50"
-              >
-                Open in Entity Explorer
-              </button>
-              {selectedEdges.length > 0 && (
-                <div className="pt-2 border-t border-gray-200">
-                  <h4 className="text-[11px] font-semibold text-gray-500 uppercase tracking-wide mb-1.5">
-                    Incident Edges ({selectedEdges.length})
-                  </h4>
-                  <ul className="space-y-1.5 max-h-72 overflow-y-auto">
-                    {selectedEdges.slice(0, 30).map((l, i) => {
-                      const otherId = l.source === selectedNode.id ? l.target : l.source;
-                      const other = data.nodes.find(n => n.id === otherId);
-                      const isFraud = (l.flags || []).includes('contains_fraud_txn');
-                      return (
-                        <li key={i} className="text-xs border-l-2 pl-2"
-                            style={{ borderColor: isFraud ? '#dc2626' : '#cbd5e1' }}>
-                          <p className="font-medium text-gray-800">
-                            {l.source === selectedNode.id ? '→' : '←'} {other?.name || otherId}
-                          </p>
-                          <p className="text-gray-500">
-                            {formatINR(l.amount)} over {l.txn_count} txn{l.txn_count > 1 ? 's' : ''}
-                            {l.ml_score != null && <> • ML {(l.ml_score * 100).toFixed(0)}</>}
-                          </p>
-                          {(l.flags || []).length > 0 && (
-                            <p className="text-[10px] text-gray-500 mt-0.5">
-                              {l.flags.map(f => f.replace(/_/g, ' ')).join(' • ')}
-                            </p>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
       </div>
-
-      {/* Timeline */}
-      {data && data.timeline && data.timeline.length > 0 && (
-        <div className="border-t border-gray-200 bg-white max-h-64 overflow-y-auto">
-          <div className="px-6 py-2 border-b border-gray-100 flex items-center justify-between">
-            <h3 className="text-sm font-semibold text-gray-800">
-              Transaction Timeline ({data.timeline.length})
-            </h3>
-          </div>
-          <table className="w-full text-xs">
-            <thead className="bg-gray-50 sticky top-0">
-              <tr className="text-left text-gray-500">
-                <th className="px-6 py-1.5 font-medium">Timestamp</th>
-                <th className="px-3 py-1.5 font-medium">Sender</th>
-                <th className="px-3 py-1.5 font-medium">Receiver</th>
-                <th className="px-3 py-1.5 font-medium text-right">Amount</th>
-                <th className="px-3 py-1.5 font-medium">Channel</th>
-                <th className="px-3 py-1.5 font-medium">Rail</th>
-                <th className="px-3 py-1.5 font-medium">Flag</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-gray-100">
-              {data.timeline.slice().reverse().map((t, i) => (
-                <tr key={i} className={t.is_fraud ? 'bg-red-50/40' : ''}>
-                  <td className="px-6 py-1.5 font-mono text-gray-600 whitespace-nowrap">{(t.timestamp || '').slice(0, 19)}</td>
-                  <td className="px-3 py-1.5">{t.sender_name}</td>
-                  <td className="px-3 py-1.5">{t.receiver_name}</td>
-                  <td className="px-3 py-1.5 text-right font-medium">{formatINR(t.amount)}</td>
-                  <td className="px-3 py-1.5 text-gray-600">{t.channel}</td>
-                  <td className="px-3 py-1.5 text-gray-600">{t.transaction_type}</td>
-                  <td className="px-3 py-1.5">
-                    {t.is_fraud
-                      ? <span className="text-red-700 font-medium">{t.fraud_pattern?.replace(/_/g, ' ')}</span>
-                      : <span className="text-gray-400">normal</span>}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
     </div>
   );
 }
