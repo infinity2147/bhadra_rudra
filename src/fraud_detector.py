@@ -24,6 +24,9 @@ class FraudDetector:
         self.alerts: List[Dict] = []
         self.node_risk_scores: Dict[str, float] = {}
         self.detected_patterns: Dict[str, List] = defaultdict(list)
+        # Centrality cache — betweenness is O(VE), expensive to recompute on
+        # every call to compute_node_risk_scores (e.g. during re-detection).
+        self._centrality_cache: Optional[Dict] = None
 
     def _cfg(self, key: str, default):
         return self.config.get(key, default)
@@ -423,15 +426,23 @@ class FraudDetector:
         """Compute composite risk score for each node based on multiple signals."""
         scores = {}
 
-        try:
-            betweenness = nx.betweenness_centrality(self.graph, weight="total_amount")
-        except Exception:
-            betweenness = {n: 0 for n in self.graph.nodes()}
-
-        try:
-            degree_centrality = nx.degree_centrality(self.graph)
-        except Exception:
-            degree_centrality = {n: 0 for n in self.graph.nodes()}
+        # Centrality is O(VE) — cache it so re-runs (e.g. after threshold changes)
+        # don't pay the full cost again.
+        if self._centrality_cache is None:
+            try:
+                betweenness = nx.betweenness_centrality(self.graph, weight="total_amount")
+            except Exception:
+                betweenness = {n: 0 for n in self.graph.nodes()}
+            try:
+                degree_centrality = nx.degree_centrality(self.graph)
+            except Exception:
+                degree_centrality = {n: 0 for n in self.graph.nodes()}
+            self._centrality_cache = {
+                "betweenness": betweenness,
+                "degree": degree_centrality,
+            }
+        betweenness = self._centrality_cache["betweenness"]
+        degree_centrality = self._centrality_cache["degree"]
 
         for node in self.graph.nodes():
             signals = []

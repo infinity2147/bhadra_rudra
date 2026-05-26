@@ -16,34 +16,51 @@ class FundFlowGraph:
     def __init__(self):
         self.graph = nx.DiGraph()
         self.entity_attributes: Dict = {}
+        # Maps (sender_id, receiver_id) → list of transaction dicts for that edge.
+        # Populated during build_graph so callers can query raw per-edge transactions
+        # (e.g. for velocity burst detection) without a full DataFrame scan.
         self._edge_txn_map: Dict = defaultdict(list)
+        self._node_features_cache: Optional[Dict] = None
 
     def build_graph(self, df: pd.DataFrame) -> nx.DiGraph:
         """Build directed weighted graph from transaction DataFrame."""
         self.graph = nx.DiGraph()
+        self._node_features_cache = None   # invalidate feature cache on rebuild
         has_product = "sender_product" in df.columns
         has_channel = "channel" in df.columns
 
-        # Add nodes with attributes (use most common product per entity if present)
-        for _, row in df.iterrows():
-            sender_attrs = {
-                "name": row["sender_name"],
-                "type": row["sender_type"],
-                "branch": row["sender_branch"],
-            }
-            if has_product:
-                sender_attrs["product"] = row["sender_product"]
-            receiver_attrs = {
-                "name": row["receiver_name"],
-                "type": row["receiver_type"],
-                "branch": row["receiver_branch"],
-            }
-            if has_product:
-                receiver_attrs["product"] = row["receiver_product"]
-            self.graph.add_node(row["sender_id"], **sender_attrs)
-            self.graph.add_node(row["receiver_id"], **receiver_attrs)
+        # ── Nodes — vectorized: deduplicate, then add_nodes_from one list ──────
+        # iterrows() over all transactions was O(N_txns) with heavy Python
+        # overhead per row.  Instead we extract unique entities from each side
+        # and call add_nodes_from() once per side.
+        sender_cols = ["sender_id", "sender_name", "sender_type", "sender_branch"]
+        receiver_cols = ["receiver_id", "receiver_name", "receiver_type", "receiver_branch"]
+        if has_product:
+            sender_cols.append("sender_product")
+            receiver_cols.append("receiver_product")
 
-        # Add edges with aggregated weights
+        senders = (
+            df[sender_cols]
+            .drop_duplicates("sender_id")
+            .rename(columns=lambda c: c.replace("sender_", ""))
+        )
+        receivers = (
+            df[receiver_cols]
+            .drop_duplicates("receiver_id")
+            .rename(columns=lambda c: c.replace("receiver_", ""))
+        )
+        # Merge both sides; entity appearing as both sender and receiver keeps
+        # the sender-side attributes (arbitrary but deterministic).
+        all_entities = (
+            pd.concat([senders, receivers], ignore_index=True)
+            .drop_duplicates("id")
+        )
+        self.graph.add_nodes_from(
+            (row["id"], {k: v for k, v in row.items() if k != "id"})
+            for _, row in all_entities.iterrows()
+        )
+
+        # ── Edges — aggregate stats ──────────────────────────────────────────
         agg_dict = {
             "total_amount": ("amount", "sum"),
             "transaction_count": ("amount", "count"),
@@ -58,16 +75,21 @@ class FundFlowGraph:
         edge_data = df.groupby(["sender_id", "receiver_id"]).agg(**agg_dict).reset_index()
         edge_data["std_amount"] = edge_data["std_amount"].fillna(0)
 
-        # Channel/rail/product mix per edge (computed separately to keep groupby simple)
-        rail_mix = {}
-        channel_mix = {}
-        if has_channel:
-            for (s, r), sub in df.groupby(["sender_id", "receiver_id"]):
-                rail_mix[(s, r)] = sub["transaction_type"].value_counts().to_dict()
+        # ── Rail / channel mix + edge_txn_map — single groupby pass ────────────
+        # Previously two separate groupby loops; merge into one.
+        # _edge_txn_map is populated here so callers can inspect raw per-edge
+        # transactions (e.g. burst detection) without rescanning the DataFrame.
+        self._edge_txn_map = defaultdict(list)
+        rail_mix: Dict = {}
+        channel_mix: Dict = {}
+        txn_cols = ["transaction_id", "timestamp", "amount", "transaction_type",
+                    "is_fraud", "fraud_pattern"] + (["channel"] if has_channel else [])
+        txn_cols = [c for c in txn_cols if c in df.columns]
+        for (s, r), sub in df.groupby(["sender_id", "receiver_id"]):
+            rail_mix[(s, r)] = sub["transaction_type"].value_counts().to_dict()
+            if has_channel:
                 channel_mix[(s, r)] = sub["channel"].value_counts().to_dict()
-        else:
-            for (s, r), sub in df.groupby(["sender_id", "receiver_id"]):
-                rail_mix[(s, r)] = sub["transaction_type"].value_counts().to_dict()
+            self._edge_txn_map[(s, r)] = sub[txn_cols].to_dict("records")
 
         for _, row in edge_data.iterrows():
             key = (row["sender_id"], row["receiver_id"])
@@ -89,7 +111,13 @@ class FundFlowGraph:
         return self.graph
 
     def get_node_features(self) -> Dict[str, Dict]:
-        """Compute node-level features for fraud detection."""
+        """Compute node-level features for fraud detection.
+
+        Result is cached after the first call and reused until build_graph()
+        is called again (which sets _node_features_cache = None).
+        """
+        if self._node_features_cache is not None:
+            return self._node_features_cache
         features = {}
         for node in self.graph.nodes():
             in_degree = self.graph.in_degree(node)
@@ -119,6 +147,7 @@ class FundFlowGraph:
                 "branch": self.graph.nodes[node].get("branch", "unknown"),
             }
 
+        self._node_features_cache = features
         return features
 
     def get_edge_features(self) -> List[Dict]:
@@ -139,15 +168,24 @@ class FundFlowGraph:
         return features
 
     def extract_subgraph(self, node_ids: List[str], hops: int = 1) -> nx.DiGraph:
-        """Extract a subgraph around specified nodes."""
-        nodes_to_include = set(node_ids)
-        for _ in range(hops):
-            new_nodes = set()
-            for node in nodes_to_include:
-                new_nodes.update(self.graph.predecessors(node))
-                new_nodes.update(self.graph.successors(node))
-            nodes_to_include.update(new_nodes)
+        """Extract a subgraph around specified nodes up to `hops` away.
 
+        Uses nx.ego_graph on an undirected view so both predecessors and
+        successors are included, then restricts back to the original directed
+        graph.  This replaces the hand-rolled BFS which had a subtle bug:
+        it expanded the full `nodes_to_include` set every iteration rather
+        than only the newly-added frontier, causing hop-2 nodes to be
+        re-expanded in hop-3.
+        """
+        # Undirected view lets ego_graph follow edges in both directions.
+        undirected = self.graph.to_undirected(as_view=True)
+        nodes_to_include: set = set()
+        for seed in node_ids:
+            if seed in self.graph:
+                ego = nx.ego_graph(undirected, seed, radius=hops)
+                nodes_to_include.update(ego.nodes())
+        if not nodes_to_include:
+            nodes_to_include = set(node_ids)
         return self.graph.subgraph(nodes_to_include).copy()
 
     def get_graph_stats(self) -> Dict:
@@ -155,9 +193,11 @@ class FundFlowGraph:
         if not self.graph.nodes():
             return {}
 
+        # get_node_features() already stores total_degree and turnover in the
+        # cached dict — read from there instead of a separate graph.degree() pass.
         node_features = self.get_node_features()
-        degrees = [d for _, d in self.graph.degree()]
-        strengths = [f["turnover"] for f in node_features.values()]
+        degrees   = [f["total_degree"] for f in node_features.values()]
+        strengths = [f["turnover"]     for f in node_features.values()]
 
         return {
             "total_nodes": self.graph.number_of_nodes(),
@@ -185,9 +225,13 @@ class FundFlowGraph:
 
         elements = {"nodes": [], "edges": []}
 
+        # Compute features once, outside the loop — was previously calling
+        # get_node_features() per node, re-traversing the entire graph each time.
+        all_node_features = self.get_node_features()
+
         for node in G.nodes():
             node_data = dict(G.nodes[node])
-            node_features = self.get_node_features().get(node, {})
+            node_features = all_node_features.get(node, {})
             is_fraud = node in fraud_nodes
             node_type = node_data.get("type", "individual")
 

@@ -15,6 +15,10 @@ Order of operations:
 import os
 import sys
 
+# Windows terminals default to cp1252; force UTF-8 so ₹, →, etc. don't crash.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+
 sys.path.insert(0, os.path.dirname(__file__))
 
 from data_generator import TransactionGenerator, save_data

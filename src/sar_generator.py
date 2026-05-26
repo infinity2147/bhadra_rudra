@@ -256,9 +256,9 @@ class SARGenerator:
             return filepath
 
         except ImportError:
-            # Fallback: save as text file
+            # Fallback: save as text file (explicit UTF-8 — cp1252 chokes on ₹ etc.)
             txt_path = filepath.replace(".pdf", ".txt")
-            with open(txt_path, "w") as f:
+            with open(txt_path, "w", encoding="utf-8") as f:
                 f.write(sar.get("report_text", ""))
             return txt_path
 
