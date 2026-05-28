@@ -133,13 +133,13 @@ def load_ibm_aml(
 
     out["sender_id"] = df["_from_bank"].astype(str) + "-" + df["_from_acct"].astype(str)
     out["sender_name"] = out["sender_id"]
-    out["sender_type"] = "individual"
+    out["sender_type"] = "individual"   # will be overwritten below
     out["sender_branch"] = "Bank-" + df["_from_bank"].astype(str)
     out["sender_product"] = "CurrentAccount"
 
     out["receiver_id"] = df["_to_bank"].astype(str) + "-" + df["_to_acct"].astype(str)
     out["receiver_name"] = out["receiver_id"]
-    out["receiver_type"] = "individual"
+    out["receiver_type"] = "individual"  # will be overwritten below
     out["receiver_branch"] = "Bank-" + df["_to_bank"].astype(str)
     out["receiver_product"] = "CurrentAccount"
 
@@ -165,6 +165,35 @@ def load_ibm_aml(
     out["is_fraud"] = df["_is_fraud"].fillna(0).astype(int).astype(bool)
     out["fraud_pattern"] = np.where(out["is_fraud"], "ibm_labeled_aml", "none")
     out["fraud_case_id"] = np.where(out["is_fraud"], "IBM_AML_CASE", "")
+
+    # ── Infer entity types from graph behaviour ───────────────────────────────
+    # IBM AML has no entity labels — everyone would be "individual" by default,
+    # making sender_is_shell / sender_is_business always 0 (dead features).
+    # We infer types from transaction patterns instead:
+    #   shell_company → fans out to many unique receivers vs. how many send to it
+    #   business      → appears in many transactions (top 25% by activity)
+    #   individual    → everything else
+    sender_unique_recv = out.groupby("sender_id")["receiver_id"].nunique()
+    recv_unique_send   = out.groupby("receiver_id")["sender_id"].nunique()
+    all_accounts       = pd.concat([out["sender_id"], out["receiver_id"]])
+    account_activity   = all_accounts.value_counts()
+    activity_75th      = float(np.percentile(account_activity.values, 75))
+
+    def _infer_type(acct_id: str) -> str:
+        out_fan  = int(sender_unique_recv.get(acct_id, 0))
+        in_fan   = int(recv_unique_send.get(acct_id, 0))
+        activity = int(account_activity.get(acct_id, 0))
+        # Pass-through / fan-out pattern → shell company
+        if out_fan >= 5 and out_fan >= 3 * max(in_fan, 1):
+            return "shell_company"
+        # High transaction activity → business
+        if activity >= activity_75th and activity >= 5:
+            return "business"
+        return "individual"
+
+    out["sender_type"]   = out["sender_id"].map(_infer_type)
+    out["receiver_type"] = out["receiver_id"].map(_infer_type)
+    # ─────────────────────────────────────────────────────────────────────────
 
     out = out[INTERNAL_COLUMNS]
 
