@@ -101,19 +101,88 @@ class DormantActivationDetector:
 
 
 class ProfileMismatchDetector:
-    """Detect behavioral mismatches between entity type and transaction patterns."""
+    """Detect behavioral mismatches between entity type and transaction patterns.
+
+    Score composition (T2.9):
+      * Rule mismatches (e.g. "individual averaging > ₹10L") generate a
+        `rule_score = count(mismatches) × profile_score_per_mismatch`.
+      * The XGBoost edge classifier scores every edge involving this entity;
+        we take the *max* score across those edges as an `ml_score` —
+        this lifts the alert when the model independently flags any of the
+        entity's relationships as suspicious.
+      * Final confidence = max(rule_score, ml_score) capped at profile_max_score.
+
+    The reason for `max` instead of a learned mix: the rules and the ML model
+    catch *different* failure modes — a rule-based "high night-time ratio"
+    won't be in the ML feature set; conversely, the ML model can flag
+    profile-consistent behaviour that violates learned patterns the rules
+    don't encode. Either signal triggering should raise the alert. (A linear
+    mix is the wrong inductive bias here — we'd just dilute strong signals.)
+
+    Every threshold below reads from the ConfigStore-backed `config` dict
+    (see src/config_store.py DEFAULT_CONFIG, keys prefixed `profile_`).
+    """
 
     def __init__(self, graph: nx.DiGraph, transactions: pd.DataFrame,
-                 risk_scores: List[Dict]):
+                 risk_scores: List[Dict], config: Optional[Dict] = None,
+                 edge_scores: Optional[Dict[str, float]] = None):
+        """Construct.
+
+        Args:
+            edge_scores: optional {"u->v": ml_score} mapping. When provided,
+                each entity's alert confidence is lifted toward the max ML
+                score across its incoming and outgoing edges. When absent,
+                rule_score alone determines confidence (backwards-compatible
+                with code paths that don't load the ML bundle).
+        """
         self.graph = graph
         self.transactions = transactions
         self.risk_scores = {r["entity_id"]: r for r in risk_scores}
+        self.config = config or {}
+        self.edge_scores = edge_scores or {}
+
+    def _cfg(self, key: str, default):
+        return self.config.get(key, default)
+
+    def _ml_score_for_entity(self, node: str) -> Optional[float]:
+        """Max ML score across all edges adjacent to this node, or None if no edges scored."""
+        if not self.edge_scores:
+            return None
+        scores = []
+        for u in self.graph.predecessors(node):
+            s = self.edge_scores.get(f"{u}->{node}")
+            if s is not None:
+                scores.append(s)
+        for v in self.graph.successors(node):
+            s = self.edge_scores.get(f"{node}->{v}")
+            if s is not None:
+                scores.append(s)
+        if not scores:
+            return None
+        return float(max(scores))
 
     def detect(self) -> List[Dict]:
         """Find entities whose transaction behavior mismatches their declared profile."""
         alerts = []
         txns = self.transactions.copy()
         txns["timestamp"] = pd.to_datetime(txns["timestamp"])
+
+        # Pull every threshold up-front so the hot loop stays tight.
+        max_individual_avg     = self._cfg("profile_individual_max_avg_amount", 1_000_000)
+        max_individual_volume  = self._cfg("profile_individual_max_total_volume", 50_000_000)
+        max_import_payments    = self._cfg("profile_individual_max_import_payments", 2)
+        max_vendor_payments    = self._cfg("profile_individual_max_vendor_payments", 3)
+        biz_min_received       = self._cfg("profile_business_min_received_with_no_sent", 5)
+        biz_max_upi_ratio      = self._cfg("profile_business_max_upi_ratio", 0.8)
+        biz_min_avg            = self._cfg("profile_business_min_avg_amount", 10_000)
+        biz_min_txns_low_avg   = self._cfg("profile_business_min_txns_for_low_avg_check", 20)
+        shell_max_txns         = self._cfg("profile_shell_max_txns", 10)
+        max_branches           = self._cfg("profile_max_branches", 4)
+        max_night_ratio        = self._cfg("profile_max_night_ratio", 0.4)
+        score_per_mismatch     = self._cfg("profile_score_per_mismatch", 0.2)
+        max_score              = self._cfg("profile_max_score", 0.95)
+        critical_threshold     = self._cfg("profile_critical_score_threshold", 0.6)
+        high_threshold         = self._cfg("profile_high_score_threshold", 0.4)
 
         for node in self.graph.nodes():
             node_data = self.graph.nodes[node]
@@ -134,35 +203,28 @@ class ProfileMismatchDetector:
 
             # Type-specific checks
             if entity_type == "individual":
-                # Individual sending very large amounts
-                if len(sent) > 0 and sent["amount"].mean() > 1000000:
-                    mismatches.append("Individual averaging >₹10L per transaction")
-                # Individual using business payment channels
+                if len(sent) > 0 and sent["amount"].mean() > max_individual_avg:
+                    mismatches.append(f"Individual averaging > {max_individual_avg:,.0f} per transaction")
                 purposes = sent["purpose_code"].value_counts().to_dict()
-                if purposes.get("Import Payment", 0) > 2:
+                if purposes.get("Import Payment", 0) > max_import_payments:
                     mismatches.append("Individual making import payments")
-                if purposes.get("Vendor Payment", 0) > 3:
+                if purposes.get("Vendor Payment", 0) > max_vendor_payments:
                     mismatches.append("Individual making frequent vendor payments")
-                # High volume for individual
-                if total_volume > 50000000:
-                    mismatches.append(f"Individual with ₹{total_volume/1e7:.1f} Cr total volume")
+                if total_volume > max_individual_volume:
+                    mismatches.append(f"Individual with {total_volume:,.0f} total volume")
 
             elif entity_type == "business":
-                # Business only receiving, never sending
-                if len(sent) == 0 and len(received) > 5:
+                if len(sent) == 0 and len(received) > biz_min_received:
                     mismatches.append("Business only receiving funds, no outflows")
-                # Business using personal channels excessively
                 if len(sent) > 0:
                     txn_types = sent["transaction_type"].value_counts().to_dict()
-                    if txn_types.get("UPI", 0) > len(sent) * 0.8:
-                        mismatches.append("Business using UPI for >80% of transactions")
-                # Low average amount for business
-                if avg_amount < 10000 and len(node_txns) > 20:
+                    if txn_types.get("UPI", 0) > len(sent) * biz_max_upi_ratio:
+                        mismatches.append(f"Business using UPI for >{biz_max_upi_ratio:.0%} of transactions")
+                if avg_amount < biz_min_avg and len(node_txns) > biz_min_txns_low_avg:
                     mismatches.append("Business with consistently low transaction amounts")
 
             elif entity_type == "shell_company":
-                # Shell company with high activity (should be dormant)
-                if len(node_txns) > 10:
+                if len(node_txns) > shell_max_txns:
                     mismatches.append(f"Shell company with {len(node_txns)} transactions")
 
             # Cross-branch activity
@@ -171,26 +233,75 @@ class ProfileMismatchDetector:
                 branches.update(sent["sender_branch"].dropna().tolist())
             if len(received) > 0:
                 branches.update(received["receiver_branch"].dropna().tolist())
-            if len(branches) > 4:
+            if len(branches) > max_branches:
                 mismatches.append(f"Activity across {len(branches)} different branches")
 
             # Time-based anomalies (nighttime transactions)
             if len(node_txns) > 0:
                 hours = pd.to_datetime(node_txns["timestamp"]).dt.hour
                 night_ratio = ((hours < 6) | (hours > 22)).mean()
-                if night_ratio > 0.4:
+                if night_ratio > max_night_ratio:
                     mismatches.append(f"{night_ratio:.0%} transactions during nighttime (10PM-6AM)")
 
-            if mismatches:
-                score = min(len(mismatches) * 0.2, 0.95)
+            # Compose the confidence: rule signal AND ML signal, take the max.
+            # An alert fires if *either* signal is strong enough — different
+            # failure modes (see class docstring).
+            ml_score = self._ml_score_for_entity(node)
+            rule_score = min(len(mismatches) * score_per_mismatch, max_score) if mismatches else 0.0
+
+            # Combine. `max` not `mean` — strong signal on either side wins.
+            combined_score = max(rule_score, ml_score or 0.0)
+
+            # Alert if either side is meaningful. The original "needs mismatches
+            # to alert" rule is preserved when no ML bundle is loaded; with ML,
+            # high ml_score alone is enough to flag.
+            should_alert = (
+                (mismatches and rule_score > 0)
+                or (ml_score is not None and ml_score >= high_threshold)
+            )
+
+            if should_alert:
                 risk_info = self.risk_scores.get(node, {})
                 base_risk = risk_info.get("risk_score", 0)
+
+                if combined_score > critical_threshold:
+                    severity = "CRITICAL"
+                elif combined_score > high_threshold:
+                    severity = "HIGH"
+                else:
+                    severity = "MEDIUM"
+
+                # Generate a description that names which signal(s) fired.
+                if mismatches and ml_score is not None:
+                    desc = (
+                        f"Entity '{node_name}' ({entity_type}) — {len(mismatches)} behavioural "
+                        f"mismatches AND ML score {ml_score:.2f} on related edges. "
+                        f"Mismatches: {'; '.join(mismatches[:3])}"
+                    )
+                elif mismatches:
+                    desc = (
+                        f"Entity '{node_name}' ({entity_type}) shows {len(mismatches)} behavioural "
+                        f"mismatches: {'; '.join(mismatches[:3])}"
+                    )
+                else:
+                    desc = (
+                        f"Entity '{node_name}' ({entity_type}) has no rule-based mismatches but "
+                        f"the ML model flagged its edges (max score {ml_score:.2f}). "
+                        f"Profile may be consistent with type but transaction-level patterns are suspicious."
+                    )
 
                 alert = {
                     "alert_id": f"ALERT_PROF_{len(alerts) + 1:04d}",
                     "pattern_type": "Profile Mismatch",
-                    "severity": "CRITICAL" if score > 0.6 else "HIGH" if score > 0.4 else "MEDIUM",
-                    "confidence": round(score * 100, 1),
+                    "severity": severity,
+                    "confidence": round(combined_score * 100, 1),
+                    "rule_score": round(rule_score, 4),
+                    "ml_score": round(ml_score, 4) if ml_score is not None else None,
+                    "scoring_mode": (
+                        "rule+ml" if (mismatches and ml_score is not None)
+                        else "rule_only" if mismatches
+                        else "ml_only"
+                    ),
                     "entities": [node],
                     "entity_names": [node_name],
                     "entity_type": entity_type,
@@ -198,10 +309,7 @@ class ProfileMismatchDetector:
                     "mismatch_count": len(mismatches),
                     "base_risk_score": base_risk,
                     "behavioral_volume": round(total_volume, 2),
-                    "description": (
-                        f"Entity '{node_name}' ({entity_type}) shows {len(mismatches)} behavioral "
-                        f"mismatches: {'; '.join(mismatches[:3])}"
-                    ),
+                    "description": desc,
                     "recommendation": (
                         "Review KYC documents. Verify declared business activity. "
                         "Compare with peer entities of same type. Consider re-classification."

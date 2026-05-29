@@ -27,15 +27,45 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "layering_min_chain_length": 3,
     "layering_max_chains": 200,
     "layering_decrease_ratio": 0.85,      # next amount must be >= ratio * prev
+    "layering_max_branching_per_node": 10,  # BFS branching factor per node — was hardcoded to 5
     # Smurfing
-    "smurfing_threshold": 200_000,        # ₹2L reporting threshold
+    "smurfing_threshold": 200_000,        # ₹2L reporting threshold (USD adjusts via currency check)
     "smurfing_cluster_tolerance": 0.10,
+    # Burst smurfing — N+ txns below threshold from one sender within M minutes,
+    # regardless of which receiver they go to. Catches the structuring pattern
+    # where one source fans out fast across many mules within a short window.
+    "smurfing_burst_min_txns": 5,
+    "smurfing_burst_window_minutes": 60,
     # Shell funnel
     "funnel_imbalance_threshold": 0.7,
     "funnel_min_in_degree": 3,
+    # Pass-through detection — flags balanced flows that the imbalance rule
+    # misses (in ≈ out, money doesn't sit, classic mule behaviour).
+    "funnel_pass_through_min_ratio": 0.9,           # min(in,out)/max(in,out) above this is "balanced"
+    "funnel_max_holding_seconds": 3600,             # avg time between in and out < this triggers
+    "funnel_pass_through_min_flow": 500_000,        # only flag pass-through when total flow >= this
     # Dormant activation
     "dormant_threshold_days": 30,
     "dormant_z_score_threshold": 2.5,
+    # Profile mismatch
+    # All thresholds below were hardcoded in advanced_detectors.ProfileMismatchDetector
+    # until T1.1. INR amounts assume the IBM AML loader normalises currency to ISO codes
+    # but the detector still applies these as raw thresholds; tune them per dataset.
+    "profile_individual_max_avg_amount": 1_000_000,       # ₹10L — flagged if individual averages above this
+    "profile_individual_max_total_volume": 50_000_000,    # ₹5Cr — total volume cap for individuals
+    "profile_individual_max_import_payments": 2,           # how many Import Payment txns before flagging
+    "profile_individual_max_vendor_payments": 3,
+    "profile_business_min_received_with_no_sent": 5,       # business only receiving funds
+    "profile_business_max_upi_ratio": 0.8,                 # UPI share above this is anomalous for business
+    "profile_business_min_avg_amount": 10_000,             # below this with ≥ N txns is anomalous
+    "profile_business_min_txns_for_low_avg_check": 20,
+    "profile_shell_max_txns": 10,                          # shell shouldn't transact often
+    "profile_max_branches": 4,                             # activity across this many branches is suspicious
+    "profile_max_night_ratio": 0.4,                        # >40% nighttime txns is anomalous
+    "profile_score_per_mismatch": 0.2,                     # confidence per mismatch found
+    "profile_max_score": 0.95,                             # cap on combined score
+    "profile_critical_score_threshold": 0.6,
+    "profile_high_score_threshold": 0.4,
     # ML
     "ml_alert_threshold": 0.6,
 }

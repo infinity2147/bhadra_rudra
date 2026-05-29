@@ -144,7 +144,18 @@ def load_ibm_aml(
     out["receiver_product"] = "CurrentAccount"
 
     out["amount"] = df["_amt_paid"].fillna(df.get("_amt_recv", 0)).astype(float)
-    out["currency"] = df["_currency"].fillna("USD")
+
+    # IBM AML uses long currency names ("US Dollar"). Normalise to 3-letter
+    # ISO codes so downstream feature extractors that key on currency.upper()
+    # == "USD" pick up the right reporting-threshold (US CTR $10k vs RBI ₹2L).
+    ibm_to_iso = {
+        "US Dollar": "USD", "Euro": "EUR", "Swiss Franc": "CHF", "Yuan": "CNY",
+        "Rupee": "INR", "Shekel": "ILS", "UK Pound": "GBP", "Ruble": "RUB",
+        "Yen": "JPY", "Australian Dollar": "AUD", "Canadian Dollar": "CAD",
+        "Bitcoin": "BTC", "Mexican Peso": "MXN", "Saudi Riyal": "SAR",
+        "Brazil Real": "BRL",
+    }
+    out["currency"] = df["_currency"].fillna("USD").map(lambda c: ibm_to_iso.get(c, "USD"))
 
     # Map IBM payment formats to our rail / channel taxonomy
     pf = df["_payment_format"].fillna("").str.lower()

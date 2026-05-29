@@ -77,6 +77,39 @@ DEFAULT_CITATIONS = [
 ]
 
 
+# ── Single source of truth: FIU package contents ─────────────────────────────
+# Both build_package() (this file) and SARGenerator._build_supporting_docs
+# (sar_generator.py) read from this constant. Pre-T2 p2, the SAR PDF used to
+# list files that didn't exist in the zip; the two diverged silently. Keeping
+# the canonical list here prevents that drift — adding a file means updating
+# one constant + the corresponding writer call below.
+
+FIU_PACKAGE_FILES = [
+    ("evidence_summary.md",   "human-readable case summary + reasoning"),
+    ("STR.xml",                "FIU-IND-format Suspicious Transaction Report XML"),
+    ("subgraph.json",          "NetworkX node-link export of the fraud subgraph + 1-hop neighbours"),
+    ("transaction_chain.csv",  "every transaction involving the suspect entities, in chronological order"),
+    ("pmla_citations.txt",     "PMLA / RBI sections relevant to this typology"),
+    ("case_audit_log.json",    "hash-chain-verified investigator audit trail"),
+    ("SAR_<alert_id>.pdf",     "this document, formal SAR (ReportLab PDF; included only when previously generated)"),
+]
+
+
+def package_files_listing(alert_id: str = "<alert_id>") -> str:
+    """Return a numbered, human-readable list of FIU package contents.
+
+    Used by SARGenerator._build_supporting_docs so the SAR PDF accurately
+    describes what's in the FIU zip. Substitutes the real alert_id into the
+    SAR PDF filename slot.
+    """
+    lines = []
+    for i, (name, desc) in enumerate(FIU_PACKAGE_FILES, start=1):
+        rendered_name = name.replace("<alert_id>", alert_id)
+        # Right-pad the name to a fixed column so the description column lines up.
+        lines.append(f"  {i}. {rendered_name:<28s} — {desc}")
+    return "\n".join(lines)
+
+
 def _citations_for(pattern: str) -> List[str]:
     return PMLA_CITATIONS.get(pattern, DEFAULT_CITATIONS)
 

@@ -62,13 +62,13 @@ Key non-trivial components:
 - `pages/Journey.jsx` — combines Sankey + force-graph depending on whether the path is cyclic
 
 ### 2. Backend (`backend/main.py`)
-Single FastAPI ASGI app, ~30+ endpoints. All state is loaded once at startup into a `state` dict (transactions DataFrame, alerts list, NetworkX graph, ML bundles, etc.). `src/` is inserted into `sys.path` so all engine modules are importable directly.
+Single FastAPI ASGI app, ~50 endpoints. All state is loaded once at startup into a `state` dict (transactions DataFrame, alerts list, NetworkX graph, ML bundles, AA + DiliSense clients, Kafka stream ingestor, etc.). `src/` is inserted into `sys.path` so all engine modules are importable directly. Two startup hooks: a sync one for data + ML, an async one to bring up the Kafka consumer. A shutdown hook stops the consumer cleanly.
 
 RBAC pattern: `Depends(get_role)` extracts `X-User-Role` header → `require(action, role)` raises HTTP 403 on violations. Three roles: `INVESTIGATOR`, `SUPERVISOR`, `ADMIN`.
 
 ### 3. Python engine (`src/`)
 
-The pipeline is orchestrated by `src/run_pipeline.py` in this order:
+The pipeline is orchestrated by `src/run_pipeline.py` (synthetic) and `src/train_ibm_aml.py` (real IBM AML 100k → XGB + SAGE + ensemble).
 
 | Module | Responsibility |
 |---|---|
@@ -78,6 +78,8 @@ The pipeline is orchestrated by `src/run_pipeline.py` in this order:
 | `advanced_detectors.py` | 2 more detectors: dormant activation (Z-score on daily aggregates), profile mismatch (KYC behavioural rules) |
 | `ml_model.py` | XGBoost edge classifier — 30 features, stratified 80/20 split, persisted as pickle with SHAP background sample |
 | `gnn_model.py` | GraphSAGE (PyTorch Geometric) — two SAGEConv layers + edge-classification MLP head; skipped if PyG not installed |
+| `ensemble_model.py` | **Stacked ensemble**: XGBoost + GraphSAGE + GAT base models, LR meta-learner trained on 3-fold OOF predictions. Persisted under `data/ml/{variant}/ensemble/` |
+| `train_ibm_aml.py` | Real-data trainer: stratified 100k IBM AML sample → XGB + SAGE + ensemble in `data/ml/ibm_aml/` |
 | `shap_explainer.py` | `TreeExplainer` for per-alert SHAP attributions |
 | `incident_clustering.py` | Union-find to collapse raw alerts into clustered incidents |
 | `case_manager.py` | SQLite (`data/rudra.db`) case workflow + SHA-256 hash-chain audit log |
@@ -87,7 +89,12 @@ The pipeline is orchestrated by `src/run_pipeline.py` in this order:
 | `sar_generator.py` | SAR text generation + PDF export via ReportLab |
 | `live_scoring.py` | Per-transaction ML scoring with latency benchmark |
 | `llm_copilot.py` | Gemini 2.0 Flash + local intent-routing fallback; 4 tool functions |
-| `aa_kyc_mock.py` | Schema-accurate mocks for Account Aggregator consent flow and DiliSense KYC screen |
+| `aa_kyc_mock.py` | Mock-fallback implementation for AA + DiliSense (called from the adapter when real creds are absent) |
+| `integrations/aa_client.py` | **Real Sahamati AA adapter** — HTTPS calls when `SAHAMATI_CLIENT_ID/SECRET/FIU_ID` set, falls back to `aa_kyc_mock` |
+| `integrations/dilisense_client.py` | **Real DiliSense adapter** — calls `https://api.dilisense.com/v1/checkIndividual` when `DILISENSE_API_KEY` set |
+| `streaming/ingestor.py` | **Real Kafka stream ingestor** (aiokafka) + in-process fallback. Owns the consumer task + ring buffer of scored events |
+| `streaming/kafka_producer.py` | CLI + library to replay any transactions CSV onto the Kafka topic |
+| `streaming/pathway_engine.py` | Optional Pathway windowed-analytics layer (5-min sliding window per-entity velocity alerts). Skipped if `pathway` not installed |
 | `real_data_loader.py` | Loaders for IBM AML, PaySim, IEEE-CIS (if CSVs are present under `data/real/`) |
 | `rbac.py` | Role → permitted actions matrix |
 
@@ -115,9 +122,13 @@ Run `python src/run_pipeline.py` to generate all of these.
 
 **Detector thresholds** are all read from `ConfigStore` (SQLite-backed). Never hardcode a threshold value in a detector — use `self._cfg("key", default)`.
 
-**GNN is optional** — `gnn_model.py` requires `torch` and `torch_geometric`. The pipeline catches `ImportError` and skips gracefully. The GNN is not in `requirements.txt`.
+**GNN is optional** — `gnn_model.py` and `ensemble_model.py` require `torch` and `torch_geometric`. The pipeline catches `ImportError` and skips gracefully. These are listed as optional in `requirements.txt`.
 
-**Real datasets** go in `data/real/{ibm_aml,paysim,ieee_cis}/` (hundreds of MB, not committed). The pipeline auto-trains extra model variants if they are present.
+**Real datasets** go in `data/real/{ibm_aml,paysim,ieee_cis}/` (hundreds of MB, not committed). `python src/train_ibm_aml.py` runs the full IBM AML 100k pipeline (XGB + SAGE + ensemble). The synthetic pipeline (`src/run_pipeline.py`) auto-trains extra variants when real datasets are present.
+
+**Adapter pattern for AA + DiliSense** — never call `aa_kyc_mock` directly from new code. Always go through `state["aa_client"]` / `state["dilisense_client"]` so real creds (when present) flip the behaviour with zero code change. Both clients carry `_real: true|false` in every response and gracefully fall back to mock on transient HTTP failure (with `_fallback_reason` populated).
+
+**Streaming has two backends** — the `StreamIngestor` probes Kafka at startup and falls back to an in-process `asyncio.Queue` if no broker is reachable. `STREAM_BACKEND=kafka` forces Kafka and fails loud if unreachable; `STREAM_BACKEND=inproc` skips the probe. Both backends call the same `score_live_txn` — no separate "fast path" exists, so what the batch endpoint scores is what the stream scores.
 
 ## Test fixtures
 

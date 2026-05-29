@@ -18,13 +18,18 @@ class LLMCopilot:
 
     def __init__(self, graph: nx.DiGraph, transactions: pd.DataFrame,
                  alerts: List[Dict], risk_scores: List[Dict],
-                 fraud_cases: List[Dict], api_key: Optional[str] = None):
+                 fraud_cases: List[Dict], api_key: Optional[str] = None,
+                 model_bundle: Optional[Dict] = None):
         self.graph = graph
         self.transactions = transactions
         self.alerts = alerts
         self.risk_scores = risk_scores
         self.fraud_cases = fraud_cases
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        # ML bundle (XGB + feature columns + SHAP background sample). When
+        # present, explain_alert uses real SHAP attributions instead of the
+        # legacy hardcoded reasoning_chain templates.
+        self.model_bundle = model_bundle
         self.conversation_history: List[Dict] = []
         self.tool_results_log: List[Dict] = []
 
@@ -73,79 +78,69 @@ class LLMCopilot:
                     min_amount: float = 0, max_length: int = 8) -> Dict:
         """Find circular transaction patterns (round-tripping).
 
+        This is a thin filter over alerts the FraudDetector has already
+        produced — single source of truth lives in
+        `src/fraud_detector.py:detect_circular_transactions`. Re-doing the
+        DFS here would create drift (the real detector uses Johnson's with
+        SCC pre-filtering + log-amount bucketing; a copilot-local DFS
+        would miss the same fraud the alerts page does, or worse, *find
+        cycles the alerts page didn't*).
+
         Args:
             entity_name: Optional — filter cycles containing this entity.
             min_amount: Minimum total cycle flow to include.
             max_length: Maximum cycle length.
         """
-        import signal
-        try:
-            # Targeted DFS-based cycle search instead of nx.simple_cycles
-            cycles = []
-            cycles_found = set()
-            for start_node in self.graph.nodes():
-                if len(cycles) >= 50:
-                    break
-                stack = [(start_node, [start_node], {start_node})]
-                while stack and len(cycles) < 50:
-                    current, path, visited = stack.pop()
-                    if len(path) > max_length:
-                        continue
-                    for neighbor in self.graph.successors(current):
-                        if neighbor == start_node and len(path) >= 3:
-                            cycle_key = tuple(sorted(path))
-                            if cycle_key not in cycles_found:
-                                cycles_found.add(cycle_key)
-                                cycles.append(list(path))
-                        elif neighbor not in visited and len(path) < max_length:
-                            stack.append((neighbor, path + [neighbor], visited | {neighbor}))
-        except Exception:
-            return {"error": "Could not compute cycles on this graph.", "cycles": []}
-
-        results = []
         filter_node = self._find_node(entity_name) if entity_name else None
 
-        for cycle in cycles:
-            if len(cycle) < 3 or len(cycle) > max_length:
+        circ_alerts = [
+            a for a in self.alerts
+            if a.get("pattern_type") == "Circular Transaction"
+        ]
+
+        results = []
+        for a in circ_alerts:
+            cycle_length = a.get("cycle_length", len(a.get("entities", [])))
+            total_flow = a.get("total_flow", 0)
+            entities = a.get("entities", [])
+            names = a.get("entity_names") or [
+                self.graph.nodes[n].get("name", n) if self.graph.has_node(n) else n
+                for n in entities
+            ]
+
+            if cycle_length > max_length:
                 continue
-
-            # Check edges exist and compute flow
-            edge_amounts = []
-            valid = True
-            for i in range(len(cycle)):
-                u, v = cycle[i], cycle[(i + 1) % len(cycle)]
-                if self.graph.has_edge(u, v):
-                    edge_amounts.append(self.graph[u][v]["total_amount"])
-                else:
-                    valid = False
-                    break
-
-            if not valid:
-                continue
-
-            total_flow = sum(edge_amounts)
             if total_flow < min_amount:
                 continue
-
-            if filter_node and filter_node not in cycle:
+            if filter_node and filter_node not in entities:
                 continue
 
-            names = [self.graph.nodes[n].get("name", n) for n in cycle]
             results.append({
+                "alert_id": a.get("alert_id"),
                 "entities": names,
-                "cycle_length": len(cycle),
+                "cycle_length": cycle_length,
                 "total_flow": round(total_flow, 2),
-                "avg_edge_flow": round(total_flow / len(cycle), 2),
-                "path": " → ".join(names) + " → " + names[0],
+                "avg_edge_flow": round(a.get("avg_flow_per_edge", total_flow / max(cycle_length, 1)), 2),
+                "amount_variance_pct": a.get("amount_variance"),
+                "confidence": a.get("confidence"),
+                "severity": a.get("severity"),
+                "path": (" → ".join(names) + (" → " + names[0] if names else "")),
             })
 
+        results.sort(key=lambda x: x["total_flow"], reverse=True)
         return {
             "total_cycles_found": len(results),
-            "cycles": sorted(results, key=lambda x: x["total_flow"], reverse=True)[:10],
+            "cycles": results[:10],
+            "source": "fraud_detector.detect_circular_transactions",
         }
 
     def explain_alert(self, alert_id: str) -> Dict:
         """Explain a specific fraud alert with full reasoning chain.
+
+        When the ML bundle is available, the reasoning chain is the
+        per-instance SHAP narrative (real feature attributions for this
+        specific alert's edge). Falls back to a pattern-templated chain
+        only when SHAP isn't installed or the alert has no scoreable edge.
 
         Args:
             alert_id: The alert ID to explain (e.g., 'ALERT_CIRC_0001').
@@ -157,40 +152,73 @@ class LLMCopilot:
         explanation = {
             "alert": alert,
             "reasoning_chain": [],
+            "reasoning_source": "fallback",
             "entity_profiles": [],
             "related_cases": [],
         }
 
-        # Build reasoning chain
-        pattern = alert.get("pattern_type", "")
-        if "Circular" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Detected a closed loop of transactions between 3+ entities",
-                "2. Transaction amounts within the loop show low variance (similar values)",
-                "3. Funds return to origin, indicating round-tripping or artificial volume creation",
-                "4. Pattern violates normal business payment behavior",
-            ]
-        elif "Layering" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Identified a sequential chain of rapid fund transfers",
-                "2. Each step shows decreasing amounts (skimming/fees at each layer)",
-                "3. Chain involves shell companies or high-risk entity types",
-                "4. Time between transfers is abnormally short",
-            ]
-        elif "Smurfing" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Multiple transactions clustered just below reporting threshold (₹2,00,000)",
-                "2. Transactions show low amount variability (structured pattern)",
-                "3. Common sender distributing to multiple recipients",
-                "4. Pattern designed to avoid mandatory reporting requirements",
-            ]
-        elif "Funnel" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Multiple diverse sources funneling funds into a single entity",
-                "2. High flow imbalance ratio (much more inflow than outflow or vice versa)",
-                "3. Sources span multiple branches, suggesting coordinated activity",
-                "4. Target entity shows characteristics of shell company",
-            ]
+        # ── Real SHAP-driven reasoning ────────────────────────────────────
+        if self.model_bundle is not None:
+            try:
+                from shap_explainer import explain_alert as shap_explain
+                shap_res = shap_explain(self.model_bundle, self.graph, self.transactions, alert)
+                if shap_res:
+                    explanation["reasoning_chain"] = shap_res.get("narrative", [])
+                    explanation["reasoning_source"] = "shap"
+                    explanation["model_score"] = shap_res.get("predicted_proba")
+                    explanation["top_features"] = shap_res.get("top_features", [])
+                    explanation["explained_edge"] = shap_res.get("edge")
+                    explanation["base_value"] = shap_res.get("base_value")
+            except ImportError:
+                # shap not installed — leave reasoning_chain empty; fallback fills it below
+                pass
+            except Exception as e:
+                explanation["shap_error"] = str(e)
+
+        # ── Pattern-templated fallback ────────────────────────────────────
+        # Only used when SHAP is unavailable or the alert has no scoreable
+        # edge (e.g., single-entity dormant alert with no outgoing edge).
+        if not explanation["reasoning_chain"]:
+            pattern = alert.get("pattern_type", "")
+            if "Circular" in pattern:
+                explanation["reasoning_chain"] = [
+                    "Closed loop of transactions between 3+ entities",
+                    "Transaction amounts within the loop show low variance",
+                    "Funds return to origin (round-tripping / artificial volume creation)",
+                    "Pattern inconsistent with normal business payment behaviour",
+                ]
+            elif "Layering" in pattern:
+                explanation["reasoning_chain"] = [
+                    "Sequential chain of rapid fund transfers",
+                    "Each step shows decreasing amounts (skimming at each layer)",
+                    "Chain involves shell companies or high-risk entity types",
+                    "Time between transfers is abnormally short",
+                ]
+            elif "Smurfing" in pattern:
+                explanation["reasoning_chain"] = [
+                    "Multiple transactions clustered just below reporting threshold",
+                    "Low amount variability (structured pattern)",
+                    "Common sender distributing to multiple recipients",
+                    "Designed to avoid mandatory reporting requirements",
+                ]
+            elif "Funnel" in pattern:
+                explanation["reasoning_chain"] = [
+                    "Multiple diverse sources funnelling funds into a single entity",
+                    "High flow imbalance (much more inflow than outflow or vice versa)",
+                    "Sources span multiple branches, suggesting coordinated activity",
+                    "Target entity shows characteristics of a shell company",
+                ]
+            elif "Dormant" in pattern:
+                explanation["reasoning_chain"] = [
+                    "Account inactive for an extended period",
+                    "Sudden activation with Z-score above the 2.5-sigma threshold",
+                    "Post-activation transaction average exceeds historical baseline",
+                ]
+            elif "Profile" in pattern:
+                explanation["reasoning_chain"] = [
+                    f"Entity declared as {alert.get('entity_type', '?')} but behaviour mismatches the type",
+                    *alert.get("mismatches", [])[:3],
+                ]
 
         # Entity profiles
         for eid in alert.get("entities", []):
@@ -216,7 +244,13 @@ class LLMCopilot:
         return explanation
 
     def get_profile_delta(self, entity_name: str) -> Dict:
-        """Detect KYC profile mismatches and behavioral anomalies.
+        """Get the behavioural profile of an entity + any profile-mismatch deltas.
+
+        Mismatch deltas are sourced from `ProfileMismatchDetector` alerts that
+        the pipeline has already produced for this entity — single source of
+        truth. The behavioural-profile summary (txn count, avg, branch span,
+        fraud ratio) is computed locally because it's useful context the
+        detector itself doesn't expose.
 
         Args:
             entity_name: Name or partial name of the entity.
@@ -228,60 +262,44 @@ class LLMCopilot:
         node_data = dict(self.graph.nodes[node_id])
         entity_type = node_data.get("type", "individual")
 
-        # Analyze transaction behavior
+        # Behavioural profile — useful context (not a detector duplicate).
         sent_txns = self.transactions[self.transactions["sender_id"] == node_id]
         recv_txns = self.transactions[self.transactions["receiver_id"] == node_id]
         all_txns = pd.concat([sent_txns, recv_txns])
 
         if all_txns.empty:
-            return {"entity": {"name": node_data.get("name", node_id)}, "delta": "No transactions found"}
+            return {
+                "entity": {"id": node_id, "name": node_data.get("name", node_id), "type": entity_type},
+                "delta": "No transactions found",
+            }
 
-        # Compute behavioral profile
         avg_amount = all_txns["amount"].mean()
         max_amount = all_txns["amount"].max()
         tx_types = all_txns["transaction_type"].value_counts().to_dict()
         purposes = all_txns["purpose_code"].value_counts().to_dict()
         branches = set(all_txns["sender_branch"].tolist() + all_txns["receiver_branch"].tolist())
-        fraud_ratio = all_txns["is_fraud"].mean()
+        fraud_ratio = float(all_txns["is_fraud"].mean()) if "is_fraud" in all_txns.columns else 0.0
 
-        # Compute expected vs actual for entity type
+        # Mismatch deltas — pulled from existing alerts, not re-derived here.
+        pm_alerts = [
+            a for a in self.alerts
+            if a.get("pattern_type") == "Profile Mismatch"
+            and node_id in a.get("entities", [])
+        ]
         deltas = []
-        if entity_type == "individual":
-            if avg_amount > 500000:
-                deltas.append({"field": "avg_transaction_amount", "expected": "< ₹5,00,000",
-                              "actual": f"₹{avg_amount:,.0f}", "severity": "HIGH",
-                              "reason": "Individual averaging very high transaction amounts"})
-            if max_amount > 2000000:
-                deltas.append({"field": "max_transaction_amount", "expected": "< ₹20,00,000",
-                              "actual": f"₹{max_amount:,.0f}", "severity": "MEDIUM",
-                              "reason": "Single transaction unusually large for individual"})
-        elif entity_type == "business":
-            sent_types = sent_txns["transaction_type"].value_counts().to_dict()
-            if "Wire Transfer" in sent_types and sent_types["Wire Transfer"] > 3:
-                deltas.append({"field": "wire_transfer_frequency", "expected": "≤ 3",
-                              "actual": str(sent_types["Wire Transfer"]), "severity": "MEDIUM",
-                              "reason": "High frequency of wire transfers for domestic business"})
-
-        if fraud_ratio > 0.3:
-            deltas.append({"field": "fraud_transaction_ratio", "expected": "< 5%",
-                          "actual": f"{fraud_ratio:.0%}", "severity": "CRITICAL",
-                          "reason": "Significant proportion of transactions flagged as fraudulent"})
-
-        if len(branches) > 5:
-            deltas.append({"field": "branch_diversity", "expected": "≤ 5 unique branches",
-                          "actual": f"{len(branches)} branches", "severity": "MEDIUM",
-                          "reason": "Transactions spread across unusually many branches"})
-
-        # Check for dormant activation
-        if len(all_txns) > 0:
-            all_txns_sorted = all_txns.sort_values("timestamp")
-            time_diffs = pd.to_datetime(all_txns_sorted["timestamp"]).diff().dt.total_seconds() / 3600
-            if len(time_diffs) > 1:
-                max_gap = time_diffs.max()
-                if max_gap > 720:  # 30 days
-                    deltas.append({"field": "dormant_period", "expected": "No gaps > 30 days",
-                                  "actual": f"{max_gap/24:.0f} days gap", "severity": "HIGH",
-                                  "reason": "Account showed dormant behavior then sudden activation"})
+        worst_severity = None
+        sev_rank = {"MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+        for a in pm_alerts:
+            sev = a.get("severity", "MEDIUM")
+            if worst_severity is None or sev_rank.get(sev, 0) > sev_rank.get(worst_severity, 0):
+                worst_severity = sev
+            for m in a.get("mismatches", []):
+                deltas.append({
+                    "description": m,
+                    "severity": sev,
+                    "alert_id": a.get("alert_id"),
+                    "confidence": a.get("confidence"),
+                })
 
         risk_info = next((r for r in self.risk_scores if r.get("entity_id") == node_id), {})
 
@@ -300,7 +318,12 @@ class LLMCopilot:
             "risk_score": risk_info.get("risk_score", "N/A"),
             "risk_level": risk_info.get("risk_level", "N/A"),
             "deltas": deltas,
-            "profile_mismatch_score": round(min(len(deltas) * 0.25, 1.0), 2),
+            "worst_severity": worst_severity,
+            "profile_mismatch_score": (
+                round(max(a.get("confidence", 0) for a in pm_alerts) / 100, 2)
+                if pm_alerts else 0.0
+            ),
+            "source": "advanced_detectors.ProfileMismatchDetector",
         }
 
     def get_graph_stats(self) -> Dict:
@@ -317,7 +340,18 @@ class LLMCopilot:
     # ── Gemini Integration ────────────────────────────────────
 
     def query(self, user_message: str) -> Dict:
-        """Process a user query using Gemini with tool-calling."""
+        """Process a user query.
+
+        Two modes:
+          - **gemini**: real LLM with multi-round tool calling (requires GEMINI_API_KEY).
+          - **quick_commands**: deterministic keyword router with the same tools
+            but no natural-language understanding. Used when the API key is
+            absent or Gemini rejects the call.
+
+        Every response carries `mode_label` so the UI can show the operator
+        which path served their query — calling rule-based routing "AI" would
+        be theatre.
+        """
         tools = self._get_tool_definitions()
 
         # Add user message to history
@@ -419,6 +453,8 @@ class LLMCopilot:
             "response": final_text,
             "tool_calls": tool_calls,
             "source": "gemini" if tool_calls else "gemini_textonly",
+            "mode": "ai_copilot",
+            "mode_label": "AI Copilot (Gemini)",
         }
 
     def _get_tool_definitions(self) -> List[Dict]:
@@ -486,12 +522,26 @@ class LLMCopilot:
         return {"error": f"Unknown tool: {tool_name}"}
 
     def _fallback_response(self, user_message: str, error: str = "") -> Dict:
-        """Generate a local response when Gemini API is unavailable."""
+        """Deterministic keyword-routing fallback when Gemini is unavailable.
+
+        We explicitly do NOT call this "AI" — `mode` is `quick_commands` and
+        `mode_label` reads "Quick Commands". The UI surfaces this so an
+        operator knows they're hitting rule-based routing, not an LLM.
+        """
         response = self._generate_local_response(user_message)
+        if error:
+            reason = f"Gemini unavailable: {error}"
+        elif not self.api_key:
+            reason = "GEMINI_API_KEY not set"
+        else:
+            reason = "fallback"
         return {
             "response": response,
             "tool_calls": [],
-            "source": "local" + (f" (Gemini unavailable: {error})" if error else " (no API key)"),
+            "source": f"quick_commands ({reason})",
+            "mode": "quick_commands",
+            "mode_label": "Quick Commands (no LLM)",
+            "fallback_reason": reason,
         }
 
     def _generate_local_response(self, user_message: str) -> str:
@@ -693,12 +743,14 @@ class LLMCopilot:
             f"  - Fraud Ratio: {profile.get('fraud_ratio', 0):.1%}\n",
         ]
         if deltas:
-            lines.append("**Profile Deltas Detected:**")
+            lines.append("**Profile Deltas Detected (from ProfileMismatchDetector alerts):**")
             for d in deltas:
-                lines.append(f"  - [{d['severity']}] {d['field']}: Expected {d['expected']}, Actual {d['actual']}")
-                lines.append(f"    Reason: {d['reason']}")
+                aid = d.get("alert_id", "")
+                conf = d.get("confidence")
+                conf_str = f" — {conf}% confidence" if conf is not None else ""
+                lines.append(f"  - [{d['severity']}] {d['description']} ({aid}{conf_str})")
         else:
-            lines.append("**No significant profile mismatches detected.**")
+            lines.append("**No profile-mismatch alerts for this entity.**")
         return "\n".join(lines)
 
     def _format_alerts_summary(self) -> str:

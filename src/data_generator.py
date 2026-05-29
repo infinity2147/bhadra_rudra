@@ -93,6 +93,16 @@ class TransactionGenerator:
         self._entity_product = {e["entity_id"]: e["primary_product"] for e in self.entities}
 
     def _generate_entities(self) -> List[Dict]:
+        """Generate the entity roster.
+
+        Note: we deliberately do NOT pre-assign a `risk_score` to entities.
+        The risk score is computed downstream by
+        `FraudDetector.compute_node_risk_scores` based on actual graph
+        behaviour (centrality, fraud-edge count, type). Pre-labelling shells
+        with `risk_score=0.6-0.95` was dead state — nothing read it — but
+        carrying it in entities.json was misleading because it looked like
+        the model was being fed labels. Removed in T1.5.
+        """
         entities = []
         entity_id = 1000
         # Business entities
@@ -105,7 +115,6 @@ class TransactionGenerator:
                 "primary_product": _pick_product("business"),
                 "kyc_declared_monthly_volume": round(random.uniform(2000000, 20000000), 2),
                 "kyc_declared_purpose": random.choice(["Business Payment", "Vendor Payment", "Import Payment", "Export Receipt"]),
-                "risk_score": round(random.uniform(0.1, 0.5), 2),
             })
         entity_id += len(BUSINESS_NAMES)
         # Individual entities
@@ -118,7 +127,6 @@ class TransactionGenerator:
                 "primary_product": _pick_product("individual"),
                 "kyc_declared_monthly_volume": round(random.uniform(50000, 500000), 2),
                 "kyc_declared_purpose": random.choice(["Salary", "Rent Payment", "Utility Payment", "Investment"]),
-                "risk_score": round(random.uniform(0.05, 0.3), 2),
             })
         entity_id += len(INDIVIDUAL_NAMES)
         # Shell companies (will be used in fraud patterns)
@@ -136,7 +144,6 @@ class TransactionGenerator:
                 "primary_product": _pick_product("shell_company"),
                 "kyc_declared_monthly_volume": round(random.uniform(100000, 1000000), 2),
                 "kyc_declared_purpose": random.choice(["Consulting Fee", "Business Payment"]),
-                "risk_score": round(random.uniform(0.6, 0.95), 2),
             })
         return entities
 
