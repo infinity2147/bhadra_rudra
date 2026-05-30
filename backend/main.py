@@ -55,10 +55,9 @@ from incident_clustering import cluster_alerts, alert_to_incident_map
 from config_store import ConfigStore, DEFAULT_CONFIG
 from rbac import get_role, require, role_capabilities, VALID_ROLES
 from live_scoring import score_live_txn, benchmark_pipeline
-from aa_kyc_mock import (
-    aa_create_consent, aa_pull_data, aa_revoke_consent, aa_list_consents,
-    dilisense_screen,
-)
+from integrations import AAClient, DilisenseClient
+from streaming import get_ingestor, StreamTxn
+from streaming.kafka_producer import replay_transactions
 
 
 app = FastAPI(title="RUDRA API", version="3.0")
@@ -91,6 +90,9 @@ state = {
     "ml_bundle": None,           # current synthetic model bundle (used for SHAP + live scoring)
     "ml_metrics": None,
     "edge_scores": None,
+    "aa_client": None,           # Sahamati Account Aggregator client (real or mock-backed)
+    "dilisense_client": None,    # DiliSense KYC client (real or mock-backed)
+    "ingestor": None,            # Real Kafka stream ingestor (or in-process fallback)
     "loaded": False,
 }
 
@@ -106,7 +108,7 @@ def run_pipeline():
     ffg = FundFlowGraph()
     graph = ffg.build_graph(df)
 
-    detector = FraudDetector(graph)
+    detector = FraudDetector(graph, transactions=df)
     results = detector.run_all_detections()
     dormant_alerts = DormantActivationDetector(graph, df).detect()
     risk_scores_data = []
@@ -118,7 +120,10 @@ def run_pipeline():
             "risk_level": ("CRITICAL" if score >= 0.7 else "HIGH" if score >= 0.5
                             else "MEDIUM" if score >= 0.3 else "LOW"),
         })
-    profile_alerts = ProfileMismatchDetector(graph, df, risk_scores_data).detect()
+    # Best-effort ML score lookup — at startup ml_bundle may not be trained
+    # yet, so edge_scores can be None. Detector falls back to rule-only mode.
+    edge_scores = ml_load_edge_scores(DATA_DIR, variant="synthetic") or {}
+    profile_alerts = ProfileMismatchDetector(graph, df, risk_scores_data, edge_scores=edge_scores).detect()
     all_alerts = results["all_alerts"] + dormant_alerts + profile_alerts
     results["all_alerts"] = all_alerts
     results["dormant_activation"] = dormant_alerts
@@ -182,8 +187,24 @@ def load_or_generate():
 
     state["ffg"] = FundFlowGraph()
     state["graph"] = state["ffg"].build_graph(df)
+
+    # ML artefacts — load BEFORE constructing the copilot so it can wire
+    # SHAP-driven explanations into the explain_alert tool.
+    state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
+    state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
+    state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
+    if state["ml_bundle"] is None:
+        try:
+            ml_train_and_save(state["graph"], df, DATA_DIR, variant="synthetic")
+            state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
+            state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
+            state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
+        except Exception as e:
+            print(f"[backend] inline ML training skipped: {e}")
+
     state["copilot"] = LLMCopilot(
         state["graph"], df, state["alerts"], state["risk_scores"], state["fraud_cases"],
+        model_bundle=state.get("ml_bundle"),
     )
     state["sar_gen"] = SARGenerator(
         state["graph"], df, state["alerts"], state["fraud_cases"],
@@ -201,18 +222,9 @@ def load_or_generate():
     # Config store (same SQLite file)
     state["config"] = ConfigStore(os.path.join(DATA_DIR, "rudra.db"))
 
-    # ML artefacts
-    state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
-    state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
-    state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
-    if state["ml_bundle"] is None:
-        try:
-            ml_train_and_save(state["graph"], df, DATA_DIR, variant="synthetic")
-            state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
-            state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
-            state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
-        except Exception as e:
-            print(f"[backend] inline ML training skipped: {e}")
+    # AA + DiliSense clients — pick up env-driven creds; fall back to mock when absent.
+    state["aa_client"] = AAClient()
+    state["dilisense_client"] = DilisenseClient()
 
     # Pre-build tracer auxiliary structures so per-entity flag lookups are O(1)
     # instead of recomputing from scratch on every /api/entities/{id} request.
@@ -229,15 +241,50 @@ def load_or_generate():
         print(f"[backend] tracer cache build skipped: {e}")
 
     state["loaded"] = True
+    aa_mode = "REAL" if state["aa_client"].is_real else "mock"
+    kyc_mode = "REAL" if state["dilisense_client"].is_real else "mock"
     print(f"[backend] ready: {len(df)} txns, {len(state['alerts'])} alerts, "
           f"{len(state['incidents'])} incidents, "
           f"{state['graph'].number_of_nodes()} entities, "
-          f"ML F1={state['ml_metrics'].get('f1', 0):.3f}")
+          f"ML F1={state['ml_metrics'].get('f1', 0):.3f}, "
+          f"AA={aa_mode}, KYC={kyc_mode}")
 
 
 @app.on_event("startup")
 def startup():
     load_or_generate()
+
+
+@app.on_event("startup")
+async def startup_streaming():
+    """Start the Kafka ingestor (or fall back to in-process queue).
+
+    Runs after `startup()` above because FastAPI executes hooks in registration
+    order; the ingestor needs the graph + ml_bundle already loaded into state.
+    Failing to start the stream isn't fatal — the rest of the API stays up.
+    """
+    ingestor = get_ingestor(
+        score_fn=score_live_txn,
+        graph_provider=lambda: state["graph"],
+        bundle_provider=lambda: state["ml_bundle"],
+    )
+    state["ingestor"] = ingestor
+    try:
+        await ingestor.start()
+        print(f"[backend] stream ingestor: {ingestor.status()['mode']} "
+              f"(topic={ingestor.topic}, bootstrap={ingestor.bootstrap})")
+    except Exception as e:
+        print(f"[backend] stream ingestor failed to start: {e}")
+
+
+@app.on_event("shutdown")
+async def shutdown_streaming():
+    ing = state.get("ingestor")
+    if ing is not None:
+        try:
+            await ing.stop()
+        except Exception:
+            pass
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -273,13 +320,18 @@ def _alerts_with_case_status() -> List[Dict]:
 
 
 def _filter_by_time_window(df: pd.DataFrame, until: Optional[str]) -> pd.DataFrame:
-    """Time-travel slicing — return txns up to `until` (inclusive)."""
+    """Time-travel slicing — return txns up to `until` (inclusive).
+
+    Raises HTTPException(400) on an unparseable `until` rather than silently
+    returning the full DataFrame — the caller deserves to know their query
+    parameter was rejected.
+    """
     if not until:
         return df
     try:
         cutoff = pd.to_datetime(until)
-    except Exception:
-        return df
+    except Exception as e:
+        raise HTTPException(400, f"Invalid 'until' timestamp: {until!r} ({e})")
     return df[df["timestamp"] <= cutoff]
 
 
@@ -700,10 +752,15 @@ async def copilot_query(body: dict):
     if not query:
         raise HTTPException(400, "Query is required")
     result = state["copilot"].query(query)
+    # Surface mode + mode_label so the UI can render the right banner
+    # (AI Copilot vs Quick Commands fallback).
     return {
         "response": result["response"],
         "source": result.get("source", "local"),
         "tool_calls": result.get("tool_calls", []),
+        "mode": result.get("mode", "quick_commands"),
+        "mode_label": result.get("mode_label", "Quick Commands (no LLM)"),
+        "fallback_reason": result.get("fallback_reason"),
     }
 
 
@@ -756,6 +813,41 @@ def get_ml_metrics(variant: str = "synthetic"):
                 "message": f"Model variant '{variant}' not trained."}
     gnn_m = load_gnn_metrics(DATA_DIR, variant=variant)
     return {"trained": True, **m, "gnn": gnn_m or None}
+
+
+@app.get("/api/ml/ensemble")
+def get_ensemble_metrics(variant: str = "ibm_aml"):
+    """Stacked-ensemble metrics — XGBoost + GraphSAGE + GAT, LR meta-learner.
+
+    Trained via 3-fold OOF stacking on real labelled data. Returns per-base
+    model AUC/F1 and the ensemble's lift over the strongest base model.
+    """
+    from ensemble_model import load_ensemble_metrics
+    m = load_ensemble_metrics(DATA_DIR, variant=variant)
+    if not m:
+        return {
+            "trained": False, "variant": variant,
+            "message": (
+                f"Ensemble not trained for variant '{variant}'. "
+                f"Run: python src/train_ibm_aml.py"
+            ),
+        }
+    return {"trained": True, **m}
+
+
+@app.get("/api/ml/ensemble/edge_scores")
+def get_ensemble_edge_scores(variant: str = "ibm_aml", limit: int = 100):
+    """Per-edge breakdown: xgb / sage / gat / ensemble scores.
+
+    The UI uses this on the model-comparison page to show where the three
+    base models disagree and how the meta-learner resolves it.
+    """
+    from ensemble_model import load_ensemble_edge_scores
+    scores = load_ensemble_edge_scores(DATA_DIR, variant=variant)
+    if not scores:
+        return {"trained": False, "variant": variant}
+    items = [{"edge": k, **v} for k, v in list(scores.items())[:limit]]
+    return {"trained": True, "variant": variant, "edges": items, "total": len(scores)}
 
 
 @app.get("/api/ml/tabular")
@@ -934,7 +1026,17 @@ def rerun_detection(role: str = Depends(get_role)):
     """Re-run all detectors using the current config thresholds. Heavy operation."""
     require("config.write", role)
     cfg = state["config"].get_all()
-    det = FraudDetector(state["graph"], config=cfg)
+    # Load the trained risk-weights LR bundle if present (T2.10). Falls back
+    # cleanly to hand-tuned weights when the file isn't there.
+    try:
+        from risk_score_learner import load_risk_weights
+        rw_bundle = load_risk_weights(DATA_DIR, variant="synthetic")
+    except Exception:
+        rw_bundle = None
+    det = FraudDetector(
+        state["graph"], transactions=state["transactions"],
+        config=cfg, risk_weights_bundle=rw_bundle,
+    )
     results = det.run_all_detections()
     dormant_alerts = DormantActivationDetector(state["graph"], state["transactions"], config=cfg).detect()
     risk_scores_data = []
@@ -946,7 +1048,10 @@ def rerun_detection(role: str = Depends(get_role)):
             "risk_level": ("CRITICAL" if score >= 0.7 else "HIGH" if score >= 0.5
                             else "MEDIUM" if score >= 0.3 else "LOW"),
         })
-    profile_alerts = ProfileMismatchDetector(state["graph"], state["transactions"], risk_scores_data).detect()
+    profile_alerts = ProfileMismatchDetector(
+        state["graph"], state["transactions"], risk_scores_data,
+        config=cfg, edge_scores=state.get("edge_scores"),
+    ).detect()
     all_alerts = results["all_alerts"] + dormant_alerts + profile_alerts
     results["all_alerts"] = all_alerts
     results["dormant_activation"] = dormant_alerts
@@ -1096,6 +1201,7 @@ def inject_transactions(count: int = 10):
         scoring = None
         ml_score = None
         latency = None
+        scoring_error = None
         if bundle is not None:
             try:
                 scoring = score_live_txn(bundle, graph, sender, receiver, amount,
@@ -1103,7 +1209,7 @@ def inject_transactions(count: int = 10):
                 ml_score = scoring["ml_score"]
                 latency = scoring["latency_ms"]
             except Exception as e:
-                latency = {"error": str(e)}
+                scoring_error = str(e)
 
         pattern = "none"
         if is_fraud:
@@ -1136,6 +1242,7 @@ def inject_transactions(count: int = 10):
             "pattern": pattern, "severity": severity,
             "mlScore": ml_score,
             "latency_ms": latency,
+            "scoring_error": scoring_error,
         })
 
     return {"transactions": feed, "count": len(feed)}
@@ -1149,11 +1256,16 @@ def benchmark_latency():
     return benchmark_pipeline(state["graph"], state["transactions"], state["ml_bundle"])
 
 
-# ── Account Aggregator + KYC mocks ─────────────────────────────────────────
+# ── Account Aggregator + KYC ───────────────────────────────────────────────
+# Both flows go through real adapters: src.integrations.AAClient and
+# DilisenseClient. They call real Sahamati / DiliSense endpoints when their
+# env-driven creds are present, and transparently fall back to the
+# schema-accurate mock when they aren't. Every response carries `_real`
+# so the UI can show the operator which mode is active.
 
 @app.post("/api/aa/consent")
 def aa_consent(body: dict):
-    return aa_create_consent(
+    return state["aa_client"].create_consent(
         customer_id=body.get("customer_id", "CUST-000"),
         fip_ids=body.get("fip_ids", ["FIP-HDFC", "FIP-AXIS"]),
         purpose_code=body.get("purpose_code", "103"),
@@ -1163,22 +1275,108 @@ def aa_consent(body: dict):
 
 @app.get("/api/aa/consents")
 def aa_consents():
-    return {"consents": aa_list_consents()}
+    return {"consents": state["aa_client"].list_consents()}
 
 
 @app.get("/api/aa/pull/{consent_handle}")
 def aa_pull(consent_handle: str, days_back: int = 30):
-    return aa_pull_data(consent_handle, days_back=days_back)
+    return state["aa_client"].pull_data(consent_handle, days_back=days_back)
 
 
 @app.post("/api/aa/revoke/{consent_handle}")
 def aa_revoke(consent_handle: str):
-    return aa_revoke_consent(consent_handle)
+    return state["aa_client"].revoke(consent_handle)
 
 
 @app.get("/api/kyc/screen")
 def kyc_screen(name: str, entity_type: str = "individual"):
-    return dilisense_screen(name, entity_type)
+    return state["dilisense_client"].screen(name, entity_type)
+
+
+@app.get("/api/integrations/status")
+def integrations_status():
+    """Which external APIs are live (real creds present) vs. mocked.
+
+    The UI surfaces this so an operator can see at a glance whether they
+    are hitting the real Sahamati sandbox / DiliSense API or the local mock.
+    """
+    return {
+        "aa": state["aa_client"].mode(),
+        "kyc": state["dilisense_client"].mode(),
+    }
+
+
+# ── Streaming (real Kafka, in-process fallback) ────────────────────────────
+
+@app.get("/api/stream/status")
+def stream_status():
+    ing = state.get("ingestor")
+    if ing is None:
+        return {"running": False, "mode": "stopped"}
+    return ing.status()
+
+
+@app.post("/api/stream/start")
+async def stream_start(role: str = Depends(get_role)):
+    require("pipeline.run", role)
+    ing = state.get("ingestor")
+    if ing is None:
+        raise HTTPException(503, "Ingestor not initialised")
+    return await ing.start()
+
+
+@app.post("/api/stream/stop")
+async def stream_stop(role: str = Depends(get_role)):
+    require("pipeline.run", role)
+    ing = state.get("ingestor")
+    if ing is None:
+        raise HTTPException(503, "Ingestor not initialised")
+    return await ing.stop()
+
+
+@app.get("/api/stream/recent")
+def stream_recent(limit: int = 50):
+    """Newest-first window over the in-memory ring buffer of scored stream events."""
+    ing = state.get("ingestor")
+    if ing is None:
+        return {"events": [], "count": 0}
+    events = ing.recent(limit=limit)
+    return {"events": events, "count": len(events)}
+
+
+@app.post("/api/stream/replay")
+async def stream_replay(body: dict, role: str = Depends(get_role)):
+    """Replay a slice of the loaded transactions onto the stream bus.
+
+    Body: {"rate": 5, "total": 100, "shuffle": true}
+    """
+    require("pipeline.run", role)
+    ing = state.get("ingestor")
+    if ing is None or not ing.status().get("running"):
+        raise HTTPException(503, "Stream ingestor is not running")
+    rate = float(body.get("rate", 5.0))
+    total = int(body.get("total", 100))
+    shuffle = bool(body.get("shuffle", True))
+    count = await replay_transactions(
+        ing, state["transactions"], rate=rate, total=total, shuffle=shuffle,
+    )
+    return {"published": count, "rate": rate, "total": total}
+
+
+@app.get("/api/stream/velocity_alerts")
+def stream_velocity_alerts(limit: int = 50):
+    """Read the Pathway velocity-alert log (if Pathway is running).
+
+    Pathway is an optional companion process. When it's running it tails the
+    same Kafka topic this backend subscribes to, computes 5-min sliding
+    windows of per-entity volume, and writes alerts to a JSONL file we
+    surface here. When Pathway isn't running, the list is empty.
+    """
+    try:
+        from streaming.pathway_engine import read_recent_alerts
+        return {"alerts": read_recent_alerts(limit=limit)}
+    except Exception as e:
+        return {"alerts": [], "error": str(e)}
 
 
 # ── Pipeline trigger ───────────────────────────────────────────────────────

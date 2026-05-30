@@ -35,6 +35,7 @@ def _build_live_features(
     channel: str,
     rail: str,
     timestamp: pd.Timestamp,
+    currency: str = "INR",
 ) -> Dict[str, float]:
     """Compute the feature row for a single (sender, receiver, amount) txn.
 
@@ -102,7 +103,10 @@ def _build_live_features(
         receiver_in_str = 0
         receiver_out_str = 0
 
-    near_threshold = max(0.0, 1.0 - abs(new_avg - 195_000) / 195_000) if new_avg < 250_000 else 0.0
+    # USD → $9,500 (below US $10,000 CTR threshold) | INR → ₹1,95,000 (below RBI ₹2L threshold)
+    struct_threshold = 9_500  if currency.upper() == "USD" else 195_000
+    struct_cap       = 11_000 if currency.upper() == "USD" else 250_000
+    near_threshold = max(0.0, 1.0 - abs(new_avg - struct_threshold) / struct_threshold) if new_avg < struct_cap else 0.0
 
     hour = timestamp.hour
     night_ratio = 1.0 if (hour < 6 or hour >= 22) else 0.0
@@ -161,12 +165,13 @@ def score_live_txn(
     channel: str,
     rail: str,
     timestamp: Optional[pd.Timestamp] = None,
+    currency: str = "INR",
 ) -> Dict:
     """Score one txn through the trained ML model, with feature extraction + latency."""
     if timestamp is None:
         timestamp = pd.Timestamp.now()
     t0 = time.perf_counter()
-    features = _build_live_features(graph, sender, receiver, amount, channel, rail, timestamp)
+    features = _build_live_features(graph, sender, receiver, amount, channel, rail, timestamp, currency)
     t1 = time.perf_counter()
 
     cols = model_bundle["feature_columns"]

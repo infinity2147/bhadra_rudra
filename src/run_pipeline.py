@@ -50,8 +50,11 @@ def main():
     print(f"  Density: {stats['density']}")
 
     # ── 3. Run detectors ─────────────────────────────────────────────────────
+    # First pass uses the hand-tuned risk weights — we don't yet have the
+    # learned bundle. After detection completes, we train the LR risk model
+    # using the fraud_count labels and re-score nodes with it (T2.10).
     print("\n[3/7] Running fraud detection (core + advanced)...")
-    detector = FraudDetector(graph)
+    detector = FraudDetector(graph, transactions=df)
     results = detector.run_all_detections()
 
     print("  Running Dormant Activation Detection...")
@@ -68,7 +71,17 @@ def main():
             "risk_level": ("CRITICAL" if score >= 0.7 else "HIGH" if score >= 0.5
                             else "MEDIUM" if score >= 0.3 else "LOW"),
         })
-    profile_alerts = ProfileMismatchDetector(graph, df, risk_scores_data).detect()
+    # Pass ML edge scores if available so ProfileMismatch can compose rule+ML
+    # signal (T2.9). The first-ever run won't have scores yet — detector falls
+    # back to rule-only mode and we re-run detection after training if needed.
+    try:
+        from ml_model import load_edge_scores
+        edge_scores = load_edge_scores(data_dir, variant="synthetic") or {}
+    except Exception:
+        edge_scores = {}
+    profile_alerts = ProfileMismatchDetector(
+        graph, df, risk_scores_data, edge_scores=edge_scores,
+    ).detect()
     print(f"    {len(profile_alerts)} profile mismatch alerts")
 
     all_alerts = results["all_alerts"] + dormant_alerts + profile_alerts
@@ -81,6 +94,26 @@ def main():
     results["summary"]["critical_alerts"] = sum(1 for a in all_alerts if a["severity"] == "CRITICAL")
     results["summary"]["high_alerts"] = sum(1 for a in all_alerts if a["severity"] == "HIGH")
     results["summary"]["medium_alerts"] = sum(1 for a in all_alerts if a["severity"] == "MEDIUM")
+
+    # ── 3b. Train learned risk-score weights (T2.10) ─────────────────────────
+    # Uses fraud_count labels on edges as the target; LR coefficients
+    # are persisted to data/ml/synthetic/risk_weights.pkl and used on
+    # subsequent runs (backend startup) instead of the hand-tuned weights.
+    try:
+        from risk_score_learner import train_risk_weights, load_risk_weights
+        rw_metrics = train_risk_weights(graph, data_dir, variant="synthetic")
+        if rw_metrics.get("trained"):
+            print(f"  Risk-weight LR: F1 {rw_metrics['f1']:.3f}, AUC {rw_metrics['auc']:.3f}")
+            # Re-score nodes with the freshly-trained weights so risk_scores.json
+            # reflects the learned model (not the hand-tuned fallback).
+            bundle = load_risk_weights(data_dir, variant="synthetic")
+            new_scores = detector.compute_node_risk_scores(risk_weights_bundle=bundle)
+            results["node_risk_scores"] = new_scores
+        else:
+            print(f"  Risk-weight training skipped: {rw_metrics.get('reason')}")
+    except Exception as e:
+        print(f"  Risk-weight training failed (using hand-tuned weights): {e}")
+
     detector.save_results(results, data_dir)
 
     # ── 4. Cluster alerts into incidents ─────────────────────────────────────
@@ -114,7 +147,7 @@ def main():
     print("\n[6/7] Training GraphSAGE GNN (variant=synthetic)...")
     try:
         from gnn_model import train_gnn
-        gnn_metrics = train_gnn(graph, data_dir, variant="synthetic", epochs=60)
+        gnn_metrics = train_gnn(graph, data_dir, variant="synthetic", epochs=200)
         print(f"  GNN F1: {gnn_metrics['f1']:.3f} | AUC: {gnn_metrics['auc']:.3f} | "
               f"Final Loss: {gnn_metrics['final_loss']:.4f}")
     except ImportError as e:

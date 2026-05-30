@@ -13,6 +13,12 @@ export default function Copilot() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
+  // Track the most recent response's mode so the header can switch between
+  // "AI Copilot (Gemini)" and "Quick Commands (no LLM)" honestly — we don't
+  // claim AI when the backend is doing keyword routing.
+  const [mode, setMode] = useState(null);
+  const [modeLabel, setModeLabel] = useState(null);
+  const [fallbackReason, setFallbackReason] = useState(null);
   const bottomRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -31,6 +37,9 @@ export default function Copilot() {
     try {
       const data = await postAPI('/api/copilot/query', { query: trimmed });
       setMessages(prev => [...prev, { role: 'assistant', content: data.response ?? data.message ?? data.content ?? JSON.stringify(data) }]);
+      setMode(data.mode ?? null);
+      setModeLabel(data.mode_label ?? null);
+      setFallbackReason(data.fallback_reason ?? null);
     } catch {
       setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error processing your request. Please try again.' }]);
     } finally {
@@ -48,8 +57,28 @@ export default function Copilot() {
     <div className="h-full flex flex-col">
       {/* Header */}
       <div className="p-6 pb-4">
-        <h1 className="text-2xl font-bold text-gray-900">RUDRA AI Copilot</h1>
-        <p className="text-sm text-gray-500 mt-1">Ask questions about fraud patterns, entities, and alerts in natural language</p>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-gray-900">
+            {mode === 'quick_commands' ? 'RUDRA Quick Commands' : 'RUDRA AI Copilot'}
+          </h1>
+          {modeLabel && (
+            <span
+              className={`text-xs px-2 py-1 rounded font-medium ${
+                mode === 'ai_copilot'
+                  ? 'bg-indigo-100 text-indigo-700'
+                  : 'bg-amber-100 text-amber-700'
+              }`}
+              title={fallbackReason || ''}
+            >
+              {modeLabel}
+            </span>
+          )}
+        </div>
+        <p className="text-sm text-gray-500 mt-1">
+          {mode === 'quick_commands'
+            ? 'Keyword-routed quick commands — set GEMINI_API_KEY to enable LLM-driven natural-language understanding.'
+            : 'Ask questions about fraud patterns, entities, and alerts in natural language.'}
+        </p>
       </div>
 
       {/* Quick Actions */}

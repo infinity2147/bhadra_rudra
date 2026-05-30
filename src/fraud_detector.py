@@ -18,9 +18,28 @@ import json
 
 
 class FraudDetector:
-    def __init__(self, graph: nx.DiGraph, config: Optional[Dict] = None):
+    def __init__(self, graph: nx.DiGraph, transactions: Optional[pd.DataFrame] = None,
+                 config: Optional[Dict] = None,
+                 risk_weights_bundle: Optional[Dict] = None):
+        """Build a detector around a fund-flow graph.
+
+        Args:
+            graph: NetworkX DiGraph with edge attributes (total_amount, etc).
+            transactions: required for burst-pattern detection (temporal
+                smurfing) which can't be computed from edge aggregates
+                alone. Optional so existing call sites that only pass the
+                graph keep working — burst detection no-ops in that case.
+            config: ConfigStore.get_all() result. Detector falls back to
+                DEFAULT_CONFIG values when keys are missing.
+            risk_weights_bundle: trained LR bundle from
+                src.risk_score_learner.load_risk_weights(). When provided,
+                compute_node_risk_scores uses the learned model; when None,
+                falls back to the hand-tuned weighted sum.
+        """
         self.graph = graph
+        self.transactions = transactions
         self.config = config or {}
+        self.risk_weights_bundle = risk_weights_bundle
         self.alerts: List[Dict] = []
         self.node_risk_scores: Dict[str, float] = {}
         self.detected_patterns: Dict[str, List] = defaultdict(list)
@@ -169,6 +188,10 @@ class FraudDetector:
         min_chain_length = min_chain_length if min_chain_length is not None else self._cfg("layering_min_chain_length", 3)
         decrease_ratio = self._cfg("layering_decrease_ratio", 0.85)
         max_chains_cfg = self._cfg("layering_max_chains", 200)
+        # BFS branching factor — config-driven (was hardcoded to 5, missing many
+        # chains on real graphs with high out-degree). Default raised to 10 so
+        # production-scale graphs surface the same chains the demo does.
+        max_branching = self._cfg("layering_max_branching_per_node", 10)
         alerts = []
 
         # Build adjacency with temporal info
@@ -268,7 +291,7 @@ class FraudDetector:
                 if depth >= 7:  # Max depth
                     continue
 
-                for txn in node_transactions.get(current, [])[:5]:  # Limit branching
+                for txn in node_transactions.get(current, [])[:max_branching]:
                     next_node = txn["target"]
                     if next_node not in chain:
                         queue.append((next_node, chain + [next_node], depth + 1, txn["last_seen"]))
@@ -279,11 +302,29 @@ class FraudDetector:
     def detect_smurfing(self,
                          threshold: Optional[float] = None,
                          cluster_tolerance: Optional[float] = None) -> List[Dict]:
-        """Detect smurfing/structuring by finding clusters of similar amounts below threshold."""
+        """Detect smurfing/structuring in two complementary ways:
+
+          1. **Edge-level clustering** — multiple sender→receiver edges with
+             low-variance amounts just below the reporting threshold.
+             (The original detector — catches the "same mules, repeat
+             transfers" pattern.)
+
+          2. **Temporal bursts** — one sender firing N+ below-threshold txns
+             to *any* receivers within an M-minute window. Catches the
+             "fan-out fast" pattern the edge-level view can't see because
+             each individual edge is small.
+
+        Both share the same alert envelope (`pattern_type` =
+        "Smurfing / Structuring") but carry different sub-fields
+        (`detection_mode: "edge_cluster"|"temporal_burst"`).
+        """
         threshold = threshold if threshold is not None else self._cfg("smurfing_threshold", 200_000)
         cluster_tolerance = cluster_tolerance if cluster_tolerance is not None else self._cfg("smurfing_cluster_tolerance", 0.10)
+        burst_min_txns = self._cfg("smurfing_burst_min_txns", 5)
+        burst_window_min = self._cfg("smurfing_burst_window_minutes", 60)
         alerts = []
 
+        # ── Pattern 1: edge-level clustering (original) ──────────────────
         # Find edges with amounts just below reporting threshold
         suspicious_edges = []
         for u, v, data in self.graph.edges(data=True):
@@ -321,6 +362,7 @@ class FraudDetector:
                 alert = {
                     "alert_id": f"ALERT_SMURF_{len(alerts) + 1:04d}",
                     "pattern_type": "Smurfing / Structuring",
+                    "detection_mode": "edge_cluster",
                     "severity": "HIGH" if total_amount > 5000000 else "MEDIUM",
                     "confidence": round(score * 100, 1),
                     "entities": [sender] + [v for v, _, _ in targets],
@@ -339,15 +381,127 @@ class FraudDetector:
                 alerts.append(alert)
                 self.detected_patterns["smurfing"].append(alert)
 
+        # ── Pattern 2: temporal bursts ───────────────────────────────────
+        # Only computable from raw transactions; skip if not provided.
+        if self.transactions is not None and len(self.transactions) > 0:
+            alerts.extend(self._detect_smurfing_bursts(
+                threshold=threshold,
+                burst_min_txns=burst_min_txns,
+                burst_window_min=burst_window_min,
+                starting_seq=len(alerts),
+            ))
+
         self.alerts.extend(alerts)
         return alerts
+
+    def _detect_smurfing_bursts(self, threshold: float, burst_min_txns: int,
+                                  burst_window_min: int, starting_seq: int) -> List[Dict]:
+        """Find senders who fire >= burst_min_txns sub-threshold txns within a sliding window.
+
+        For each sender, collect their outgoing txns sorted by time. Slide a
+        `burst_window_min`-minute window over them; if any window contains
+        `burst_min_txns` or more sub-threshold txns, that's a temporal burst.
+
+        We don't require all txns to go to the same receiver — the whole point
+        is to catch fan-out structuring where each mule receives only one.
+        """
+        burst_alerts = []
+        txns = self.transactions
+        below = txns[txns["amount"] < threshold].copy()
+        if below.empty:
+            return burst_alerts
+
+        # Parse timestamps once
+        below["_ts"] = pd.to_datetime(below["timestamp"], errors="coerce")
+        below = below.dropna(subset=["_ts"])
+        window = pd.Timedelta(minutes=burst_window_min)
+
+        # Group by sender; sliding window over each sender's timeline.
+        for sender, group in below.groupby("sender_id"):
+            if len(group) < burst_min_txns:
+                continue
+            g = group.sort_values("_ts").reset_index(drop=True)
+            n = len(g)
+            l = 0
+            best_burst = None   # (count, l, r, total)
+
+            # Two-pointer sliding window
+            for r in range(n):
+                while g["_ts"].iat[r] - g["_ts"].iat[l] > window:
+                    l += 1
+                count = r - l + 1
+                if count >= burst_min_txns:
+                    total = float(g["amount"].iloc[l:r+1].sum())
+                    if best_burst is None or count > best_burst[0]:
+                        best_burst = (count, l, r, total)
+
+            if best_burst is None:
+                continue
+            count, l, r, total = best_burst
+            burst_rows = g.iloc[l:r+1]
+            receivers = burst_rows["receiver_id"].unique().tolist()
+            sender_name = self.graph.nodes[sender].get("name", sender) if self.graph.has_node(sender) else sender
+            receiver_names = [
+                self.graph.nodes[v].get("name", v) if self.graph.has_node(v) else v
+                for v in receivers[:10]
+            ]
+            window_start = g["_ts"].iat[l].isoformat()
+            window_end   = g["_ts"].iat[r].isoformat()
+            window_seconds = (g["_ts"].iat[r] - g["_ts"].iat[l]).total_seconds()
+            confidence = min(0.95, 0.5 + (count - burst_min_txns) * 0.05 + min(len(receivers), 20) * 0.02)
+
+            alert = {
+                "alert_id": f"ALERT_SMURF_{starting_seq + len(burst_alerts) + 1:04d}",
+                "pattern_type": "Smurfing / Structuring",
+                "detection_mode": "temporal_burst",
+                "severity": "HIGH" if total > 1_000_000 or count >= burst_min_txns * 2 else "MEDIUM",
+                "confidence": round(confidence * 100, 1),
+                "entities": [sender] + receivers,
+                "entity_names": [sender_name] + receiver_names,
+                "n_txns_in_burst": int(count),
+                "n_distinct_receivers": int(len(receivers)),
+                "total_flow": round(total, 2),
+                "burst_window_seconds": round(window_seconds, 0),
+                "burst_window_start": window_start,
+                "burst_window_end": window_end,
+                "avg_amount": round(total / count, 2),
+                "description": (
+                    f"Sender '{sender_name}' fired {count} sub-threshold txns "
+                    f"(<{threshold:,.0f}) totalling ₹{total:,.0f} to "
+                    f"{len(receivers)} receivers in a {burst_window_min}-min window. "
+                    f"Classic fan-out structuring."
+                ),
+                "recommendation": (
+                    "File STR. Verify all receivers' KYC. Check if receivers are "
+                    "mules (no return relationship with sender)."
+                ),
+            }
+            burst_alerts.append(alert)
+            self.detected_patterns["smurfing"].append(alert)
+
+        return burst_alerts
 
     def detect_shell_funnels(self,
                               flow_imbalance_threshold: Optional[float] = None,
                               min_in_degree: Optional[int] = None) -> List[Dict]:
-        """Detect shell company funnels using centrality and flow analysis."""
+        """Detect shell-company funnels via two complementary patterns:
+
+          1. **Flow imbalance** — much more inflow than outflow (classic
+             collection funnel) or much more outflow than inflow (classic
+             distribution funnel).
+          2. **Pass-through** — inflow ≈ outflow AND money doesn't sit on the
+             account (holding time < threshold). The current imbalance rule
+             *misses* this because the flows look balanced. Pass-through is
+             the dominant mule-account behaviour at PSB scale.
+
+        Both attach `detection_mode` so a SAR-filing investigator knows which
+        signature triggered the alert.
+        """
         flow_imbalance_threshold = flow_imbalance_threshold if flow_imbalance_threshold is not None else self._cfg("funnel_imbalance_threshold", 0.7)
         min_in_degree = min_in_degree if min_in_degree is not None else self._cfg("funnel_min_in_degree", 3)
+        pt_min_ratio = self._cfg("funnel_pass_through_min_ratio", 0.9)
+        pt_max_holding = self._cfg("funnel_max_holding_seconds", 3600)
+        pt_min_flow = self._cfg("funnel_pass_through_min_flow", 500_000)
         alerts = []
 
         for node in self.graph.nodes():
@@ -374,31 +528,66 @@ class FraudDetector:
             if total_flow == 0:
                 continue
 
-            # Funnel indicator: lots in, very little out (or vice versa)
             imbalance = abs(in_strength - out_strength) / total_flow
+            pass_through_ratio = min(in_strength, out_strength) / max(in_strength, out_strength, 1)
+            avg_holding_seconds = self._avg_holding_time(node)
 
-            if imbalance < flow_imbalance_threshold:
+            triggers = []
+            if imbalance >= flow_imbalance_threshold:
+                triggers.append("flow_imbalance")
+            if (pass_through_ratio >= pt_min_ratio
+                    and avg_holding_seconds is not None
+                    and avg_holding_seconds < pt_max_holding
+                    and in_strength >= pt_min_flow and out_strength >= pt_min_flow):
+                triggers.append("pass_through")
+
+            if not triggers:
                 continue
 
-            # Additional indicators
             in_partners = list(self.graph.predecessors(node))
             out_partners = list(self.graph.successors(node))
-
-            # Check if in-partners are from diverse branches
             branches = set()
             for p in in_partners:
                 br = self.graph.nodes[p].get("branch", "")
                 if br:
                     branches.add(br)
 
-            score = min(0.95, 0.5 + imbalance * 0.3 + len(branches) * 0.05)
+            # Score composition depends on which trigger(s) fired.
+            score = 0.5
+            if "flow_imbalance" in triggers:
+                score += imbalance * 0.3
+            if "pass_through" in triggers:
+                # The shorter the holding time, the higher the score.
+                score += 0.2 + (1.0 - min(avg_holding_seconds / pt_max_holding, 1.0)) * 0.15
+            score += len(branches) * 0.05
+            score = min(score, 0.95)
+
             node_name = self.graph.nodes[node].get("name", node)
             in_names = [self.graph.nodes[p].get("name", p) for p in in_partners]
+            detection_mode = "+".join(triggers)
+
+            if "flow_imbalance" in triggers:
+                desc = (
+                    f"₹{in_strength:,.0f} in / ₹{out_strength:,.0f} out at '{node_name}'. "
+                    f"Imbalance {imbalance:.0%} across {len(in_partners)} sources / "
+                    f"{len(branches)} branches."
+                )
+            else:
+                # Pass-through only — different shape
+                holding_str = f"{avg_holding_seconds/60:.1f}min" if avg_holding_seconds else "?"
+                desc = (
+                    f"'{node_name}' shows pass-through behaviour: ₹{in_strength:,.0f} in, "
+                    f"₹{out_strength:,.0f} out (ratio {pass_through_ratio:.2f}), "
+                    f"avg holding {holding_str}. Classic mule-account signature."
+                )
+
+            severity = "CRITICAL" if max(in_strength, out_strength) > 10_000_000 else "HIGH"
 
             alert = {
                 "alert_id": f"ALERT_FUNNEL_{len(alerts) + 1:04d}",
                 "pattern_type": "Shell Company Funnel",
-                "severity": "CRITICAL" if in_strength > 10000000 else "HIGH",
+                "detection_mode": detection_mode,
+                "severity": severity,
                 "confidence": round(score * 100, 1),
                 "entities": [node] + in_partners,
                 "entity_names": [node_name] + in_names,
@@ -409,11 +598,9 @@ class FraudDetector:
                 "n_sources": len(in_partners),
                 "branch_diversity": len(branches),
                 "imbalance_ratio": round(imbalance, 4),
-                "description": (
-                    f"₹{in_strength:,.0f} funneled into '{node_name}' from "
-                    f"{len(in_partners)} sources across {len(branches)} branches "
-                    f"(imbalance: {imbalance:.0%})"
-                ),
+                "pass_through_ratio": round(pass_through_ratio, 4),
+                "avg_holding_seconds": round(avg_holding_seconds, 1) if avg_holding_seconds is not None else None,
+                "description": desc,
                 "recommendation": "Verify business purpose. Check KYC of funnel entity. Investigate beneficial ownership.",
             }
             alerts.append(alert)
@@ -422,14 +609,84 @@ class FraudDetector:
         self.alerts.extend(alerts)
         return alerts
 
-    def compute_node_risk_scores(self, time_window_days: Optional[int] = None) -> Dict[str, float]:
-        """Compute composite risk score for each node based on multiple signals.
+    def _avg_holding_time(self, node: str) -> Optional[float]:
+        """Average time funds stay at `node` between arrival and departure, in seconds.
 
-        If `time_window_days` is set, betweenness + degree centrality are computed
-        on a subgraph containing only edges with `last_seen` within the window.
-        This is much closer to real AML practice: a shell node that was active
-        in 2023 but quiet for two years shouldn't drive today's risk score.
+        Approximated via edge first_seen/last_seen on incoming and outgoing
+        edges (we don't track per-txn matching). Returns None when either
+        side has no temporal information.
         """
+        in_times = []
+        out_times = []
+        for u in self.graph.predecessors(node):
+            t = self.graph[u][node].get("last_seen")
+            if t:
+                try:
+                    in_times.append(pd.to_datetime(t))
+                except Exception:
+                    pass
+        for v in self.graph.successors(node):
+            t = self.graph[node][v].get("first_seen")
+            if t:
+                try:
+                    out_times.append(pd.to_datetime(t))
+                except Exception:
+                    pass
+        if not in_times or not out_times:
+            return None
+        # Pair each outgoing txn with the most-recent prior incoming.
+        in_sorted = sorted(in_times)
+        deltas = []
+        for ot in out_times:
+            prior = [t for t in in_sorted if t <= ot]
+            if not prior:
+                continue
+            deltas.append((ot - prior[-1]).total_seconds())
+        if not deltas:
+            return None
+        return float(sum(deltas) / len(deltas))
+
+    def compute_node_risk_scores(
+        self,
+        time_window_days: Optional[int] = None,
+        risk_weights_bundle: Optional[Dict] = None,
+    ) -> Dict[str, float]:
+        """Compute composite risk score for each node.
+
+        Two scoring modes:
+
+        1. **Learned path (T2.10)** — when a trained risk-weights bundle is
+           passed (from `src.risk_score_learner.load_risk_weights`) or stored
+           on the instance via the constructor, uses the learned
+           LogisticRegression instead of the hand-tuned weighted sum.
+
+           The learned model uses a wider, leakage-free feature set (branch
+           diversity, singleton-out signature, total transaction count) that
+           the hand-tuned formula doesn't expose. See risk_score_learner.py
+           for the full feature list and training procedure.
+
+        2. **Hand-tuned fallback** — composite of entity type + degree
+           centrality + betweenness centrality + flow imbalance.  If
+           `time_window_days` is set, betweenness + degree centrality are
+           computed on a subgraph containing only edges with `last_seen`
+           within the window.  This is much closer to real AML practice:
+           a shell node active in 2023 but quiet for two years shouldn't
+           drive today's risk score.
+        """
+        # ── Learned path (T2.10) ──────────────────────────────────────────
+        bundle = risk_weights_bundle or self.risk_weights_bundle
+        if bundle:
+            try:
+                from risk_score_learner import score_nodes
+                scores = score_nodes(self.graph, bundle)
+                if scores:
+                    self.node_risk_scores = scores
+                    return scores
+            except Exception:
+                # Fall through to the hand-tuned path below if anything fails.
+                pass
+
+        # ── Hand-tuned fallback ───────────────────────────────────────────
         scores = {}
 
         # Cache key: include window so different windows don't collide.
@@ -532,7 +789,7 @@ class FraudDetector:
         funnels = self.detect_shell_funnels()
 
         print("Computing Node Risk Scores...")
-        risk_scores = self.compute_node_risk_scores()
+        risk_scores = self.compute_node_risk_scores(risk_weights_bundle=self.risk_weights_bundle)
 
         results = {
             "circular_transactions": circular,
