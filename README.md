@@ -349,14 +349,14 @@ Every endpoint accepts an optional `X-User-Role` header for RBAC.
 - `GET  /api/config/thresholds` (anyone) / `POST` (Admin)
 - `POST /api/config/rerun` — re-run all detectors with current config (Admin)
 - `GET  /api/analytics/{channels,branches,products}`
-- `GET  /api/live/inject?count=N` — N simulated txns with per-txn ML score + latency
 - `GET  /api/benchmark/latency` — full pipeline timing + speedup vs T+1
 
 ### Real Kafka streaming
 - `GET  /api/stream/status` — consumer mode (kafka|inproc), buffer size, throughput
-- `POST /api/stream/start` / `POST /api/stream/stop` (Admin)
-- `GET  /api/stream/recent?limit=N` — newest scored events
-- `POST /api/stream/replay` — replay loaded txns onto the bus (Admin)
+- `POST /api/stream/start` / `POST /api/stream/stop` — toggle the local consumer (any role)
+- `POST /api/stream/reset` — hard reset: stop + wipe ring buffer & counters (seq restarts at 0)
+- `GET  /api/stream/recent?limit=N` — newest scored events (per-txn ML score, latency, signals)
+- `POST /api/stream/replay` — replay loaded txns onto the bus (any role); this is what the Live page calls
 - `GET  /api/stream/velocity_alerts` — Pathway windowed alerts (if installed)
 
 ### Real Account Aggregator + DiliSense

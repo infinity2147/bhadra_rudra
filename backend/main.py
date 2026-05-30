@@ -17,12 +17,10 @@ The investigator-facing API. Wires together (per active RUDRA_DATASET):
 import os
 import sys
 import json
-import random
 import time
 from io import BytesIO
 from typing import Optional, List, Dict
 
-import numpy as np
 import pandas as pd
 import networkx as nx
 
@@ -1216,82 +1214,6 @@ def analytics_products():
 
 # ── Live Mode ──────────────────────────────────────────────────────────────
 
-@app.get("/api/live/inject")
-def inject_transactions(count: int = 10):
-    """Simulate `count` incoming transactions and score each one through the
-    live ML model. Per-transaction latency is included in the response."""
-    graph = state["graph"]
-    df = state["transactions"]
-    bundle = state["ml_bundle"]
-    entities = list(graph.nodes())
-
-    feed = []
-    for _ in range(count):
-        sender = random.choice(entities)
-        receiver = random.choice(entities)
-        while receiver == sender:
-            receiver = random.choice(entities)
-
-        is_fraud = random.random() < 0.20
-        if is_fraud:
-            amount = round(random.uniform(500_000, 5_000_000), 2)
-        else:
-            amount = round(random.lognormvariate(np.log(50_000), 1.2), 2)
-
-        sdata = graph.nodes[sender]; rdata = graph.nodes[receiver]
-        rail = random.choice(["NEFT", "RTGS", "IMPS", "UPI"])
-        channel = random.choice(["MobileApp", "NetBanking", "Branch", "ATM"])
-
-        scoring = None
-        ml_score = None
-        latency = None
-        scoring_error = None
-        if bundle is not None:
-            try:
-                scoring = score_live_txn(bundle, graph, sender, receiver, amount,
-                                           channel, rail, pd.Timestamp.now())
-                ml_score = scoring["ml_score"]
-                latency = scoring["latency_ms"]
-            except Exception as e:
-                scoring_error = str(e)
-
-        pattern = "none"
-        if is_fraud:
-            if amount > 2_000_000 and (sdata.get("type") == "shell_company"
-                                         or rdata.get("type") == "shell_company"):
-                pattern = "shell_funnel"
-            elif amount > 1_000_000:
-                pattern = random.choice(["rapid_layering", "circular_transaction"])
-            elif amount < 200_000:
-                pattern = "smurfing"
-
-        severity = None
-        if is_fraud or (ml_score and ml_score > 0.5):
-            score_for_sev = ml_score if ml_score is not None else 0
-            if amount > 3_000_000 or score_for_sev > 0.8:
-                severity = "CRITICAL"
-            elif amount > 1_000_000 or score_for_sev > 0.6:
-                severity = "HIGH"
-            else:
-                severity = "MEDIUM"
-
-        feed.append({
-            "timestamp": pd.Timestamp.now().strftime("%Y-%m-%d %H:%M:%S"),
-            "sender": sdata.get("name", sender),
-            "receiver": rdata.get("name", receiver),
-            "sender_id": sender, "receiver_id": receiver,
-            "amount": amount,
-            "transaction_type": rail, "channel": channel,
-            "isFraud": is_fraud,
-            "pattern": pattern, "severity": severity,
-            "mlScore": ml_score,
-            "latency_ms": latency,
-            "scoring_error": scoring_error,
-        })
-
-    return {"transactions": feed, "count": len(feed)}
-
-
 @app.get("/api/benchmark/latency")
 def benchmark_latency():
     """Time the full pipeline + per-txn ML scoring."""
@@ -1362,7 +1284,7 @@ def stream_status():
 
 @app.post("/api/stream/start")
 async def stream_start(role: str = Depends(get_role)):
-    require("pipeline.run", role)
+    require("stream.control", role)
     ing = state.get("ingestor")
     if ing is None:
         raise HTTPException(503, "Ingestor not initialised")
@@ -1371,11 +1293,22 @@ async def stream_start(role: str = Depends(get_role)):
 
 @app.post("/api/stream/stop")
 async def stream_stop(role: str = Depends(get_role)):
-    require("pipeline.run", role)
+    require("stream.control", role)
     ing = state.get("ingestor")
     if ing is None:
         raise HTTPException(503, "Ingestor not initialised")
     return await ing.stop()
+
+
+@app.post("/api/stream/reset")
+async def stream_reset(role: str = Depends(get_role)):
+    """Hard reset — stop the consumer and wipe the ring buffer + counters so the
+    feed restarts from empty at seq 0. Used by the Live page's Reset button."""
+    require("stream.control", role)
+    ing = state.get("ingestor")
+    if ing is None:
+        raise HTTPException(503, "Ingestor not initialised")
+    return await ing.reset()
 
 
 @app.get("/api/stream/recent")
@@ -1394,7 +1327,7 @@ async def stream_replay(body: dict, role: str = Depends(get_role)):
 
     Body: {"rate": 5, "total": 100, "shuffle": true}
     """
-    require("pipeline.run", role)
+    require("stream.control", role)
     ing = state.get("ingestor")
     if ing is None or not ing.status().get("running"):
         raise HTTPException(503, "Stream ingestor is not running")

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict, field
-from datetime import datetime
-from typing import Dict, Optional
+from datetime import datetime, timezone
+from typing import Dict, List, Optional
 
 
 @dataclass
@@ -35,8 +35,11 @@ class ScoredTxn:
     ml_score: Optional[float]
     latency_ms: Optional[Dict[str, float]]
     severity: Optional[str]                 # MEDIUM / HIGH / CRITICAL based on score
-    received_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    # tz-aware UTC (…+00:00) so the UI can parse it and render local ingest time
+    received_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     error: Optional[str] = None
+    seq: Optional[int] = None               # monotonic ingest order (stable UI key)
+    signals: List[str] = field(default_factory=list)  # honest flags from the live feature row
 
     def to_dict(self) -> Dict:
         d = asdict(self)

@@ -27,7 +27,7 @@
 │  /api/incidents         /api/alerts/{id}/explain /api/cases/{id}/verify    │
 │  /api/ml/variants       /api/fiu/package/{id}    /api/config/thresholds    │
 │  /api/ml/metrics        /api/benchmark/latency   /api/aa/consent           │
-│  /api/live/inject       /api/copilot/query       /api/kyc/screen           │
+│  /api/stream/recent     /api/copilot/query       /api/kyc/screen           │
 │                                                                            │
 │  RBAC: X-User-Role gate (INVESTIGATOR / SUPERVISOR / ADMIN)                │
 └────────────────────────────────┬───────────────────────────────────────────┘
@@ -166,9 +166,9 @@ One zip download contains everything a compliance team needs to file a Suspiciou
 6. Supervisor clicks "File SAR" → status moves to SAR_FILED. Downloads FIU zip — gets STR.xml + SAR PDF + subgraph + chain CSV.
 
 ### Real-time monitoring
-1. Each incoming transaction (simulated via `/api/live/inject`) is fed into `live_scoring.score_live_txn`.
-2. Feature row is computed from the *current* graph state, model produces a probability, latency is recorded.
-3. Frontend Live page polls every second; per-transaction latency tile shows mean + p95 over last 500 samples.
+1. The Live page replays the loaded dataset onto the ingest bus via `POST /api/stream/replay`; the `StreamIngestor` consumer (Kafka or in-process) picks up each event.
+2. Each event is scored through `live_scoring.score_live_txn` — feature row computed from the *current* graph state, model produces a probability, latency recorded, and honest signal flags (cycle / near-threshold / shell / off-hours) derived from the feature row.
+3. Scored events land in a 500-deep ring buffer; the Live page polls `GET /api/stream/recent` every second and shows the per-transaction latency tile (mean + p95 over last 500 samples). No synthetic transactions are generated.
 
 ---
 
@@ -193,7 +193,7 @@ Measured on a 2024 M1 MacBook Air (Python 3.12, no GPU):
 
 - F1 = 0.994 on synthetic is artificially high because the embedded patterns are clean by construction. Real-world AML F1 is ~0.72 on IBM AML-HI-Large (SOTA FraudGT) and ~0.42 with an XGBoost baseline.
 - IBM AML / PaySim / IEEE-CIS variants are *trainable* but not bundled (datasets are 100s of MB). Place the CSVs under `data/real/<dataset>/` and re-run the pipeline.
-- Streaming is simulated (`/api/live/inject` rotates random pairs). A production deployment would consume from Kafka + Pathway as outlined in the PoA.
+- Streaming replays the loaded dataset onto the ingest bus (Kafka when a broker is reachable, in-process `asyncio.Queue` otherwise) — there is no live bank feed in the demo, but the transport, scoring, and ring buffer are the real production path. A production deployment swaps the replay source for the bank's live transaction bus + Pathway as outlined in the PoA.
 - Account Aggregator + DiliSense are mocks with realistic shapes. Production calls Sahamati-licensed AAs and the DiliSense API directly.
 - Single-user mode in the demo; RBAC is via header switcher, not real auth.
 

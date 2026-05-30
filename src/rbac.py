@@ -38,6 +38,11 @@ PERMISSIONS = {
     "config.write": {"ADMIN"},
     "ml.retrain": {"ADMIN"},
     "pipeline.run": {"ADMIN"},
+    # Driving the live monitoring stream (start/stop the local consumer, replay
+    # already-loaded transactions onto the bus) is an operational *view* action,
+    # not a money-movement or config change — every role that can triage cases
+    # can also watch the live feed. Distinct from pipeline.run (full regen, ADMIN).
+    "stream.control": {"INVESTIGATOR", "SUPERVISOR", "ADMIN"},
     "audit.verify": {"SUPERVISOR", "ADMIN"},
 }
 

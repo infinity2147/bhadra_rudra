@@ -45,16 +45,95 @@ DEFAULT_BUFFER_SIZE = 500
 KAFKA_PROBE_TIMEOUT = 2.0
 
 
-def _severity_from_score(score: Optional[float], amount: float) -> Optional[str]:
-    if score is None:
-        return None
-    if score >= 0.8 or amount > 3_000_000:
-        return "CRITICAL"
-    if score >= 0.6 or amount > 1_000_000:
-        return "HIGH"
-    if score >= 0.4:
-        return "MEDIUM"
-    return None
+# Approximate static FX → INR (RUDRA's home currency). Used ONLY to put a
+# multi-currency dataset on one scale for large-value escalation; production
+# swaps this for a live FX feed. Not exact — it just needs the right order of
+# magnitude to decide "is this a very large transfer?".
+_INR_FX = {
+    "INR": 1.0, "USD": 83.0, "EUR": 90.0, "GBP": 105.0, "CHF": 92.0,
+    "CNY": 11.5, "JPY": 0.55, "RUB": 0.9, "ILS": 22.0, "AUD": 55.0,
+    "CAD": 61.0, "MXN": 4.8, "SAR": 22.0, "BRL": 16.0, "BTC": 5_000_000.0,
+}
+_FX_DEFAULT = 83.0                       # unknown currency → treat as USD-scale
+
+# Large-value escalation tiers, in INR *after* FX-normalisation. A transfer this
+# big is escalated regardless of the model score. On IBM AML this fires for
+# ~6% (HIGH) / ~2.7% (CRITICAL) — genuine outliers, not the whole feed.
+_AMOUNT_HIGH_INR = 1_00_00_000           # ₹1 crore
+_AMOUNT_CRITICAL_INR = 5_00_00_000       # ₹5 crore
+
+# ML-score severity bands, expressed as fractions of the model's OWN tuned
+# operating threshold τ (read from the bundle). CRITICAL = the model's actual
+# fraud decision; HIGH/MEDIUM are watchlist tiers below it. Single source of
+# truth — never hardcode a raw 0.4/0.6/0.8 cutoff here.
+_HIGH_FRAC = 0.85
+_MEDIUM_FRAC = 0.70
+_FALLBACK_TAU = 0.5                      # only if the bundle predates threshold saving
+
+_SEVERITY_RANK = {"MEDIUM": 1, "HIGH": 2, "CRITICAL": 3}
+
+
+def _amount_to_inr(amount: float, currency: str) -> float:
+    return amount * _INR_FX.get((currency or "INR").upper(), _FX_DEFAULT)
+
+
+def _severity_from_score(
+    score: Optional[float],
+    amount: float,
+    currency: str = "INR",
+    threshold: Optional[float] = None,
+) -> Optional[str]:
+    """Severity for one scored txn.
+
+    ML-score severity is banded around the *model's own* tuned threshold τ, so
+    what the UI flags tracks what the model actually calls fraud (≈3.4% at τ on
+    IBM AML) rather than a hardcoded cutoff. A large-value (FX-normalised)
+    escalation can only RAISE the severity, never lower it.
+    """
+    tau = threshold if (threshold and 0.0 < threshold < 1.0) else _FALLBACK_TAU
+
+    sev = None
+    if score is not None:
+        if score >= tau:
+            sev = "CRITICAL"             # model's fraud decision
+        elif score >= _HIGH_FRAC * tau:
+            sev = "HIGH"
+        elif score >= _MEDIUM_FRAC * tau:
+            sev = "MEDIUM"
+
+    inr = _amount_to_inr(amount, currency)
+    amt_sev = ("CRITICAL" if inr >= _AMOUNT_CRITICAL_INR
+               else "HIGH" if inr >= _AMOUNT_HIGH_INR
+               else None)
+    if amt_sev and _SEVERITY_RANK[amt_sev] > _SEVERITY_RANK.get(sev, 0):
+        sev = amt_sev                    # escalation raises only
+
+    return sev
+
+
+def _signals_from_features(features: Dict) -> list:
+    """Derive honest, human-readable flags from the live feature row.
+
+    Every flag maps to a feature score_live_txn actually computed for this
+    transaction — no fabrication. These replace the old fake "pattern" label
+    that the removed /api/live/inject endpoint used to invent.
+    """
+    if not features:
+        return []
+    signals = []
+    if features.get("in_scc_3plus", 0) >= 1.0:
+        signals.append("cycle")            # both endpoints already in a ≥3-node cycle
+    if features.get("near_threshold_score", 0) >= 0.7:
+        signals.append("near-threshold")   # amount hugs the reporting threshold (structuring)
+    if features.get("sender_is_shell", 0) >= 1.0:
+        signals.append("shell-sender")
+    if features.get("receiver_is_shell", 0) >= 1.0:
+        signals.append("shell-receiver")
+    if features.get("high_value_rail_share", 0) >= 0.5:
+        signals.append("high-value-rail")  # RTGS / wire heavy
+    if features.get("night_ratio", 0) >= 1.0:
+        signals.append("off-hours")
+    return signals
 
 
 class StreamIngestor:
@@ -144,6 +223,23 @@ class StreamIngestor:
             self._mode = "stopped"
             logger.info("StreamIngestor stopped (was: %s)", mode_was)
             return self.status()
+
+    async def reset(self) -> Dict:
+        """Hard reset: stop the consumer, then wipe the ring buffer + counters so
+        the next start() begins from an empty feed at seq 0.
+
+        Note: stop() must run *before* we take the lock (it acquires the lock
+        itself, and asyncio.Lock isn't reentrant). Messages already sitting on a
+        Kafka topic are not re-consumed — the consumer resubscribes at `latest`.
+        """
+        await self.stop()
+        async with self._lock:
+            self._buffer.clear()
+            self._processed = 0
+            self._errors = 0
+            self._started_at = None
+        logger.info("StreamIngestor hard-reset (buffer + counters cleared).")
+        return self.status()
 
     def status(self) -> Dict:
         return {
@@ -271,10 +367,12 @@ class StreamIngestor:
             )
             score = res.get("ml_score")
             latency = res.get("latency_ms")
+            signals = _signals_from_features(res.get("features") or {})
             err = None
         except Exception as e:
             score = None
             latency = None
+            signals = []
             err = str(e)
             self._errors += 1
 
@@ -291,8 +389,15 @@ class StreamIngestor:
             ),
             ml_score=score,
             latency_ms=latency,
-            severity=_severity_from_score(score, float(payload["amount"])),
+            severity=_severity_from_score(
+                score,
+                float(payload["amount"]),
+                payload.get("currency", "INR"),
+                threshold=(bundle.get("threshold") if isinstance(bundle, dict) else None),
+            ),
             error=err,
+            seq=self._processed,
+            signals=signals,
         )
         self._buffer.append(scored.to_dict())
         self._processed += 1
