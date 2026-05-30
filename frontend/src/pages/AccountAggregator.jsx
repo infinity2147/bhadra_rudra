@@ -21,9 +21,12 @@ export default function AccountAggregator() {
   const [screenType, setScreenType] = useState('shell_company');
   const [screenResult, setScreenResult] = useState(null);
   const [screening, setScreening] = useState(false);
+  const [pullError, setPullError] = useState(null);
+  const [integrationStatus, setIntegrationStatus] = useState(null);
 
   function refresh() {
     fetchAPI('/api/aa/consents').then((d) => setConsents(d.consents || []));
+    fetchAPI('/api/integrations/status').then(setIntegrationStatus).catch(() => {});
   }
 
   useEffect(refresh, []);
@@ -45,10 +48,18 @@ export default function AccountAggregator() {
   }
 
   async function pullData(handle) {
-    setPulling(true); setActiveHandle(handle); setPulled(null);
+    setPulling(true); setActiveHandle(handle); setPulled(null); setPullError(null);
     try {
       const d = await fetchAPI(`/api/aa/pull/${handle}?days_back=30`);
-      setPulled(d);
+      if (d.error) {
+        setPullError(d.error);
+        setPulled(null);
+      } else {
+        setPulled(d);
+      }
+    } catch (e) {
+      setPullError(e.message || 'Pull failed');
+      setPulled(null);
     } finally {
       setPulling(false);
     }
@@ -78,6 +89,11 @@ export default function AccountAggregator() {
         <p className="text-sm text-gray-500 mt-1">
           Account Aggregator (consent-based financial data pull) + DiliSense KYC enrichment. Both are mocks — production calls the real Sahamati-licensed AA and DiliSense / Refinitiv APIs.
         </p>
+        {integrationStatus && (
+          <p className="text-xs text-gray-400 mt-2">
+            AA: {integrationStatus.account_aggregator?.mode} · KYC: {integrationStatus.kyc_screening?.mode} · Copilot: {integrationStatus.copilot?.mode}
+          </p>
+        )}
       </div>
 
       {/* AA section */}
@@ -164,6 +180,12 @@ export default function AccountAggregator() {
             ))
           )}
         </div>
+
+        {pullError && (
+          <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-800">
+            {pullError}
+          </div>
+        )}
 
         {/* Pulled data */}
         {pulled && (

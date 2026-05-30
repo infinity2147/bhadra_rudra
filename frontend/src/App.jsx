@@ -14,7 +14,7 @@ import Copilot from './pages/Copilot';
 import SarReports from './pages/SarReports';
 import Settings from './pages/Settings';
 import AccountAggregator from './pages/AccountAggregator';
-import { getRole, setRole } from './api';
+import { fetchAPI, setRole } from './api';
 
 class ErrorBoundary extends Component {
   state = { error: null };
@@ -91,13 +91,24 @@ const NAV_GROUPS = [
 const ROLES = ['INVESTIGATOR', 'SUPERVISOR', 'ADMIN'];
 
 function RoleSwitcher() {
-  const [role, setLocalRole] = useState(getRole());
+  const [role, setLocalRole] = useState(() => localStorage.getItem('rudra_role') || 'INVESTIGATOR');
+  const [permissions, setPermissions] = useState([]);
+
+  useEffect(() => {
+    fetchAPI('/api/me')
+      .then((d) => {
+        if (d.role) setLocalRole(d.role);
+        setPermissions(d.permissions || []);
+      })
+      .catch(() => {});
+  }, [role]);
+
   function change(r) {
     setRole(r);
     setLocalRole(r);
-    // Reload to refetch under the new role's permissions
     window.location.reload();
   }
+
   return (
     <div className="px-3 py-2 border-t border-gray-200">
       <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Role</p>
@@ -108,7 +119,21 @@ function RoleSwitcher() {
       >
         {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
       </select>
+      {permissions.length > 0 && (
+        <p className="text-[10px] text-gray-400 mt-1 truncate" title={permissions.join(', ')}>
+          {permissions.length} permissions via /api/me
+        </p>
+      )}
       <p className="text-[10px] text-gray-400 mt-1">Demo gate — production uses IDP</p>
+    </div>
+  );
+}
+
+function NotFound() {
+  return (
+    <div className="p-12 text-center">
+      <h1 className="text-xl font-bold text-gray-900">Page not found</h1>
+      <p className="text-sm text-gray-500 mt-2">This route is not registered in the RUDRA app.</p>
     </div>
   );
 }
@@ -173,6 +198,7 @@ export default function App() {
               <Route path="/sar" element={<SarReports />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/aa" element={<AccountAggregator />} />
+              <Route path="*" element={<NotFound />} />
             </Routes>
             </div>
           </main>

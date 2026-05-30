@@ -22,25 +22,34 @@ function MetricCard({ label, value, hint, tone = 'indigo' }) {
 
 export default function ModelMetrics() {
   const [data, setData] = useState(null);
+  const [variants, setVariants] = useState([]);
+  const [variant, setVariant] = useState('synthetic');
   const [loading, setLoading] = useState(true);
   const [retraining, setRetraining] = useState(false);
   const [error, setError] = useState(null);
 
-  function load() {
+  function load(selected = variant) {
     setLoading(true);
-    fetchAPI('/api/ml/metrics')
-      .then(setData)
+    Promise.all([
+      fetchAPI(`/api/ml/metrics?variant=${encodeURIComponent(selected)}`),
+      fetchAPI('/api/ml/variants').catch(() => ({ variants: [] })),
+    ])
+      .then(([metrics, vlist]) => {
+        setData(metrics);
+        setVariants(vlist.variants || []);
+      })
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(variant); }, [variant]);
 
   async function retrain() {
     setRetraining(true);
     try {
       const out = await postAPI('/api/ml/retrain', {});
       setData({ trained: true, ...(out.metrics || {}) });
+      load('synthetic');
     } catch (e) {
       setError(e.message);
     } finally {
@@ -67,7 +76,7 @@ export default function ModelMetrics() {
 
   return (
     <div className="p-6 space-y-6 max-w-[1400px] mx-auto">
-      <div className="flex items-start justify-between">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">ML Model — Edge-level Fraud Classifier</h1>
           <p className="text-sm text-gray-500 mt-1">
@@ -75,9 +84,24 @@ export default function ModelMetrics() {
             from the fund-flow graph. Evaluated on a stratified 20% held-out split.
           </p>
         </div>
-        <button onClick={retrain} disabled={retraining} className="px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50">
-          {retraining ? 'Retraining...' : 'Retrain'}
-        </button>
+        <div className="flex items-center gap-2">
+          {variants.length > 1 && (
+            <select
+              value={variant}
+              onChange={(e) => setVariant(e.target.value)}
+              className="text-sm px-3 py-2 border border-gray-300 rounded-md bg-white"
+            >
+              {variants.map((v) => (
+                <option key={v.variant} value={v.variant}>
+                  {v.variant}{v.dataset_name ? ` — ${v.dataset_name}` : ''}
+                </option>
+              ))}
+            </select>
+          )}
+          <button onClick={retrain} disabled={retraining} className="px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50">
+            {retraining ? 'Retraining...' : 'Retrain synthetic'}
+          </button>
+        </div>
       </div>
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">

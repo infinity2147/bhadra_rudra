@@ -78,6 +78,10 @@ export default function Cases() {
       .finally(() => setLoading(false));
   }, []);
 
+  useEffect(() => {
+    if (focusedId) setSelectedId(focusedId);
+  }, [focusedId]);
+
   const refreshAlerts = useCallback(async () => {
     const data = await fetchAPI('/api/alerts');
     setAlerts(data.alerts || []);

@@ -25,3 +25,16 @@ def test_dilisense_returns_deterministic_score():
     assert r1["risk_score_0_100"] == r2["risk_score_0_100"]
     assert r1["risk"] == "CRITICAL"
     assert any(h["type"] == "SANCTIONS" for h in r1["hits"])
+
+
+def test_aa_consent_expiry_blocks_pull():
+    from aa_kyc_mock import aa_create_consent, aa_pull_data, _AA_CONSENT_STORE
+    from datetime import datetime, timedelta
+
+    c = aa_create_consent("CUST-EXP", ["FIP-A"], duration_days=1)
+    handle = c["consent_handle"]
+    _AA_CONSENT_STORE[handle]["expires_at"] = (datetime.now() - timedelta(days=1)).isoformat()
+
+    pull = aa_pull_data(handle)
+    assert pull.get("error")
+    assert pull.get("status") == 401

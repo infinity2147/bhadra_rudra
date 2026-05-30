@@ -12,202 +12,149 @@ from typing import Dict, List, Optional, Any
 import pandas as pd
 import networkx as nx
 
+from fund_tracer import trace_journey
+from fraud_detector import FraudDetector
+from advanced_detectors import ProfileMismatchDetector
+from shap_explainer import explain_alert as shap_explain_alert
+
 
 class LLMCopilot:
     """AI copilot that answers investigator queries using graph tools."""
 
     def __init__(self, graph: nx.DiGraph, transactions: pd.DataFrame,
                  alerts: List[Dict], risk_scores: List[Dict],
-                 fraud_cases: List[Dict], api_key: Optional[str] = None):
+                 fraud_cases: List[Dict], api_key: Optional[str] = None,
+                 ml_bundle: Optional[dict] = None,
+                 edge_ml_scores: Optional[Dict[str, float]] = None):
         self.graph = graph
         self.transactions = transactions
         self.alerts = alerts
         self.risk_scores = risk_scores
         self.fraud_cases = fraud_cases
         self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        self.ml_bundle = ml_bundle
+        self.edge_ml_scores = edge_ml_scores or {}
         self.conversation_history: List[Dict] = []
         self.tool_results_log: List[Dict] = []
 
     # ── Tool Definitions ──────────────────────────────────────
 
     def trace_funds(self, entity_name: str, depth: int = 3, direction: str = "both") -> Dict:
-        """Trace fund flows from/to a given entity.
-
-        Args:
-            entity_name: Name or partial name of the entity to trace.
-            depth: How many hops to trace (1-5).
-            direction: 'incoming', 'outgoing', or 'both'.
-        """
-        # Find matching node
+        """Trace fund flows from/to a given entity via the canonical journey tracer."""
         node_id = self._find_node(entity_name)
         if not node_id:
             return {"error": f"Entity '{entity_name}' not found. Try a different name or partial match."}
 
-        node_data = dict(self.graph.nodes[node_id])
-        result = {
-            "entity": {"id": node_id, **node_data},
-            "depth": depth,
+        dir_map = {"incoming": "backward", "outgoing": "forward", "both": "both"}
+        journey_dir = dir_map.get(direction, "both")
+        depth = max(1, min(int(depth or 3), 5))
+
+        journey = trace_journey(
+            self.graph, self.transactions, self.risk_scores,
+            entity_id=node_id, direction=journey_dir, max_hops=depth,
+            edge_ml_scores=self.edge_ml_scores,
+        )
+        if journey.get("error"):
+            return journey
+
+        summary = journey.get("summary", {})
+        top_links = []
+        for link in journey.get("links", [])[:8]:
+            u, v = link.get("source"), link.get("target")
+            enriched = dict(link)
+            if u and self.graph.has_node(u):
+                enriched["source_name"] = self.graph.nodes[u].get("name", u)
+            if v and self.graph.has_node(v):
+                enriched["target_name"] = self.graph.nodes[v].get("name", v)
+            top_links.append(enriched)
+
+        return {
+            "entity_id": node_id,
+            "entity_name": journey.get("entity", {}).get("name", entity_name),
             "direction": direction,
-            "flows": {"incoming": [], "outgoing": []},
+            "depth": depth,
+            "journey": journey,
+            "summary": {
+                "total_inflow": summary.get("total_inflow", 0),
+                "total_outflow": summary.get("total_outflow", 0),
+                "net_flow": summary.get("net_flow", 0),
+                "n_nodes": summary.get("n_nodes", 0),
+                "n_links": summary.get("n_links", 0),
+                "red_flags": summary.get("red_flags", []),
+            },
+            "top_links": top_links,
+            "dominant_paths": journey.get("dominant_paths", []),
         }
-
-        if direction in ("incoming", "both"):
-            result["flows"]["incoming"] = self._trace_direction(node_id, "incoming", depth)
-        if direction in ("outgoing", "both"):
-            result["flows"]["outgoing"] = self._trace_direction(node_id, "outgoing", depth)
-
-        # Summary stats
-        in_total = sum(f["amount"] for f in result["flows"]["incoming"])
-        out_total = sum(f["amount"] for f in result["flows"]["outgoing"])
-        result["summary"] = {
-            "total_inflow": round(in_total, 2),
-            "total_outflow": round(out_total, 2),
-            "net_flow": round(in_total - out_total, 2),
-            "num_sources": len(set(f["from"] for f in result["flows"]["incoming"])),
-            "num_destinations": len(set(f["to"] for f in result["flows"]["outgoing"])),
-        }
-
-        return result
 
     def find_cycles(self, entity_name: Optional[str] = None,
                     min_amount: float = 0, max_length: int = 8) -> Dict:
-        """Find circular transaction patterns (round-tripping).
-
-        Args:
-            entity_name: Optional — filter cycles containing this entity.
-            min_amount: Minimum total cycle flow to include.
-            max_length: Maximum cycle length.
-        """
-        import signal
-        try:
-            # Targeted DFS-based cycle search instead of nx.simple_cycles
-            cycles = []
-            cycles_found = set()
-            for start_node in self.graph.nodes():
-                if len(cycles) >= 50:
-                    break
-                stack = [(start_node, [start_node], {start_node})]
-                while stack and len(cycles) < 50:
-                    current, path, visited = stack.pop()
-                    if len(path) > max_length:
-                        continue
-                    for neighbor in self.graph.successors(current):
-                        if neighbor == start_node and len(path) >= 3:
-                            cycle_key = tuple(sorted(path))
-                            if cycle_key not in cycles_found:
-                                cycles_found.add(cycle_key)
-                                cycles.append(list(path))
-                        elif neighbor not in visited and len(path) < max_length:
-                            stack.append((neighbor, path + [neighbor], visited | {neighbor}))
-        except Exception:
-            return {"error": "Could not compute cycles on this graph.", "cycles": []}
-
-        results = []
+        """Find circular transaction patterns using the same detector as the API."""
+        circular_alerts = FraudDetector(self.graph).detect_circular_transactions(
+            min_total_flow=min_amount,
+            max_cycle_length=max_length,
+        )
         filter_node = self._find_node(entity_name) if entity_name else None
 
-        for cycle in cycles:
-            if len(cycle) < 3 or len(cycle) > max_length:
+        cycles = []
+        for alert in circular_alerts:
+            entities = alert.get("entities", [])
+            if filter_node and filter_node not in entities:
                 continue
-
-            # Check edges exist and compute flow
-            edge_amounts = []
-            valid = True
-            for i in range(len(cycle)):
-                u, v = cycle[i], cycle[(i + 1) % len(cycle)]
-                if self.graph.has_edge(u, v):
-                    edge_amounts.append(self.graph[u][v]["total_amount"])
-                else:
-                    valid = False
-                    break
-
-            if not valid:
-                continue
-
-            total_flow = sum(edge_amounts)
-            if total_flow < min_amount:
-                continue
-
-            if filter_node and filter_node not in cycle:
-                continue
-
-            names = [self.graph.nodes[n].get("name", n) for n in cycle]
-            results.append({
+            names = alert.get("entity_names") or [
+                self.graph.nodes[e].get("name", e) for e in entities if self.graph.has_node(e)
+            ]
+            path = " → ".join(names) if names else alert.get("description", "")
+            if names:
+                path = path + " → " + names[0]
+            cycles.append({
+                "alert_id": alert.get("alert_id"),
                 "entities": names,
-                "cycle_length": len(cycle),
-                "total_flow": round(total_flow, 2),
-                "avg_edge_flow": round(total_flow / len(cycle), 2),
-                "path": " → ".join(names) + " → " + names[0],
+                "cycle_length": len(entities),
+                "total_flow": alert.get("total_flow", 0),
+                "severity": alert.get("severity"),
+                "confidence": alert.get("confidence"),
+                "path": path,
             })
 
         return {
-            "total_cycles_found": len(results),
-            "cycles": sorted(results, key=lambda x: x["total_flow"], reverse=True)[:10],
+            "total_cycles_found": len(cycles),
+            "cycles": sorted(cycles, key=lambda x: x["total_flow"], reverse=True)[:10],
         }
 
     def explain_alert(self, alert_id: str) -> Dict:
-        """Explain a specific fraud alert with full reasoning chain.
-
-        Args:
-            alert_id: The alert ID to explain (e.g., 'ALERT_CIRC_0001').
-        """
-        alert = next((a for a in self.alerts if a["alert_id"] == alert_id), None)
+        """Explain a fraud alert using SHAP (same path as GET /api/alerts/{id}/explain)."""
+        alert = next((a for a in self.alerts if a.get("alert_id") == alert_id), None)
         if not alert:
             return {"error": f"Alert '{alert_id}' not found. Check the alert ID."}
 
-        explanation = {
+        explanation: Dict[str, Any] = {
             "alert": alert,
-            "reasoning_chain": [],
+            "shap": None,
             "entity_profiles": [],
             "related_cases": [],
         }
 
-        # Build reasoning chain
-        pattern = alert.get("pattern_type", "")
-        if "Circular" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Detected a closed loop of transactions between 3+ entities",
-                "2. Transaction amounts within the loop show low variance (similar values)",
-                "3. Funds return to origin, indicating round-tripping or artificial volume creation",
-                "4. Pattern violates normal business payment behavior",
-            ]
-        elif "Layering" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Identified a sequential chain of rapid fund transfers",
-                "2. Each step shows decreasing amounts (skimming/fees at each layer)",
-                "3. Chain involves shell companies or high-risk entity types",
-                "4. Time between transfers is abnormally short",
-            ]
-        elif "Smurfing" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Multiple transactions clustered just below reporting threshold (₹2,00,000)",
-                "2. Transactions show low amount variability (structured pattern)",
-                "3. Common sender distributing to multiple recipients",
-                "4. Pattern designed to avoid mandatory reporting requirements",
-            ]
-        elif "Funnel" in pattern:
-            explanation["reasoning_chain"] = [
-                "1. Multiple diverse sources funneling funds into a single entity",
-                "2. High flow imbalance ratio (much more inflow than outflow or vice versa)",
-                "3. Sources span multiple branches, suggesting coordinated activity",
-                "4. Target entity shows characteristics of shell company",
-            ]
+        if self.ml_bundle is not None:
+            try:
+                shap_result = shap_explain_alert(
+                    self.ml_bundle, self.graph, self.transactions, alert,
+                )
+                if shap_result and not shap_result.get("error"):
+                    explanation["shap"] = shap_result
+            except Exception as e:
+                explanation["shap_error"] = str(e)
 
-        # Entity profiles
         for eid in alert.get("entities", []):
             if self.graph.has_node(eid):
                 ndata = dict(self.graph.nodes[eid])
-                in_deg = self.graph.in_degree(eid)
-                out_deg = self.graph.out_degree(eid)
                 in_str = sum(self.graph[u][eid]["total_amount"] for u in self.graph.predecessors(eid))
                 out_str = sum(self.graph[eid][v]["total_amount"] for v in self.graph.successors(eid))
                 explanation["entity_profiles"].append({
                     "id": eid, "name": ndata.get("name", eid),
                     "type": ndata.get("type", ""), "branch": ndata.get("branch", ""),
-                    "in_degree": in_deg, "out_degree": out_deg,
                     "inflow": round(in_str, 2), "outflow": round(out_str, 2),
                 })
 
-        # Related fraud cases
         entity_ids = set(alert.get("entities", []))
         for case in self.fraud_cases:
             if set(case.get("entities", [])) & entity_ids:
@@ -216,91 +163,40 @@ class LLMCopilot:
         return explanation
 
     def get_profile_delta(self, entity_name: str) -> Dict:
-        """Detect KYC profile mismatches and behavioral anomalies.
-
-        Args:
-            entity_name: Name or partial name of the entity.
-        """
+        """Detect KYC profile mismatches via ProfileMismatchDetector (same as Cases page)."""
         node_id = self._find_node(entity_name)
         if not node_id:
             return {"error": f"Entity '{entity_name}' not found."}
 
         node_data = dict(self.graph.nodes[node_id])
-        entity_type = node_data.get("type", "individual")
-
-        # Analyze transaction behavior
-        sent_txns = self.transactions[self.transactions["sender_id"] == node_id]
-        recv_txns = self.transactions[self.transactions["receiver_id"] == node_id]
-        all_txns = pd.concat([sent_txns, recv_txns])
-
-        if all_txns.empty:
-            return {"entity": {"name": node_data.get("name", node_id)}, "delta": "No transactions found"}
-
-        # Compute behavioral profile
-        avg_amount = all_txns["amount"].mean()
-        max_amount = all_txns["amount"].max()
-        tx_types = all_txns["transaction_type"].value_counts().to_dict()
-        purposes = all_txns["purpose_code"].value_counts().to_dict()
-        branches = set(all_txns["sender_branch"].tolist() + all_txns["receiver_branch"].tolist())
-        fraud_ratio = all_txns["is_fraud"].mean()
-
-        # Compute expected vs actual for entity type
-        deltas = []
-        if entity_type == "individual":
-            if avg_amount > 500000:
-                deltas.append({"field": "avg_transaction_amount", "expected": "< ₹5,00,000",
-                              "actual": f"₹{avg_amount:,.0f}", "severity": "HIGH",
-                              "reason": "Individual averaging very high transaction amounts"})
-            if max_amount > 2000000:
-                deltas.append({"field": "max_transaction_amount", "expected": "< ₹20,00,000",
-                              "actual": f"₹{max_amount:,.0f}", "severity": "MEDIUM",
-                              "reason": "Single transaction unusually large for individual"})
-        elif entity_type == "business":
-            sent_types = sent_txns["transaction_type"].value_counts().to_dict()
-            if "Wire Transfer" in sent_types and sent_types["Wire Transfer"] > 3:
-                deltas.append({"field": "wire_transfer_frequency", "expected": "≤ 3",
-                              "actual": str(sent_types["Wire Transfer"]), "severity": "MEDIUM",
-                              "reason": "High frequency of wire transfers for domestic business"})
-
-        if fraud_ratio > 0.3:
-            deltas.append({"field": "fraud_transaction_ratio", "expected": "< 5%",
-                          "actual": f"{fraud_ratio:.0%}", "severity": "CRITICAL",
-                          "reason": "Significant proportion of transactions flagged as fraudulent"})
-
-        if len(branches) > 5:
-            deltas.append({"field": "branch_diversity", "expected": "≤ 5 unique branches",
-                          "actual": f"{len(branches)} branches", "severity": "MEDIUM",
-                          "reason": "Transactions spread across unusually many branches"})
-
-        # Check for dormant activation
-        if len(all_txns) > 0:
-            all_txns_sorted = all_txns.sort_values("timestamp")
-            time_diffs = pd.to_datetime(all_txns_sorted["timestamp"]).diff().dt.total_seconds() / 3600
-            if len(time_diffs) > 1:
-                max_gap = time_diffs.max()
-                if max_gap > 720:  # 30 days
-                    deltas.append({"field": "dormant_period", "expected": "No gaps > 30 days",
-                                  "actual": f"{max_gap/24:.0f} days gap", "severity": "HIGH",
-                                  "reason": "Account showed dormant behavior then sudden activation"})
+        profile_alerts = ProfileMismatchDetector(
+            self.graph, self.transactions, self.risk_scores,
+        ).detect()
+        match = next((a for a in profile_alerts if node_id in a.get("entities", [])), None)
 
         risk_info = next((r for r in self.risk_scores if r.get("entity_id") == node_id), {})
+        entity_txns = self.transactions[
+            (self.transactions["sender_id"] == node_id)
+            | (self.transactions["receiver_id"] == node_id)
+        ]
 
         return {
-            "entity": {"id": node_id, "name": node_data.get("name", node_id),
-                       "type": entity_type, "branch": node_data.get("branch", "")},
-            "behavioral_profile": {
-                "total_transactions": len(all_txns),
-                "avg_amount": round(avg_amount, 2),
-                "max_amount": round(max_amount, 2),
-                "transaction_types": tx_types,
-                "top_purposes": {k: v for k, v in list(purposes.items())[:5]},
-                "branches_active": len(branches),
-                "fraud_ratio": round(fraud_ratio, 3),
+            "entity": {
+                "id": node_id,
+                "name": node_data.get("name", node_id),
+                "type": node_data.get("type", ""),
+                "branch": node_data.get("branch", ""),
             },
             "risk_score": risk_info.get("risk_score", "N/A"),
             "risk_level": risk_info.get("risk_level", "N/A"),
-            "deltas": deltas,
-            "profile_mismatch_score": round(min(len(deltas) * 0.25, 1.0), 2),
+            "behavioral_profile": {
+                "total_transactions": len(entity_txns),
+                "avg_amount": round(float(entity_txns["amount"].mean()), 2) if len(entity_txns) else 0,
+                "max_amount": round(float(entity_txns["amount"].max()), 2) if len(entity_txns) else 0,
+            },
+            "profile_alert": match,
+            "mismatches": match.get("mismatches", []) if match else [],
+            "profile_mismatch_score": round((match or {}).get("confidence", 0) / 100, 2),
         }
 
     def get_graph_stats(self) -> Dict:
@@ -413,7 +309,7 @@ class LLMCopilot:
         if not final_text and tool_calls:
             final_text = self._summarize_tool_results(tool_calls)
         elif not final_text:
-            final_text = self._generate_local_response(user_message)
+            final_text, _ = self._generate_local_response(user_message)
 
         return {
             "response": final_text,
@@ -487,51 +383,53 @@ class LLMCopilot:
 
     def _fallback_response(self, user_message: str, error: str = "") -> Dict:
         """Generate a local response when Gemini API is unavailable."""
-        response = self._generate_local_response(user_message)
+        response, tool_calls = self._generate_local_response(user_message)
         return {
             "response": response,
-            "tool_calls": [],
+            "tool_calls": tool_calls,
             "source": "local" + (f" (Gemini unavailable: {error})" if error else " (no API key)"),
         }
 
-    def _generate_local_response(self, user_message: str) -> str:
+    def _generate_local_response(self, user_message: str) -> tuple:
         """Generate response using local tool execution and template-based answers."""
         msg = user_message.lower()
+        tool_calls: List[Dict] = []
 
-        # Route to appropriate tool based on intent
+        def run_tool(name: str, args: Dict, result: Any) -> Any:
+            tool_calls.append({"tool": name, "args": args, "result": result})
+            return result
+
         if any(kw in msg for kw in ["trace", "flow", "follow", "track", "where did", "money go"]):
             entity = self._extract_entity_name(user_message)
             if entity:
-                result = self.trace_funds(entity)
-                return self._format_trace_response(entity, result)
-            return "Please specify an entity name to trace fund flows. For example: 'Trace funds for Amit Sharma'"
+                result = run_tool("trace_funds", {"entity_name": entity}, self.trace_funds(entity))
+                return self._format_trace_response(entity, result), tool_calls
+            return "Please specify an entity name to trace fund flows. For example: 'Trace funds for Amit Sharma'", tool_calls
 
         if any(kw in msg for kw in ["cycle", "circular", "round-trip", "round trip", "loop"]):
-            result = self.find_cycles()
-            return self._format_cycles_response(result)
+            result = run_tool("find_cycles", {}, self.find_cycles())
+            return self._format_cycles_response(result), tool_calls
 
         if any(kw in msg for kw in ["alert", "explain", "investigate", "suspicious"]):
             alert_id = self._extract_alert_id(user_message)
             if alert_id:
-                result = self.explain_alert(alert_id)
-                return self._format_explain_response(result)
-            # List top alerts
-            return self._format_alerts_summary()
+                result = run_tool("explain_alert", {"alert_id": alert_id}, self.explain_alert(alert_id))
+                return self._format_explain_response(result), tool_calls
+            return self._format_alerts_summary(), tool_calls
 
         if any(kw in msg for kw in ["profile", "kyc", "mismatch", "anomaly", "behavior"]):
             entity = self._extract_entity_name(user_message)
             if entity:
-                result = self.get_profile_delta(entity)
-                return self._format_profile_response(entity, result)
-            return "Please specify an entity name for profile analysis."
+                result = run_tool("get_profile_delta", {"entity_name": entity}, self.get_profile_delta(entity))
+                return self._format_profile_response(entity, result), tool_calls
+            return "Please specify an entity name for profile analysis.", tool_calls
 
         if any(kw in msg for kw in ["summary", "overview", "status", "dashboard", "how many"]):
-            return self._format_overview()
+            return self._format_overview(), tool_calls
 
         if any(kw in msg for kw in ["risk", "risky", "dangerous", "high risk"]):
-            return self._format_risk_summary()
+            return self._format_risk_summary(), tool_calls
 
-        # Default: provide helpful guidance
         return (
             "I can help you investigate fund flows and fraud patterns. Try asking:\n\n"
             "- **Trace funds** for an entity: 'Trace funds for Amit Sharma'\n"
@@ -539,7 +437,8 @@ class LLMCopilot:
             "- **Explain an alert**: 'Explain alert ALERT_CIRC_0001'\n"
             "- **Profile analysis**: 'Check KYC profile for Apex Trading Co.'\n"
             "- **Risk overview**: 'Show me high-risk entities'\n"
-            "- **Dashboard summary**: 'Give me an overview'\n"
+            "- **Dashboard summary**: 'Give me an overview'\n",
+            tool_calls,
         )
 
     # ── Helper Methods ────────────────────────────────────────
@@ -559,37 +458,7 @@ class LLMCopilot:
                 return node
         return None
 
-    def _trace_direction(self, node_id: str, direction: str, depth: int) -> List[Dict]:
-        """Trace flows in a direction up to given depth."""
-        flows = []
-        visited = {node_id}
-        current_level = [node_id]
-
-        for d in range(depth):
-            next_level = []
-            for n in current_level:
-                if direction == "incoming":
-                    neighbors = list(self.graph.predecessors(n))
-                else:
-                    neighbors = list(self.graph.successors(n))
-
-                for nb in neighbors:
-                    if nb not in visited and len(flows) < 50:
-                        visited.add(nb)
-                        next_level.append(nb)
-                        edge = self.graph[nb][n] if direction == "incoming" else self.graph[n][nb]
-                        flows.append({
-                            "from": self.graph.nodes[nb].get("name", nb) if direction == "incoming" else self.graph.nodes[n].get("name", n),
-                            "to": self.graph.nodes[n].get("name", n) if direction == "incoming" else self.graph.nodes[nb].get("name", nb),
-                            "amount": round(edge["total_amount"], 2),
-                            "transaction_count": edge["transaction_count"],
-                            "depth": d + 1,
-                        })
-            current_level = next_level
-            if not current_level:
-                break
-
-        return flows
+    # ── Response Formatters ───────────────────────────────────
 
     def _extract_entity_name(self, message: str) -> Optional[str]:
         """Extract an entity name from user message."""
@@ -626,21 +495,25 @@ class LLMCopilot:
         if "error" in result:
             return result["error"]
         s = result.get("summary", {})
-        flows = result.get("flows", {})
         lines = [
-            f"## Fund Flow Trace: {entity}\n",
+            f"## Fund Flow Trace: {result.get('entity_name', entity)}\n",
             f"**Net Flow:** ₹{s.get('net_flow', 0):,.0f}",
-            f"**Total Inflow:** ₹{s.get('total_inflow', 0):,.0f} from {s.get('num_sources', 0)} sources",
-            f"**Total Outflow:** ₹{s.get('total_outflow', 0):,.0f} to {s.get('num_destinations', 0)} destinations\n",
+            f"**Total Inflow:** ₹{s.get('total_inflow', 0):,.0f}",
+            f"**Total Outflow:** ₹{s.get('total_outflow', 0):,.0f}",
+            f"**Entities in journey:** {s.get('n_nodes', 0)} | **Links:** {s.get('n_links', 0)}\n",
         ]
-        if flows.get("outgoing"):
-            lines.append("**Top Outgoing Flows:**")
-            for f in sorted(flows["outgoing"], key=lambda x: x["amount"], reverse=True)[:5]:
-                lines.append(f"  → {f['to']}: ₹{f['amount']:,.0f} ({f['transaction_count']} txns)")
-        if flows.get("incoming"):
-            lines.append("\n**Top Incoming Flows:**")
-            for f in sorted(flows["incoming"], key=lambda x: x["amount"], reverse=True)[:5]:
-                lines.append(f"  ← {f['from']}: ₹{f['amount']:,.0f} ({f['transaction_count']} txns)")
+        if s.get("red_flags"):
+            lines.append("**Red flags:**")
+            for flag in s["red_flags"]:
+                lines.append(f"  - {flag}")
+            lines.append("")
+        top_links = result.get("top_links") or []
+        if top_links:
+            lines.append("**Top flows:**")
+            for link in top_links[:5]:
+                src = link.get("source_name") or link.get("source", "")
+                tgt = link.get("target_name") or link.get("target", "")
+                lines.append(f"  → {src} → {tgt}: ₹{link.get('amount', 0):,.0f}")
         return "\n".join(lines)
 
     def _format_cycles_response(self, result: Dict) -> str:
@@ -663,11 +536,20 @@ class LLMCopilot:
             f"**Severity:** {alert.get('severity', '')}",
             f"**Confidence:** {alert.get('confidence', 0)}%",
             f"**Total Flow:** ₹{alert.get('total_flow', 0):,.0f}\n",
-            "**Reasoning Chain:**",
         ]
-        for r in result.get("reasoning_chain", []):
-            lines.append(f"  {r}")
-        lines.append(f"\n**Recommendation:** {alert.get('recommendation', 'N/A')}")
+        shap = result.get("shap")
+        if shap:
+            lines.append("**SHAP explanation (matches Cases workbench):**")
+            for feat in (shap.get("top_features") or shap.get("features") or [])[:6]:
+                name = feat.get("feature") or feat.get("name", "")
+                val = feat.get("shap_value") or feat.get("value", 0)
+                lines.append(f"  - {name}: {val:+.4f}" if isinstance(val, (int, float)) else f"  - {name}: {val}")
+            lines.append(f"  Predicted fraud probability: {shap.get('predicted_probability', shap.get('prediction', 'N/A'))}\n")
+        elif result.get("shap_error"):
+            lines.append(f"**SHAP unavailable:** {result['shap_error']}\n")
+        else:
+            lines.append(f"**Description:** {alert.get('description', 'N/A')}\n")
+        lines.append(f"**Recommendation:** {alert.get('recommendation', 'N/A')}")
         profiles = result.get("entity_profiles", [])
         if profiles:
             lines.append("\n**Entities Involved:**")
@@ -679,7 +561,7 @@ class LLMCopilot:
         if "error" in result:
             return result["error"]
         profile = result.get("behavioral_profile", {})
-        deltas = result.get("deltas", [])
+        mismatches = result.get("mismatches", [])
         lines = [
             f"## Profile Analysis: {entity}\n",
             f"**Type:** {result['entity'].get('type', 'N/A')}",
@@ -688,15 +570,12 @@ class LLMCopilot:
             "**Behavioral Profile:**",
             f"  - Total Transactions: {profile.get('total_transactions', 0)}",
             f"  - Average Amount: ₹{profile.get('avg_amount', 0):,.0f}",
-            f"  - Max Amount: ₹{profile.get('max_amount', 0):,.0f}",
-            f"  - Active Branches: {profile.get('branches_active', 0)}",
-            f"  - Fraud Ratio: {profile.get('fraud_ratio', 0):.1%}\n",
+            f"  - Max Amount: ₹{profile.get('max_amount', 0):,.0f}\n",
         ]
-        if deltas:
-            lines.append("**Profile Deltas Detected:**")
-            for d in deltas:
-                lines.append(f"  - [{d['severity']}] {d['field']}: Expected {d['expected']}, Actual {d['actual']}")
-                lines.append(f"    Reason: {d['reason']}")
+        if mismatches:
+            lines.append("**Profile mismatches (ProfileMismatchDetector):**")
+            for m in mismatches:
+                lines.append(f"  - {m}")
         else:
             lines.append("**No significant profile mismatches detected.**")
         return "\n".join(lines)

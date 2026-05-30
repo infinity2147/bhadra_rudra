@@ -19,3 +19,10 @@ data/real/*/*.parquet
 # Editor
 .idea/
 .vscode/
+venv/
+.venv/
+env/
+# Python virtual environments
+venv/
+.venv/
+env/

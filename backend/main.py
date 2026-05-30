@@ -33,7 +33,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # Make sibling src/ importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from data_generator import TransactionGenerator, save_data
 from graph_engine import FundFlowGraph
 from fraud_detector import FraudDetector
 from advanced_detectors import DormantActivationDetector, ProfileMismatchDetector
@@ -46,7 +45,7 @@ from ml_model import (
     load_edge_scores as ml_load_edge_scores,
     list_variants as ml_list_variants,
 )
-from gnn_model import load_gnn_metrics, load_gnn_edge_scores
+from gnn_model import load_gnn_metrics
 from shap_explainer import explain_alert as shap_explain_alert
 from fund_tracer import trace_journey, trace_for_alert
 from case_manager import CaseStore, VALID_STATUSES
@@ -59,6 +58,7 @@ from aa_kyc_mock import (
     aa_create_consent, aa_pull_data, aa_revoke_consent, aa_list_consents,
     dilisense_screen,
 )
+from run_pipeline import run_full_pipeline
 
 
 app = FastAPI(title="RUDRA API", version="3.0")
@@ -99,55 +99,34 @@ state = {
 
 def run_pipeline():
     """Trigger the full pipeline (used by /api/pipeline/run + on cold start)."""
-    generator = TransactionGenerator(seed=42)
-    df, fraud_cases = generator.generate_all_data()
-    save_data(df, fraud_cases, DATA_DIR, entities=generator.entities)
-
-    ffg = FundFlowGraph()
-    graph = ffg.build_graph(df)
-
-    detector = FraudDetector(graph)
-    results = detector.run_all_detections()
-    dormant_alerts = DormantActivationDetector(graph, df).detect()
-    risk_scores_data = []
-    for node_id, score in results["node_risk_scores"].items():
-        nd = dict(graph.nodes[node_id])
-        risk_scores_data.append({
-            "entity_id": node_id, "name": nd.get("name", ""),
-            "type": nd.get("type", ""), "risk_score": score,
-            "risk_level": ("CRITICAL" if score >= 0.7 else "HIGH" if score >= 0.5
-                            else "MEDIUM" if score >= 0.3 else "LOW"),
-        })
-    profile_alerts = ProfileMismatchDetector(graph, df, risk_scores_data).detect()
-    all_alerts = results["all_alerts"] + dormant_alerts + profile_alerts
-    results["all_alerts"] = all_alerts
-    results["dormant_activation"] = dormant_alerts
-    results["profile_mismatch"] = profile_alerts
-    results["summary"]["total_alerts"] = len(all_alerts)
-    results["summary"]["dormant_count"] = len(dormant_alerts)
-    results["summary"]["profile_count"] = len(profile_alerts)
-    results["summary"]["critical_alerts"] = sum(1 for a in all_alerts if a["severity"] == "CRITICAL")
-    results["summary"]["high_alerts"] = sum(1 for a in all_alerts if a["severity"] == "HIGH")
-    results["summary"]["medium_alerts"] = sum(1 for a in all_alerts if a["severity"] == "MEDIUM")
-    detector.save_results(results, DATA_DIR)
-
-    incidents = cluster_alerts(all_alerts, graph=graph)
-    with open(os.path.join(DATA_DIR, "incidents.json"), "w") as f:
-        json.dump(incidents, f, indent=2, default=str)
-
-    try:
-        ml_train_and_save(graph, df, DATA_DIR, variant="synthetic",
-                           dataset_name="RUDRA Synthetic Generator")
-    except Exception as e:
-        print(f"ML training failed: {e}")
-
-    sar_gen = SARGenerator(graph, df, all_alerts, fraud_cases)
-    sar_dir = os.path.join(DATA_DIR, "sar_reports")
-    os.makedirs(sar_dir, exist_ok=True)
-    for sar in sar_gen.generate_all_sars(min_severity="HIGH"):
-        sar_gen.export_sar_pdf(sar, sar_dir)
-
+    run_full_pipeline(DATA_DIR, seed=42, verbose=False)
     state["loaded"] = False
+
+
+def _apply_detection_results(
+    all_alerts: List[Dict],
+    incidents: List[Dict],
+    risk_scores_data: List[Dict],
+    summary: Dict,
+) -> None:
+    """Sync in-memory state after detection rerun or pipeline."""
+    state["alerts"] = all_alerts
+    state["incidents"] = incidents
+    state["risk_scores"] = risk_scores_data
+    state["summary"] = summary
+    df = state["transactions"]
+    state["copilot"] = LLMCopilot(
+        state["graph"], df, all_alerts, risk_scores_data, state["fraud_cases"],
+        ml_bundle=state["ml_bundle"],
+        edge_ml_scores=state["edge_scores"],
+    )
+    state["sar_gen"] = SARGenerator(
+        state["graph"], df, all_alerts, state["fraud_cases"],
+    )
+    state["cases"].bulk_open_all(all_alerts)
+    a2i = alert_to_incident_map(incidents)
+    for aid, inc_id in a2i.items():
+        state["cases"].set_incident(aid, inc_id)
 
 
 def load_or_generate():
@@ -182,9 +161,6 @@ def load_or_generate():
 
     state["ffg"] = FundFlowGraph()
     state["graph"] = state["ffg"].build_graph(df)
-    state["copilot"] = LLMCopilot(
-        state["graph"], df, state["alerts"], state["risk_scores"], state["fraud_cases"],
-    )
     state["sar_gen"] = SARGenerator(
         state["graph"], df, state["alerts"], state["fraud_cases"],
     )
@@ -201,7 +177,7 @@ def load_or_generate():
     # Config store (same SQLite file)
     state["config"] = ConfigStore(os.path.join(DATA_DIR, "rudra.db"))
 
-    # ML artefacts
+    # ML artefacts (before copilot — SHAP tools need the bundle)
     state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
     state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
     state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
@@ -213,6 +189,12 @@ def load_or_generate():
             state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
         except Exception as e:
             print(f"[backend] inline ML training skipped: {e}")
+
+    state["copilot"] = LLMCopilot(
+        state["graph"], df, state["alerts"], state["risk_scores"], state["fraud_cases"],
+        ml_bundle=state["ml_bundle"],
+        edge_ml_scores=state["edge_scores"],
+    )
 
     state["loaded"] = True
     print(f"[backend] ready: {len(df)} txns, {len(state['alerts'])} alerts, "
@@ -911,6 +893,8 @@ def rerun_detection(role: str = Depends(get_role)):
     results["dormant_activation"] = dormant_alerts
     results["profile_mismatch"] = profile_alerts
     results["summary"]["total_alerts"] = len(all_alerts)
+    results["summary"]["dormant_count"] = len(dormant_alerts)
+    results["summary"]["profile_count"] = len(profile_alerts)
     results["summary"]["critical_alerts"] = sum(1 for a in all_alerts if a["severity"] == "CRITICAL")
     results["summary"]["high_alerts"] = sum(1 for a in all_alerts if a["severity"] == "HIGH")
     results["summary"]["medium_alerts"] = sum(1 for a in all_alerts if a["severity"] == "MEDIUM")
@@ -919,9 +903,10 @@ def rerun_detection(role: str = Depends(get_role)):
     incidents = cluster_alerts(all_alerts, graph=state["graph"])
     with open(os.path.join(DATA_DIR, "incidents.json"), "w") as f:
         json.dump(incidents, f, indent=2, default=str)
-    state["alerts"] = all_alerts
-    state["incidents"] = incidents
-    state["risk_scores"] = risk_scores_data
+
+    with open(os.path.join(DATA_DIR, "detection_summary.json")) as f:
+        summary = json.load(f)
+    _apply_detection_results(all_alerts, incidents, risk_scores_data, summary)
     return {
         "status": "ok",
         "alert_count": len(all_alerts),
@@ -1127,17 +1112,46 @@ def aa_consents():
 
 @app.get("/api/aa/pull/{consent_handle}")
 def aa_pull(consent_handle: str, days_back: int = 30):
-    return aa_pull_data(consent_handle, days_back=days_back)
+    result = aa_pull_data(consent_handle, days_back=days_back)
+    if result.get("error"):
+        raise HTTPException(result.get("status", 400), result["error"])
+    return result
 
 
 @app.post("/api/aa/revoke/{consent_handle}")
 def aa_revoke(consent_handle: str):
-    return aa_revoke_consent(consent_handle)
+    result = aa_revoke_consent(consent_handle)
+    if result.get("error"):
+        raise HTTPException(result.get("status", 404), result["error"])
+    return result
 
 
 @app.get("/api/kyc/screen")
 def kyc_screen(name: str, entity_type: str = "individual"):
+    if not name.strip():
+        raise HTTPException(400, "Name is required")
     return dilisense_screen(name, entity_type)
+
+
+@app.get("/api/integrations/status")
+def integrations_status():
+    """Report which DPI integrations are live vs mocked."""
+    return {
+        "account_aggregator": {
+            "mode": "mock",
+            "provider": "Sahamati AA (mock)",
+            "note": "Consent lifecycle works; data is synthetic.",
+        },
+        "kyc_screening": {
+            "mode": "mock",
+            "provider": "DiliSense (mock)",
+            "note": "Deterministic per-name risk scores; no real watchlists queried.",
+        },
+        "copilot": {
+            "mode": "gemini" if os.environ.get("GEMINI_API_KEY") else "local_fallback",
+            "provider": "Gemini 2.0 Flash" if os.environ.get("GEMINI_API_KEY") else "Keyword router + real tools",
+        },
+    }
 
 
 # ── Pipeline trigger ───────────────────────────────────────────────────────
