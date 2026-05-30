@@ -5,10 +5,10 @@ Pick the dataset variant with `--dataset` (or RUDRA_DATASET env). For each
 variant it loads source transactions from `data/real/<dataset>/`, builds
 the fund-flow graph, runs all 6 detectors, clusters incidents, trains
 XGBoost (+ GraphSAGE + stacked ensemble when PyTorch Geometric is
-available), and emits SAR PDFs.
+available). SAR PDFs are generated on-request by the backend, not here.
 
 Outputs land under `data/<variant>/` (operational artefacts: transactions,
-alerts, risk scores, sar_reports, rudra.db) and `data/ml/<variant>/` (model
+alerts, risk scores, rudra.db) and `data/ml/<variant>/` (model
 weights + metrics). No file is ever written to the top-level `data/` dir.
 
     python src/run_pipeline.py                    # ibm_aml (default)
@@ -32,7 +32,6 @@ from graph_engine import FundFlowGraph
 from fraud_detector import FraudDetector
 from advanced_detectors import DormantActivationDetector, ProfileMismatchDetector
 from incident_clustering import cluster_alerts
-from sar_generator import SARGenerator
 
 
 def _load_source(dataset: str, data_dir: str):
@@ -91,21 +90,20 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
     data_dir = os.path.join(os.path.dirname(__file__), "..", "data")
     variant_dir = variant_data_dir(data_dir, dataset)
     os.makedirs(variant_dir, exist_ok=True)
-    os.makedirs(os.path.join(variant_dir, "sar_reports"), exist_ok=True)
 
     # ── 1. Source data ───────────────────────────────────────────────────────
-    print(f"\n[1/6] Loading source data for {dataset}...")
+    print(f"\n[1/5] Loading source data for {dataset}...")
     df, fraud_cases, entities = _load_source(dataset, data_dir)
     save_data(df, fraud_cases, variant_dir, entities=entities)
 
     # ── 2. Graph ─────────────────────────────────────────────────────────────
-    print("\n[2/6] Building fund-flow graph...")
+    print("\n[2/5] Building fund-flow graph...")
     ffg = FundFlowGraph()
     graph = ffg.build_graph(df)
     print(f"  Nodes: {graph.number_of_nodes()}  Edges: {graph.number_of_edges()}")
 
     # ── 3. Detectors ─────────────────────────────────────────────────────────
-    print("\n[3/6] Running detectors (core + advanced)...")
+    print("\n[3/5] Running detectors (core + advanced)...")
     detector = FraudDetector(graph, transactions=df)
     results = detector.run_all_detections()
 
@@ -164,14 +162,14 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
     detector.save_results(results, variant_dir)
 
     # ── 4. Incidents ─────────────────────────────────────────────────────────
-    print("\n[4/6] Clustering alerts into incidents...")
+    print("\n[4/5] Clustering alerts into incidents...")
     incidents = cluster_alerts(all_alerts, graph=graph)
     with open(os.path.join(variant_dir, "incidents.json"), "w") as f:
         json.dump(incidents, f, indent=2, default=str)
     print(f"  {len(all_alerts)} alerts -> {len(incidents)} incidents")
 
     # ── 5. ML training ───────────────────────────────────────────────────────
-    print(f"\n[5/6] Training XGBoost (variant={dataset})...")
+    print(f"\n[5/5] Training XGBoost (variant={dataset})...")
     try:
         from ml_model import train_and_save
         ml_metrics = train_and_save(
@@ -215,14 +213,8 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
             except Exception as e:
                 print(f"  Ensemble failed: {e}")
 
-    # ── 6. SAR PDFs ──────────────────────────────────────────────────────────
-    print(f"\n[6/6] Generating SAR PDFs (HIGH+ severity)...")
-    sar_gen = SARGenerator(graph, df, all_alerts, fraud_cases)
-    sar_reports = sar_gen.generate_all_sars(min_severity="HIGH")
-    sar_dir = os.path.join(variant_dir, "sar_reports")
-    for sar in sar_reports:
-        sar_gen.export_sar_pdf(sar, sar_dir)
-    print(f"  {len(sar_reports)} PDFs in {sar_dir}/")
+    # SAR PDFs are generated on-request by the backend (GET /api/sar/generate
+    # and the FIU package endpoint), so the pipeline no longer pre-bakes them.
 
     print("\n" + "=" * 70)
     print(f"  Done. Backend will pick this up via RUDRA_DATASET={dataset}.")

@@ -1,7 +1,8 @@
 """
 LLM Copilot — AI-powered investigation assistant.
-Uses Gemini API with tool-calling to answer investigator queries
-over the live fund flow graph.
+Uses the Claude API (Haiku) with tool-calling to answer investigator queries
+over the live fund flow graph. Set ANTHROPIC_API_KEY to enable; without it,
+queries fall back to a deterministic quick-commands router.
 
 Tools: trace_funds(), find_cycles(), explain_alert(), get_profile_delta()
 """
@@ -337,7 +338,7 @@ class LLMCopilot:
             "avg_degree": round(sum(degrees) / len(degrees), 2) if degrees else 0,
         }
 
-    # ── Gemini Integration ────────────────────────────────────
+    # ── Claude Integration ────────────────────────────────────
 
     def query(self, user_message: str) -> Dict:
         """Process a user query.
@@ -456,7 +457,7 @@ class LLMCopilot:
         }
 
     def _get_tool_definitions(self) -> List[Dict]:
-        """Return tool definitions for Gemini function calling."""
+        """Return tool definitions for Claude tool calling."""
         return [
             {
                 "name": "trace_funds",
@@ -520,7 +521,7 @@ class LLMCopilot:
         return {"error": f"Unknown tool: {tool_name}"}
 
     def _fallback_response(self, user_message: str, error: str = "") -> Dict:
-        """Deterministic keyword-routing fallback when Gemini is unavailable.
+        """Deterministic keyword-routing fallback when Claude is unavailable.
 
         We explicitly do NOT call this "AI" — `mode` is `quick_commands` and
         `mode_label` reads "Quick Commands". The UI surfaces this so an
@@ -528,7 +529,7 @@ class LLMCopilot:
         """
         response = self._generate_local_response(user_message)
         if error:
-            reason = f"Gemini unavailable: {error}"
+            reason = f"Claude unavailable: {error}"
         elif not self.api_key:
             reason = "ANTHROPIC_API_KEY not set"
         else:

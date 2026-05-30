@@ -11,7 +11,7 @@ The investigator-facing API. Wires together (per active RUDRA_DATASET):
   - FIU evidence-package generator (zip with STR XML, SAR PDF, etc.)
   - Sahamati AA + DiliSense KYC adapters (real when creds set, mock otherwise)
   - Kafka stream ingestor (real broker when reachable, in-process fallback)
-  - LLM copilot (Gemini when key set, quick-commands otherwise)
+  - LLM copilot (Claude Haiku when ANTHROPIC_API_KEY set, quick-commands otherwise)
 """
 
 import os
@@ -1020,11 +1020,11 @@ def download_fiu_package(alert_id: str, role: str = Depends(get_role)):
     alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
     if not alert:
         raise HTTPException(404, "Alert not found")
+    # SARs are generated on-request (not pre-baked). export_sar_pdf makedirs the
+    # target itself, so no directory needs to pre-exist.
     sar_dir = os.path.join(VARIANT_DIR, "sar_reports")
-    sar_pdf_path = None
-    if os.path.isdir(sar_dir):
-        sar = state["sar_gen"].generate_sar(alert)
-        sar_pdf_path = state["sar_gen"].export_sar_pdf(sar, sar_dir)
+    sar = state["sar_gen"].generate_sar(alert)
+    sar_pdf_path = state["sar_gen"].export_sar_pdf(sar, sar_dir)
     case = state["cases"].get(alert_id)
     zip_bytes = build_fiu_package(
         state["graph"], state["transactions"], alert, sar_pdf_path, case=case,

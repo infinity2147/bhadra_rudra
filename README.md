@@ -22,7 +22,7 @@ Indian PSBs detect fraud the day after it happens. By then, layered funds have a
 
 **Detection latency: ~1 s end-to-end · sub-ms per-transaction ML scoring.**
 
-> ⚠️ **Trained models, graph artefacts, and SAR PDFs are not committed to the repo** (license + size). First-time setup downloads one CSV from Kaggle and runs `python src/run_pipeline.py` once (~10–15 min). After that, `docker compose up` or local dev both light up the full stack.
+> ⚠️ **Trained models and graph artefacts are not committed to the repo** (license + size). First-time setup downloads one CSV from Kaggle and runs `python src/run_pipeline.py` once (~10–15 min). After that, `docker compose up` or local dev both light up the full stack. (SAR PDFs are generated on-request by the backend, never pre-baked.)
 
 ---
 
@@ -55,8 +55,8 @@ Indian PSBs detect fraud the day after it happens. By then, layered funds have a
 | Python | 3.10+ |
 | Node | 20+ |
 | Docker + Docker Compose | 24+ (only if you want the Docker path) |
-| Disk | ~1.5 GB free (raw IBM AML CSV is 475 MB; trained models + SAR PDFs add ~500 MB) |
-| Time | ~15 min on first pipeline run (graph build + detectors + XGB + GraphSAGE + ensemble + SAR generation) |
+| Disk | ~1.5 GB free (raw IBM AML CSV is 475 MB; trained models add ~500 MB) |
+| Time | ~15 min on first pipeline run (graph build + detectors + XGB + GraphSAGE + ensemble) |
 
 ### 1.2 Clone and install Python deps
 
@@ -98,7 +98,8 @@ This is the slow step. On first run it:
 5. Trains XGBoost edge classifier → `data/ml/ibm_aml/model.pkl`.
 6. Trains GraphSAGE GNN → `data/ml/ibm_aml/gnn/`.
 7. Trains the stacked ensemble (3-fold OOF: XGB + SAGE + GAT + LR meta) → `data/ml/ibm_aml/ensemble/`.
-8. Writes ~5,100 SAR PDFs for HIGH+ alerts → `data/ibm_aml/sar_reports/`.
+
+SAR PDFs are **not** written here — the backend generates them on-request (SAR view + FIU package) into `data/ibm_aml/sar_reports/`.
 
 Re-running is idempotent and **skips GNN + ensemble re-training** when their metrics files already exist. Pass `--force-retrain-ml` to redo them.
 
@@ -107,7 +108,7 @@ Re-running is idempotent and **skips GNN + ensemble re-training** when their met
 Every external integration falls back to a schema-accurate mock when its key is absent. Drop any of these in your shell (or in `.env` for Docker) to flip them to real mode:
 
 ```bash
-export GEMINI_API_KEY="..."           # Gemini 2.0 Flash copilot (Google's free tier works)
+export ANTHROPIC_API_KEY="..."        # Claude (Haiku) copilot — tool-calling LLM
 export SAHAMATI_CLIENT_ID="..."       # Sahamati AA sandbox
 export SAHAMATI_CLIENT_SECRET="..."
 export SAHAMATI_FIU_ID="..."
@@ -251,7 +252,7 @@ Plus the foundations PS3 explicitly asks for: graph visualisation of fund flows,
 │  • Hash-chain audit log on SQLite                                    │
 │  • FIU package (STR XML + SAR PDF + subgraph + chain)                │
 │  • Live per-txn scoring + latency benchmark                          │
-│  • Gemini 2.0 Flash copilot with proper function calling             │
+│  • Claude (Haiku) copilot with proper tool calling                   │
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -272,7 +273,7 @@ data/
 │   ├── fraud_cases.json
 │   ├── detection_summary.json
 │   ├── rudra.db                             # SQLite: cases + audit log + config
-│   └── sar_reports/*.pdf
+│   └── sar_reports/*.pdf                    # generated on-request (SAR view / FIU package)
 └── ml/                            # Per-variant model artefacts
     └── ibm_aml/
         ├── model.pkl                        # XGBoost + SHAP background
@@ -301,7 +302,7 @@ Everything except `data/real/*/README.md` is git-ignored. The pipeline rebuilds 
 | `/entities` Entity Explorer | Search entities, view risk score, transaction history |
 | `/model` ML Models | XGBoost + GraphSAGE + ensemble metrics (F1/AUC/precision/recall/CM/feature-importance) |
 | `/live` Live Stream | Per-txn ML scoring with mean+p95 latency tile; start/stop |
-| `/copilot` AI Copilot | Natural-language investigation; Gemini-powered with tool calling (falls back to quick-commands if no key) |
+| `/copilot` AI Copilot | Natural-language investigation; Claude-powered (Haiku) with tool calling (falls back to quick-commands if no key) |
 | `/sar` SAR Reports | Generate the formal SAR text per alert |
 | `/settings` Detector Settings | Threshold sliders per detector (ADMIN only), re-run detection on save |
 | `/aa` Account Aggregator | AA consent issue/pull/revoke + DiliSense KYC screening |
@@ -365,7 +366,7 @@ Every endpoint accepts an optional `X-User-Role` header for RBAC.
 - `GET  /api/integrations/status` — which providers are live vs mocked
 
 ### Copilot
-- `POST /api/copilot/query` — natural-language investigation (Gemini + tool calling)
+- `POST /api/copilot/query` — natural-language investigation (Claude + tool calling)
 
 ---
 
@@ -465,7 +466,7 @@ Every external integration follows the same contract: real when credentials are 
 | DiliSense KYC / sanctions | HTTPS to `api.dilisense.com/v1/checkIndividual` when `DILISENSE_API_KEY` set | `src/aa_kyc_mock.py` |
 | Kafka streaming | `aiokafka` consumer + producer when broker reachable | in-process `asyncio.Queue` |
 | Pathway analytics | 5-min sliding-window per-entity velocity | skipped if `pathway` not installed |
-| Gemini 2.0 Flash copilot | Real API when `GEMINI_API_KEY` set | quick-commands intent router |
+| Claude (Haiku) copilot | Real API when `ANTHROPIC_API_KEY` set | quick-commands intent router |
 
 Production AA HSM signing: real Sahamati requires every request body to be signed by the FIU's ECC-256 private key via HSM. The adapter ships with bearer-token auth (which the sandbox accepts); production deployment plugs the HSM signer into the `_headers()` method.
 

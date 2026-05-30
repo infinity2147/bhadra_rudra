@@ -191,16 +191,6 @@ class SARGenerator:
         }
         return self.generate_sar(synthetic_alert)
 
-    def generate_all_sars(self, min_severity: str = "HIGH") -> List[Dict]:
-        """Generate SARs for all qualifying alerts."""
-        severity_order = {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2, "LOW": 3}
-        min_level = severity_order.get(min_severity, 1)
-        reports = []
-        for alert in self.alerts:
-            if severity_order.get(alert.get("severity", "MEDIUM"), 2) <= min_level:
-                reports.append(self.generate_sar(alert))
-        return reports
-
     def export_sar_pdf(self, sar: Dict, output_dir: str = "data/sar_reports") -> str:
         """Export SAR report as PDF."""
         os.makedirs(output_dir, exist_ok=True)

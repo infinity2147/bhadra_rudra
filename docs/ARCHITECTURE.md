@@ -61,7 +61,7 @@
 │                                                                            │
 │  DPI mocks   └─ aa_kyc_mock.py       (AA consent flow + DiliSense KYC)     │
 │                                                                            │
-│  AI          └─ llm_copilot.py       (Gemini 2.0 Flash + local fallback)   │
+│  AI          └─ llm_copilot.py       (Claude Haiku + local fallback)       │
 └────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -145,8 +145,8 @@ One zip download contains everything a compliance team needs to file a Suspiciou
 
 ### 2.9 LLM copilot
 
-- **Gemini 2.0 Flash** with proper function-calling protocol. Four tools: `trace_funds`, `find_cycles`, `explain_alert`, `get_profile_delta`. Multi-turn (up to 3 rounds) so the model can compose tool calls.
-- **Local fallback** kicks in when no API key is set or Gemini errors — intent-routing regex matches the query to a tool, runs the tool, formats the result. Honest about what it is.
+- **Claude (Haiku)** with proper tool-calling protocol. Four tools: `trace_funds`, `find_cycles`, `explain_alert`, `get_profile_delta`. Multi-turn (up to 3 rounds) so the model can compose tool calls. Enabled by `ANTHROPIC_API_KEY`.
+- **Local fallback** kicks in when no API key is set or Claude errors — intent-routing regex matches the query to a tool, runs the tool, formats the result. Honest about what it is.
 
 ---
 
@@ -154,7 +154,7 @@ One zip download contains everything a compliance team needs to file a Suspiciou
 
 ### Cold start
 1. Backend boots → checks `data/transactions.csv` → if absent, runs `src/run_pipeline.py`.
-2. Pipeline: generate synthetic txns → build graph → run detectors → cluster incidents → train XGBoost + GraphSAGE → generate SAR PDFs → persist.
+2. Pipeline: generate synthetic txns → build graph → run detectors → cluster incidents → train XGBoost + GraphSAGE → persist. (SAR PDFs are generated on-request by the backend, not in the pipeline.)
 3. Backend loads everything into memory; opens a case row in SQLite for every alert that doesn't have one yet.
 
 ### Investigator workflow (real session)
@@ -209,5 +209,5 @@ Measured on a 2024 M1 MacBook Air (Python 3.12, no GPU):
 | **SQLite** over Postgres | Single-file, zero-config, atomic per-statement. Right call for a hackathon POC. Schema is portable to Postgres in production. |
 | **SHA-256 hash chain** | Tamper-evidence is what regulators ask for. Implementing it client-side is one function and one column; outsourcing to a real blockchain would be overkill. |
 | **FastAPI** over Flask | Native async, automatic OpenAPI docs at `/docs`, dependency injection (used for RBAC). |
-| **Gemini 2.0 Flash** over OpenAI | Free tier, fast, supports function calling. Easy to swap to OpenAI / Anthropic if the bank prefers. |
+| **Claude Haiku** over OpenAI | Fast, low-cost, strong tool-calling. The copilot is one client class (`llm_copilot.py`) — easy to swap providers if the bank prefers. |
 | **Tailwind 4** over component library | Faster iteration in a demo; no bundle bloat from MUI / shadcn. |
