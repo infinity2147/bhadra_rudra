@@ -25,7 +25,7 @@ class LLMCopilot:
         self.alerts = alerts
         self.risk_scores = risk_scores
         self.fraud_cases = fraud_cases
-        self.api_key = api_key or os.environ.get("GEMINI_API_KEY", "")
+        self.api_key = api_key or os.environ.get("ANTHROPIC_API_KEY", "")
         # ML bundle (XGB + feature columns + SHAP background sample). When
         # present, explain_alert uses real SHAP attributions instead of the
         # legacy hardcoded reasoning_chain templates.
@@ -343,10 +343,10 @@ class LLMCopilot:
         """Process a user query.
 
         Two modes:
-          - **gemini**: real LLM with multi-round tool calling (requires GEMINI_API_KEY).
+          - **claude**: real LLM with multi-round tool calling (requires ANTHROPIC_API_KEY).
           - **quick_commands**: deterministic keyword router with the same tools
             but no natural-language understanding. Used when the API key is
-            absent or Gemini rejects the call.
+            absent or Claude rejects the call.
 
         Every response carries `mode_label` so the UI can show the operator
         which path served their query — calling rule-based routing "AI" would
@@ -361,23 +361,20 @@ class LLMCopilot:
             return self._fallback_response(user_message)
 
         try:
-            return self._call_gemini(user_message, tools)
+            return self._call_claude(user_message, tools)
         except Exception as e:
             return self._fallback_response(user_message, str(e))
 
-    def _call_gemini(self, user_message: str, tools: List[Dict]) -> Dict:
-        """Call Gemini API with tool-calling, sending tool results back for synthesis.
+    def _call_claude(self, user_message: str, tools: List[Dict]) -> Dict:
+        """Call Claude API with tool-calling, sending tool results back for synthesis.
 
-        The protocol is: send user message → Gemini may emit function_call(s) →
-        we execute them locally → send the function responses back → Gemini
-        produces a final natural-language answer. Up to 3 rounds of tool calls
-        to support multi-step investigations like "trace funds for X, then
-        explain the alerts you find".
+        Protocol: send user message → Claude may emit tool_use blocks →
+        execute them locally → send tool_result blocks back → Claude
+        produces a final natural-language answer. Up to 3 rounds.
         """
-        import google.generativeai as genai
-        from google.generativeai.types import FunctionDeclaration, Tool
+        import anthropic
 
-        genai.configure(api_key=self.api_key)
+        client = anthropic.Anthropic(api_key=self.api_key)
 
         system_prompt = (
             "You are RUDRA, an AI fraud investigation copilot for banking. "
@@ -388,20 +385,16 @@ class LLMCopilot:
             "guidelines where appropriate. Be concise — investigators are busy."
         )
 
-        # Wrap our tools into Gemini's typed format
-        tool_decls = [
-            FunctionDeclaration(name=t["name"], description=t["description"],
-                                  parameters=t["parameters"])
+        # Anthropic uses input_schema instead of parameters
+        anthropic_tools = [
+            {
+                "name": t["name"],
+                "description": t["description"],
+                "input_schema": t["parameters"],
+            }
             for t in tools
         ]
-        gemini_tools = [Tool(function_declarations=tool_decls)]
 
-        model = genai.GenerativeModel(
-            model_name="gemini-2.0-flash",
-            system_instruction=system_prompt,
-            tools=gemini_tools,
-        )
-        chat = model.start_chat(history=[])
         context = (
             f"Graph snapshot: {self.graph.number_of_nodes()} entities, "
             f"{self.graph.number_of_edges()} connections, "
@@ -409,41 +402,46 @@ class LLMCopilot:
             f"Investigator query: {user_message}"
         )
 
-        response = chat.send_message(context)
+        messages = [{"role": "user", "content": context}]
         tool_calls: List[Dict] = []
-        max_rounds = 3
-        for _ in range(max_rounds):
-            if not (response.candidates and response.candidates[0].content.parts):
+        response = None
+
+        for _ in range(3):
+            response = client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=system_prompt,
+                messages=messages,
+                tools=anthropic_tools,
+            )
+
+            tool_use_blocks = [b for b in response.content if b.type == "tool_use"]
+            if not tool_use_blocks:
                 break
-            calls_this_turn = []
-            for part in response.candidates[0].content.parts:
-                fc = getattr(part, "function_call", None)
-                if fc and fc.name:
-                    calls_this_turn.append(fc)
-            if not calls_this_turn:
-                break
-            # Execute every tool call requested this turn
-            function_responses = []
-            for fc in calls_this_turn:
-                args = dict(fc.args) if fc.args else {}
-                result = self._execute_tool(fc.name, args)
-                tool_calls.append({"tool": fc.name, "args": args, "result": result})
+
+            # Execute every tool requested this turn
+            tool_results = []
+            for block in tool_use_blocks:
+                args = dict(block.input) if block.input else {}
+                result = self._execute_tool(block.name, args)
+                tool_calls.append({"tool": block.name, "args": args, "result": result})
                 self.tool_results_log.append(result)
-                function_responses.append({
-                    "function_response": {
-                        "name": fc.name,
-                        "response": result,
-                    },
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": json.dumps(result, default=str),
                 })
-            # Send tool results back for synthesis
-            response = chat.send_message(function_responses)
+
+            # Append assistant turn + tool results for next round
+            messages.append({"role": "assistant", "content": response.content})
+            messages.append({"role": "user", "content": tool_results})
 
         final_text = ""
-        try:
-            final_text = response.text or ""
-        except Exception:
-            # When the response is purely a function call (no text part)
-            final_text = ""
+        if response:
+            for block in response.content:
+                if hasattr(block, "text") and block.text:
+                    final_text += block.text
+
         if not final_text and tool_calls:
             final_text = self._summarize_tool_results(tool_calls)
         elif not final_text:
@@ -452,9 +450,9 @@ class LLMCopilot:
         return {
             "response": final_text,
             "tool_calls": tool_calls,
-            "source": "gemini" if tool_calls else "gemini_textonly",
+            "source": "claude" if tool_calls else "claude_textonly",
             "mode": "ai_copilot",
-            "mode_label": "AI Copilot (Gemini)",
+            "mode_label": "AI Copilot (Claude)",
         }
 
     def _get_tool_definitions(self) -> List[Dict]:
@@ -532,7 +530,7 @@ class LLMCopilot:
         if error:
             reason = f"Gemini unavailable: {error}"
         elif not self.api_key:
-            reason = "GEMINI_API_KEY not set"
+            reason = "ANTHROPIC_API_KEY not set"
         else:
             reason = "fallback"
         return {

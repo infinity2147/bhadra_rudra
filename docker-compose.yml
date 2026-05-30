@@ -28,7 +28,7 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
-      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
       # Active dataset — controls which data dir + ML variant the backend binds to
       - RUDRA_DATASET=${RUDRA_DATASET:-ibm_aml}
       # Streaming — kafka by default inside the compose network

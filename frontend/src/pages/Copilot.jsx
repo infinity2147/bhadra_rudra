@@ -14,7 +14,7 @@ export default function Copilot() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   // Track the most recent response's mode so the header can switch between
-  // "AI Copilot (Gemini)" and "Quick Commands (no LLM)" honestly — we don't
+  // "AI Copilot (Claude)" and "Quick Commands (no LLM)" honestly — we don't
   // claim AI when the backend is doing keyword routing.
   const [mode, setMode] = useState(null);
   const [modeLabel, setModeLabel] = useState(null);
@@ -76,7 +76,7 @@ export default function Copilot() {
         </div>
         <p className="text-sm text-gray-500 mt-1">
           {mode === 'quick_commands'
-            ? 'Keyword-routed quick commands — set GEMINI_API_KEY to enable LLM-driven natural-language understanding.'
+            ? 'Keyword-routed quick commands — set ANTHROPIC_API_KEY to enable LLM-driven natural-language understanding.'
             : 'Ask questions about fraud patterns, entities, and alerts in natural language.'}
         </p>
       </div>
