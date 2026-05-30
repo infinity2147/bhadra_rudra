@@ -38,6 +38,16 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "dormant_z_score_threshold": 2.5,
     # ML
     "ml_alert_threshold": 0.6,
+    # Fund tracer annotation thresholds (kept in sync with detectors)
+    "tracer_structuring_threshold": 200_000,
+    "tracer_high_value_threshold": 1_000_000,
+    "tracer_night_hour_start": 22,
+    "tracer_night_hour_end": 6,
+    "tracer_baseline_z_threshold": 3.0,
+    "tracer_burst_window_minutes": 60,
+    "tracer_burst_min_cluster": 3,
+    "tracer_transit_window_hours": 1.0,
+    "tracer_transit_ratio_threshold": 0.5,
 }
 
 

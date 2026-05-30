@@ -25,22 +25,33 @@ export default function ModelMetrics() {
   const [loading, setLoading] = useState(true);
   const [retraining, setRetraining] = useState(false);
   const [error, setError] = useState(null);
+  const [variants, setVariants] = useState([]);
+  const [variant, setVariant] = useState('synthetic');
 
-  function load() {
+  function load(v = variant) {
     setLoading(true);
-    fetchAPI('/api/ml/metrics')
+    fetchAPI(`/api/ml/metrics?variant=${encodeURIComponent(v)}`)
       .then(setData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
   }
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    fetchAPI('/api/ml/variants')
+      .then((d) => setVariants(d.variants || []))
+      .catch(() => setVariants([]));
+  }, []);
+
+  useEffect(() => { load(variant); }, [variant]);
 
   async function retrain() {
     setRetraining(true);
     try {
       const out = await postAPI('/api/ml/retrain', {});
       setData({ trained: true, ...(out.metrics || {}) });
+      // Refresh the variants list in case a new variant was created
+      const vs = await fetchAPI('/api/ml/variants');
+      setVariants(vs.variants || []);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -67,18 +78,75 @@ export default function ModelMetrics() {
 
   return (
     <div className="p-6 space-y-6 max-w-[1400px] mx-auto">
-      <div className="flex items-start justify-between">
-        <div>
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div className="min-w-0">
           <h1 className="text-2xl font-bold text-gray-900">ML Model — Edge-level Fraud Classifier</h1>
           <p className="text-sm text-gray-500 mt-1">
             {data.model_kind === 'xgboost' ? 'XGBoost' : 'Gradient Boosting'} trained on {data.n_features} engineered features
             from the fund-flow graph. Evaluated on a stratified 20% held-out split.
           </p>
+          {data.dataset_name && (
+            <p className="text-xs text-gray-400 mt-0.5">Dataset: {data.dataset_name}</p>
+          )}
         </div>
-        <button onClick={retrain} disabled={retraining} className="px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50">
-          {retraining ? 'Retraining...' : 'Retrain'}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {variants.length > 0 && (
+            <label className="text-xs text-gray-600 flex items-center gap-2">
+              Variant
+              <select
+                value={variant}
+                onChange={(e) => setVariant(e.target.value)}
+                className="px-2 py-1.5 border border-gray-300 rounded-md text-sm bg-white"
+              >
+                {variants.map((v) => (
+                  <option key={v.variant} value={v.variant}>
+                    {v.variant} — F1 {v.f1?.toFixed(3) ?? '—'}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+          <button onClick={retrain} disabled={retraining} className="px-3 py-2 text-sm border border-gray-300 rounded-md hover:bg-gray-50">
+            {retraining ? 'Retraining...' : 'Retrain'}
+          </button>
+        </div>
       </div>
+
+      {/* Variant comparison */}
+      {variants.length > 1 && (
+        <div className="bg-white border border-gray-200 rounded-xl p-5">
+          <h2 className="text-base font-semibold text-gray-900">Variant Comparison</h2>
+          <p className="text-xs text-gray-500 mt-0.5">F1 / AUC across every trained variant</p>
+          <table className="mt-3 w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 border-b border-gray-200">
+                <th className="text-left pb-2 font-medium">Variant</th>
+                <th className="text-left pb-2 font-medium">Dataset</th>
+                <th className="text-right pb-2 font-medium">F1</th>
+                <th className="text-right pb-2 font-medium">AUC</th>
+                <th className="text-right pb-2 font-medium">Edges</th>
+                <th className="text-right pb-2 font-medium">Fraud rate</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {variants.map((v) => (
+                <tr
+                  key={v.variant}
+                  onClick={() => setVariant(v.variant)}
+                  className={`cursor-pointer hover:bg-gray-50 ${variant === v.variant ? 'bg-indigo-50' : ''}`}
+                >
+                  <td className="py-2 font-medium text-gray-800">{v.variant}</td>
+                  <td className="py-2 text-gray-600 text-xs">{v.dataset_name || '—'}</td>
+                  <td className="py-2 text-right tabular-nums">{v.f1?.toFixed(3) ?? '—'}</td>
+                  <td className="py-2 text-right tabular-nums">{v.auc?.toFixed(3) ?? '—'}</td>
+                  <td className="py-2 text-right tabular-nums">{v.n_edges?.toLocaleString('en-IN') ?? '—'}</td>
+                  <td className="py-2 text-right tabular-nums">{((v.fraud_rate ?? 0) * 100).toFixed(1)}%</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
         <MetricCard label="F1 Score" value={data.f1.toFixed(3)} hint="harmonic mean of P/R" tone="indigo" />

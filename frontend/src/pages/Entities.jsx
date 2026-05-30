@@ -1,14 +1,28 @@
 import { useState, useEffect, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Cell } from 'recharts';
 import { fetchAPI } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
 
-const RISK_COLORS = {
-  CRITICAL: '#dc2626',
-  HIGH: '#ea580c',
-  MEDIUM: '#ca8a04',
-  LOW: '#16a34a',
+const FLAG_TONES = {
+  shell_company:           'bg-red-100 text-red-800 ring-red-200',
+  part_of_cycle:           'bg-red-100 text-red-800 ring-red-200',
+  transit_node:            'bg-red-100 text-red-800 ring-red-200',
+  outflow_zscore_anomaly:  'bg-red-100 text-red-800 ring-red-200',
+  high_risk:               'bg-amber-100 text-amber-800 ring-amber-200',
+  velocity_burst:          'bg-amber-100 text-amber-800 ring-amber-200',
+  dormant_then_active:     'bg-amber-100 text-amber-800 ring-amber-200',
+  multi_branch_activity:   'bg-indigo-100 text-indigo-800 ring-indigo-200',
 };
+
+function FlagPill({ flag }) {
+  const tone = FLAG_TONES[flag] || 'bg-gray-100 text-gray-700 ring-gray-200';
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-[11px] font-medium ring-1 ${tone}`}>
+      {flag.replace(/_/g, ' ')}
+    </span>
+  );
+}
 
 function formatCurrency(value) {
   if (value == null) return '--';
@@ -31,9 +45,11 @@ function RiskScoreBar({ score }) {
 }
 
 export default function Entities() {
+  const navigate = useNavigate();
   const [entities, setEntities] = useState([]);
   const [search, setSearch] = useState('');
   const [riskLevel, setRiskLevel] = useState('ALL');
+  const [typeFilter, setTypeFilter] = useState('ALL');
   const [selected, setSelected] = useState(null);
   const [detail, setDetail] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -84,12 +100,12 @@ export default function Entities() {
         <p className="text-sm text-gray-500 mt-1">Search and analyze entity risk profiles and transaction histories</p>
       </div>
 
-      <div className="px-6 pt-4 flex gap-3">
+      <div className="px-6 pt-4 flex gap-3 flex-wrap">
         <input
           type="text"
           placeholder="Search entities by name..."
           onChange={handleSearchChange}
-          className="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
+          className="flex-1 min-w-[200px] px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent"
         />
         <select
           value={riskLevel}
@@ -101,6 +117,16 @@ export default function Entities() {
           <option value="HIGH">High</option>
           <option value="MEDIUM">Medium</option>
           <option value="LOW">Low</option>
+        </select>
+        <select
+          value={typeFilter}
+          onChange={e => setTypeFilter(e.target.value)}
+          className="px-4 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+        >
+          <option value="ALL">All Types</option>
+          <option value="individual">Individual</option>
+          <option value="business">Business</option>
+          <option value="shell_company">Shell Company</option>
         </select>
       </div>
 
@@ -123,7 +149,9 @@ export default function Entities() {
                   </tr>
                 </thead>
                 <tbody>
-                  {entities.map(entity => (
+                  {entities
+                    .filter((entity) => typeFilter === 'ALL' || entity.type === typeFilter)
+                    .map(entity => (
                     <tr
                       key={entity.entity_id ?? entity.id}
                       onClick={() => setSelected(entity.entity_id ?? entity.id)}
@@ -134,7 +162,7 @@ export default function Entities() {
                       }`}
                     >
                       <td className="px-4 py-3 font-medium">{entity.name}</td>
-                      <td className="px-4 py-3 text-gray-600 capitalize">{entity.type}</td>
+                      <td className="px-4 py-3 text-gray-600 capitalize">{(entity.type || '').replace('_', ' ')}</td>
                       <td className="px-4 py-3"><RiskScoreBar score={entity.risk_score ?? 0} /></td>
                       <td className="px-4 py-3"><SeverityBadge severity={entity.risk_level} /></td>
                     </tr>
@@ -156,12 +184,13 @@ export default function Entities() {
               <div className="flex-1 overflow-y-auto p-5 space-y-5">
                 {/* Header */}
                 <div className="flex items-start justify-between">
-                  <div>
-                    <h2 className="text-lg font-bold text-gray-900">{detail.name}</h2>
-                    <p className="text-sm text-gray-500 capitalize">{detail.type}{detail.branch ? ` — ${detail.branch}` : ''}</p>
+                  <div className="min-w-0">
+                    <p className="text-[10px] font-mono text-gray-400">{detail.id}</p>
+                    <h2 className="text-lg font-bold text-gray-900 truncate">{detail.name}</h2>
+                    <p className="text-sm text-gray-500 capitalize">{(detail.type || '').replace('_', ' ')}{detail.branch ? ` — ${detail.branch}` : ''}</p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <SeverityBadge severity={detail.risk_level} />
+                  <div className="flex items-center gap-2 shrink-0">
+                    <SeverityBadge severity={detail.riskLevel || detail.risk_level} />
                     <button
                       onClick={() => setSelected(null)}
                       className="p-1 rounded hover:bg-gray-100 text-gray-400 hover:text-gray-600"
@@ -169,6 +198,29 @@ export default function Entities() {
                       <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" /></svg>
                     </button>
                   </div>
+                </div>
+
+                {/* Flags */}
+                {detail.flags && detail.flags.length > 0 && (
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    {detail.flags.map((f) => <FlagPill key={f} flag={f} />)}
+                  </div>
+                )}
+
+                {/* Actions */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => navigate(`/journey?entity=${detail.id}`)}
+                    className="flex-1 px-3 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition-colors"
+                  >
+                    Trace fund journey
+                  </button>
+                  <button
+                    onClick={() => navigate(`/graph`)}
+                    className="px-3 py-2 text-sm bg-white border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 transition-colors"
+                  >
+                    View in graph
+                  </button>
                 </div>
 
                 {/* Metric Cards */}

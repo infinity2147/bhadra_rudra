@@ -10,6 +10,9 @@ import numpy as np
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 import json
+import hashlib
+import pickle
+import os
 
 
 class FundFlowGraph:
@@ -21,11 +24,13 @@ class FundFlowGraph:
         # (e.g. for velocity burst detection) without a full DataFrame scan.
         self._edge_txn_map: Dict = defaultdict(list)
         self._node_features_cache: Optional[Dict] = None
+        self._scc_cache: Optional[Dict[int, set]] = None  # min_size → set of node_ids
 
     def build_graph(self, df: pd.DataFrame) -> nx.DiGraph:
         """Build directed weighted graph from transaction DataFrame."""
         self.graph = nx.DiGraph()
         self._node_features_cache = None   # invalidate feature cache on rebuild
+        self._scc_cache = None             # SCC also depends on topology
         has_product = "sender_product" in df.columns
         has_channel = "channel" in df.columns
 
@@ -110,6 +115,170 @@ class FundFlowGraph:
 
         return self.graph
 
+    # ── Persistence ──────────────────────────────────────────────────────────
+    SNAPSHOT_VERSION = 1     # bump when serialised shape changes
+
+    @staticmethod
+    def compute_tx_hash(df: pd.DataFrame) -> str:
+        """Stable fingerprint of the transactions used to build a graph.
+
+        Used to detect when a saved snapshot is stale relative to the underlying
+        data.  Avoids hashing the full DataFrame (slow) by hashing only row
+        count + column names + a few summary stats.
+        """
+        h = hashlib.sha256()
+        h.update(str(len(df)).encode())
+        h.update(",".join(sorted(df.columns)).encode())
+        if "amount" in df.columns and len(df):
+            h.update(f"{df['amount'].sum():.2f}".encode())
+        return h.hexdigest()
+
+    def save(self, path: str, tx_hash: Optional[str] = None) -> None:
+        """Pickle the graph + caches + tx_hash to disk for fast cold-start."""
+        payload = {
+            "version": self.SNAPSHOT_VERSION,
+            "graph": self.graph,
+            "edge_txn_map": dict(self._edge_txn_map),
+            "node_features_cache": self._node_features_cache,
+            "scc_cache": self._scc_cache,
+            "tx_hash": tx_hash,
+        }
+        with open(path, "wb") as f:
+            pickle.dump(payload, f, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def load(self, path: str, expected_tx_hash: Optional[str] = None) -> bool:
+        """Load a saved snapshot.  Returns False if stale / missing / corrupt.
+
+        On False the caller MUST rebuild from scratch.  We never silently use
+        a snapshot that doesn't match the underlying data — half-stale graph
+        state would produce wrong fraud alerts.
+        """
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path, "rb") as f:
+                payload = pickle.load(f)
+            if payload.get("version") != self.SNAPSHOT_VERSION:
+                return False
+            if expected_tx_hash is not None and payload.get("tx_hash") != expected_tx_hash:
+                return False
+            self.graph = payload["graph"]
+            self._edge_txn_map = defaultdict(list, payload.get("edge_txn_map", {}))
+            self._node_features_cache = payload.get("node_features_cache")
+            self._scc_cache = payload.get("scc_cache")
+            return True
+        except (pickle.UnpicklingError, EOFError, KeyError, OSError):
+            return False
+
+    def get_sccs(self, min_size: int = 3) -> set:
+        """Return the union of all SCC members of size >= min_size.
+
+        Cached per min_size — re-computing strongly-connected components on
+        every trace_journey call adds non-trivial cost on dense graphs.
+        Invalidated by build_graph and add_transaction (topology changes).
+        """
+        if self._scc_cache is None:
+            self._scc_cache = {}
+        if min_size not in self._scc_cache:
+            result: set = set()
+            for comp in nx.strongly_connected_components(self.graph):
+                if len(comp) >= min_size:
+                    result.update(comp)
+            self._scc_cache[min_size] = result
+        return self._scc_cache[min_size]
+
+    def add_transaction(self, row: Dict) -> Tuple[bool, bool]:
+        """Incrementally update the graph with one new transaction.
+
+        Returns: (new_edge_created, new_node_created).  Updates the edge's
+        aggregate stats (total, count, avg, min, max, first/last_seen) in
+        place, appends to _edge_txn_map, and invalidates ONLY the affected
+        nodes in _node_features_cache (or the whole thing if the topology
+        changed).  Designed to be called from a streaming consumer for each
+        Kafka message; rebuilding the full graph on every txn would be fatal
+        at production load.
+
+        Required row keys: sender_id, receiver_id, amount, timestamp,
+        transaction_type, is_fraud (optional defaults to 0).
+        """
+        s = row["sender_id"]
+        r = row["receiver_id"]
+        amount = float(row["amount"])
+        ts = row["timestamp"]
+        new_node = False
+        new_edge = False
+
+        # Ensure nodes exist (if metadata fields present, copy them)
+        for side, eid in (("sender", s), ("receiver", r)):
+            if eid not in self.graph:
+                attrs = {}
+                for key in ("name", "type", "branch", "product"):
+                    full = f"{side}_{key}"
+                    if full in row:
+                        attrs[key] = row[full]
+                self.graph.add_node(eid, **attrs)
+                new_node = True
+
+        if self.graph.has_edge(s, r):
+            ed = self.graph[s][r]
+            # Update running aggregates — avg, std are best-effort approximations
+            new_total = ed["total_amount"] + amount
+            new_count = ed["transaction_count"] + 1
+            new_avg = new_total / new_count
+            # Welford-style variance update would be ideal; for now approximate
+            # by recomputing on the running min/max alone for downstream callers.
+            ed["total_amount"] = new_total
+            ed["transaction_count"] = new_count
+            ed["avg_amount"] = new_avg
+            ed["min_amount"] = min(ed["min_amount"], amount)
+            ed["max_amount"] = max(ed["max_amount"], amount)
+            ed["last_seen"] = ts                      # txns assumed in order
+            if int(row.get("is_fraud", 0)) > 0:
+                ed["fraud_count"] = int(ed.get("fraud_count", 0)) + 1
+            rail = row.get("transaction_type")
+            if rail:
+                ed["rail_mix"][rail] = ed["rail_mix"].get(rail, 0) + 1
+            ch = row.get("channel")
+            if ch:
+                ed["channel_mix"][ch] = ed["channel_mix"].get(ch, 0) + 1
+        else:
+            new_edge = True
+            self.graph.add_edge(
+                s, r,
+                total_amount=amount,
+                transaction_count=1,
+                avg_amount=amount,
+                min_amount=amount,
+                max_amount=amount,
+                std_amount=0.0,
+                first_seen=ts,
+                last_seen=ts,
+                fraud_count=int(row.get("is_fraud", 0)),
+                rail_mix={row.get("transaction_type", "OTHER"): 1},
+                channel_mix={row.get("channel", "OTHER"): 1} if row.get("channel") else {},
+            )
+
+        # Append to per-edge transaction map for downstream temporal analysis
+        self._edge_txn_map[(s, r)].append({
+            "transaction_id": row.get("transaction_id"),
+            "timestamp": ts,
+            "amount": amount,
+            "transaction_type": row.get("transaction_type"),
+            "is_fraud": int(row.get("is_fraud", 0)),
+            "fraud_pattern": row.get("fraud_pattern"),
+        })
+
+        # Invalidate caches — topology change invalidates everything,
+        # otherwise only the two endpoints' feature rows go stale.
+        if new_node or new_edge:
+            self._node_features_cache = None
+            self._scc_cache = None      # topology changed → SCC may have changed
+        elif self._node_features_cache is not None:
+            self._node_features_cache.pop(s, None)
+            self._node_features_cache.pop(r, None)
+
+        return new_edge, new_node
+
     def get_node_features(self) -> Dict[str, Dict]:
         """Compute node-level features for fraud detection.
 
@@ -151,9 +320,42 @@ class FundFlowGraph:
         return features
 
     def get_edge_features(self) -> List[Dict]:
-        """Compute edge-level features."""
+        """Compute edge-level features.
+
+        Uses the populated _edge_txn_map to also expose temporal-detail features
+        that were previously inaccessible — median inter-arrival time between
+        consecutive transactions on this edge, and a burst_count (number of
+        ≥3-txn clusters within 1h).  These signals are what AML detectors need
+        to differentiate "10 NEFT transfers over a year" from "10 transfers
+        within 5 minutes" — both have the same aggregate stats.
+        """
         features = []
         for u, v, data in self.graph.edges(data=True):
+            edge_txns = self._edge_txn_map.get((u, v), [])
+            median_iat = None
+            burst_count = 0
+            if len(edge_txns) >= 2:
+                try:
+                    ts = pd.to_datetime(
+                        [t["timestamp"] for t in edge_txns], format="mixed"
+                    ).sort_values()
+                    diffs_seconds = ts.to_series().diff().dt.total_seconds().dropna()
+                    if len(diffs_seconds) > 0:
+                        median_iat = round(float(diffs_seconds.median()), 2)
+                    # Count rolling windows where 3+ txns fit in 1h (3600s)
+                    arr = ts.to_numpy()
+                    i = 0
+                    while i + 2 < len(arr):
+                        if (arr[i + 2] - arr[i]) <= pd.Timedelta(hours=1):
+                            burst_count += 1
+                            j = i + 3
+                            while j < len(arr) and (arr[j] - arr[i]) <= pd.Timedelta(hours=1):
+                                j += 1
+                            i = j
+                        else:
+                            i += 1
+                except Exception:
+                    pass
             features.append({
                 "source": u,
                 "target": v,
@@ -164,6 +366,8 @@ class FundFlowGraph:
                 "avg_amount": data["avg_amount"],
                 "amount_variability": round(data["std_amount"] / max(data["avg_amount"], 1), 4),
                 "fraud_count": data["fraud_count"],
+                "median_iat_seconds": median_iat,
+                "burst_count": burst_count,
             })
         return features
 

@@ -214,6 +214,20 @@ def load_or_generate():
         except Exception as e:
             print(f"[backend] inline ML training skipped: {e}")
 
+    # Pre-build tracer auxiliary structures so per-entity flag lookups are O(1)
+    # instead of recomputing from scratch on every /api/entities/{id} request.
+    try:
+        from fund_tracer import (
+            _build_txn_index, _build_baseline_stats,
+            _build_burst_counts, _build_transit_ratios,
+        )
+        state["_txn_index"] = _build_txn_index(df)
+        state["_baseline_stats"] = _build_baseline_stats(df)
+        state["_burst_counts"] = _build_burst_counts(df)
+        state["_transit_ratios"] = _build_transit_ratios(df)
+    except Exception as e:
+        print(f"[backend] tracer cache build skipped: {e}")
+
     state["loaded"] = True
     print(f"[backend] ready: {len(df)} txns, {len(state['alerts'])} alerts, "
           f"{len(state['incidents'])} incidents, "
@@ -351,6 +365,12 @@ def get_dashboard(until: Optional[str] = None):
         "applied_until": until,
     }
 
+    # New AML signals — pre-computed at startup, just look up the counts
+    burst_counts = state.get("_burst_counts") or {}
+    transit_ratios = state.get("_transit_ratios") or {}
+    velocity_burst_entities = sum(1 for v in burst_counts.values() if v >= 1)
+    transit_node_entities = sum(1 for v in transit_ratios.values() if v >= 0.5)
+
     return {
         "kpis": {
             "total_transactions": len(df),
@@ -364,6 +384,8 @@ def get_dashboard(until: Optional[str] = None):
             "incidents": len(state["incidents"] or []),
             "model_f1": ml.get("f1"),
             "model_auc": ml.get("auc"),
+            "velocity_burst_entities": velocity_burst_entities,
+            "transit_node_entities": transit_node_entities,
         },
         "daily_data": daily.to_dict("records"),
         "pattern_breakdown": pattern_breakdown,
@@ -632,6 +654,24 @@ def get_entity(entity_id: str):
     )
     in_str = sum(graph[u][entity_id]["total_amount"] for u in graph.predecessors(entity_id))
     out_str = sum(graph[entity_id][v]["total_amount"] for v in graph.successors(entity_id))
+
+    # Compute the tracer flags so the UI can show them.
+    from fund_tracer import (
+        _annotate_node_flags, _build_txn_index,
+        _build_baseline_stats, _build_burst_counts, _build_transit_ratios,
+    )
+    scc_set = state.get("ffg").get_sccs(min_size=3) if hasattr(state.get("ffg"), "get_sccs") else set()
+    risk_map = {r["entity_id"]: r["risk_score"] for r in state["risk_scores"]}
+    flags = _annotate_node_flags(
+        graph, entity_id,
+        state.get("_txn_index") or _build_txn_index(df),
+        risk_map,
+        in_scc=entity_id in scc_set,
+        baseline_stats=state.get("_baseline_stats") or _build_baseline_stats(df),
+        burst_counts=state.get("_burst_counts") or _build_burst_counts(df),
+        transit_ratios=state.get("_transit_ratios") or _build_transit_ratios(df),
+    )
+
     return {
         "id": entity_id,
         "name": nd.get("name", entity_id),
@@ -648,6 +688,7 @@ def get_entity(entity_id: str):
         "sentVolume": round(float(sent["amount"].sum()), 2),
         "receivedVolume": round(float(received["amount"].sum()), 2),
         "transactionHistory": txn_history,
+        "flags": flags,
     }
 
 

@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { fetchAPI } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
 
@@ -32,6 +32,7 @@ export default function Live() {
       const stamped = (data.transactions || []).map(t => ({
         ...t,
         seq: ++seqRef.current,
+        receivedAt: Date.now(),
       }));
       setFeed(prev => {
         const next = [...stamped.reverse(), ...prev].slice(0, 200);
@@ -50,10 +51,26 @@ export default function Live() {
           latency_samples: newLatSamples,
         };
       });
-    } catch (e) {
+    } catch {
       // swallow; user sees nothing happens
     }
   }, [tps]);
+
+  // Burst detection — find entities appearing ≥3 times in the last 60s
+  const bursts = useMemo(() => {
+    const now = Date.now();
+    const windowMs = 60_000;
+    const counts = {};
+    for (const t of feed) {
+      if (now - (t.receivedAt || 0) > windowMs) continue;
+      counts[t.sender] = (counts[t.sender] || 0) + 1;
+      counts[t.receiver] = (counts[t.receiver] || 0) + 1;
+    }
+    return Object.entries(counts)
+      .filter(([, n]) => n >= 3)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5);
+  }, [feed]);
 
   useEffect(() => {
     if (!running) {
@@ -106,6 +123,28 @@ export default function Live() {
           </button>
         </div>
       </div>
+
+      {/* Burst alert */}
+      {bursts.length > 0 && (
+        <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3">
+          <div className="flex items-center gap-2 mb-2">
+            <svg className="w-5 h-5 text-amber-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
+            </svg>
+            <p className="text-sm font-semibold text-amber-900">
+              Velocity burst detected — {bursts.length} {bursts.length === 1 ? 'entity' : 'entities'} active in the last 60s
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {bursts.map(([entityId, count]) => (
+              <span key={entityId} className="inline-flex items-center gap-1.5 px-2 py-1 rounded-md bg-white border border-amber-200 text-xs">
+                <span className="font-mono text-gray-600">{entityId}</span>
+                <span className="font-bold text-amber-700">{count}×</span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* KPIs */}
       <div className="grid grid-cols-5 gap-4">

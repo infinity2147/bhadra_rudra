@@ -202,6 +202,37 @@ export default function Dashboard() {
         />
       </div>
 
+      {/* AML mule signals — new */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard
+          label="Velocity Bursts"
+          value={(kpis.velocity_burst_entities || 0).toLocaleString('en-IN')}
+          delta="≥3 txns within 60 min"
+          color="amber"
+          onClick={() => navigate('/entities')}
+        />
+        <MetricCard
+          label="Transit-Node Mules"
+          value={(kpis.transit_node_entities || 0).toLocaleString('en-IN')}
+          delta="≥50% inflow exits in 1h"
+          color="red"
+          onClick={() => navigate('/entities')}
+        />
+        <MetricCard
+          label="Fraud Rate"
+          value={`${kpis.fraud_rate ?? 0}%`}
+          delta={`${kpis.fraud_transactions?.toLocaleString('en-IN') || 0} of ${kpis.total_transactions?.toLocaleString('en-IN') || 0}`}
+          color="red"
+        />
+        <MetricCard
+          label="Total Alerts"
+          value={(kpis.total_alerts || 0).toLocaleString('en-IN')}
+          delta={`${kpis.critical_alerts || 0} critical`}
+          color="indigo"
+          onClick={() => navigate('/incidents')}
+        />
+      </div>
+
       {/* Latency benchmark */}
       <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-start justify-between flex-wrap gap-3">
         <div>

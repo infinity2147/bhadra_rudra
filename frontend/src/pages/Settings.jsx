@@ -36,6 +36,21 @@ const FIELDS = [
   // ML
   { key: 'ml_alert_threshold', label: 'ML: alert when probability ≥',
     detector: 'ML Classifier', type: 'percent', min: 0.3, max: 0.95, step: 0.05 },
+  // Fund Tracer annotation thresholds
+  { key: 'tracer_structuring_threshold', label: 'Tracer: structuring threshold (INR)',
+    detector: 'Fund Tracer', type: 'inr', min: 50_000, max: 1_000_000, step: 10_000 },
+  { key: 'tracer_high_value_threshold', label: 'Tracer: high-value rail threshold (INR)',
+    detector: 'Fund Tracer', type: 'inr', min: 100_000, max: 10_000_000, step: 100_000 },
+  { key: 'tracer_baseline_z_threshold', label: 'Tracer: outflow Z-score anomaly threshold',
+    detector: 'Fund Tracer', type: 'float', min: 1.5, max: 6, step: 0.1 },
+  { key: 'tracer_burst_window_minutes', label: 'Tracer: burst window (minutes)',
+    detector: 'Fund Tracer', type: 'int', min: 10, max: 240 },
+  { key: 'tracer_burst_min_cluster', label: 'Tracer: burst min cluster size',
+    detector: 'Fund Tracer', type: 'int', min: 2, max: 10 },
+  { key: 'tracer_transit_window_hours', label: 'Tracer: transit-node window (hours)',
+    detector: 'Fund Tracer', type: 'float', min: 0.5, max: 24, step: 0.5 },
+  { key: 'tracer_transit_ratio_threshold', label: 'Tracer: transit-node ratio threshold',
+    detector: 'Fund Tracer', type: 'percent', min: 0.3, max: 0.95, step: 0.05 },
 ];
 
 function formatValue(val, type) {

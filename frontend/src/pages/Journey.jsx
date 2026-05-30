@@ -473,6 +473,130 @@ export default function Journey() {
         </div>
       )}
 
+      {/* Dominant paths — top fund corridors */}
+      {data && data.dominant_paths?.length > 0 && (
+        <div className="px-6 py-3 bg-white border-b border-gray-200">
+          <h3 className="text-sm font-semibold text-gray-800 mb-2">
+            Dominant Flow Corridors
+            <span className="text-xs font-normal text-gray-500 ml-2">
+              Top {data.dominant_paths.length} highest-throughput paths (risk-weighted Dijkstra)
+            </span>
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+            {data.dominant_paths.map((dp, i) => (
+              <div key={i} className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="text-xs font-mono text-gray-500">#{i + 1}</span>
+                  <span className="text-xs font-semibold text-rose-700">
+                    risk {(dp.path_risk_score ?? 0).toFixed(2)}
+                  </span>
+                </div>
+                <p className="text-xs text-gray-700 font-medium">
+                  {(dp.path || []).map((n, j) => (
+                    <span key={j}>
+                      {j > 0 && <span className="text-gray-400 mx-1">→</span>}
+                      <span
+                        className="text-indigo-700 cursor-pointer hover:underline"
+                        onClick={() => setSelectedNodeId(n)}
+                      >
+                        {(data.nodes?.find((node) => node.id === n)?.name || n).slice(0, 18)}
+                      </span>
+                    </span>
+                  ))}
+                </p>
+                <div className="mt-1.5 flex items-center justify-between text-[11px] text-gray-600">
+                  <span>{dp.hops} hops</span>
+                  <span className="font-medium">{formatINR(dp.bottleneck_amount)}</span>
+                </div>
+                {dp.path_flags?.length > 0 && (
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {dp.path_flags.slice(0, 4).map((f, j) => (
+                      <FlagPill key={j} text={f.replace(/_/g, ' ')} tone="amber" />
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Flow distribution + terminal classification side-by-side */}
+      {data && (data.flow_distribution?.length > 0 || data.terminal_classification) && (
+        <div className="px-6 py-3 bg-white border-b border-gray-200 grid grid-cols-1 lg:grid-cols-2 gap-4">
+          {data.flow_distribution?.length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-800 mb-2">
+                Parallel-Path Flow Distribution
+                <span className="text-xs font-normal text-gray-500 ml-2">
+                  Max-flow analysis — reveals layering across multiple chains
+                </span>
+              </h3>
+              <div className="space-y-2">
+                {data.flow_distribution.map((fd, i) => {
+                  const sinkNode = data.nodes?.find((n) => n.id === fd.sink);
+                  return (
+                    <div key={i} className="rounded-md border border-gray-200 p-2.5 text-xs">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-gray-800">
+                          to{' '}
+                          <span
+                            className="text-indigo-700 cursor-pointer hover:underline"
+                            onClick={() => setSelectedNodeId(fd.sink)}
+                          >
+                            {(sinkNode?.name || fd.sink).slice(0, 24)}
+                          </span>
+                        </span>
+                        <span className="font-semibold text-gray-900">{formatINR(fd.max_flow_amount)}</span>
+                      </div>
+                      <p className="text-[11px] text-gray-500 mt-0.5">
+                        {fd.n_parallel_paths_estimate} parallel paths • {fd.top_edges?.length || 0} edges contribute
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {data.terminal_classification && Object.keys(data.terminal_classification).length > 0 && (
+            <div>
+              <h3 className="text-sm font-semibold text-gray-800 mb-2">
+                Where the Funds Ended Up
+                <span className="text-xs font-normal text-gray-500 ml-2">
+                  Terminal-destination classification
+                </span>
+              </h3>
+              <div className="space-y-1.5">
+                {Object.entries(data.terminal_classification).map(([category, ids]) => {
+                  const palette = {
+                    cash_out: 'bg-rose-50 border-rose-200 text-rose-800',
+                    cross_border: 'bg-amber-50 border-amber-200 text-amber-800',
+                    conversion: 'bg-violet-50 border-violet-200 text-violet-800',
+                    layered: 'bg-gray-50 border-gray-200 text-gray-700',
+                  };
+                  return (
+                    <div key={category} className={`rounded-md border p-2.5 text-xs ${palette[category] || palette.layered}`}>
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold capitalize">{category.replace('_', ' ')}</span>
+                        <span className="font-mono">{ids.length}</span>
+                      </div>
+                      <p className="mt-1 opacity-80">
+                        {ids.slice(0, 3).map((id) => {
+                          const n = data.nodes?.find((node) => node.id === id);
+                          return n?.name || id;
+                        }).join(', ')}
+                        {ids.length > 3 && <span> +{ids.length - 3} more</span>}
+                      </p>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* SHAP explanation */}
       {mode === 'alert' && (explanation || explainLoading) && (
         <div className="px-6 py-3 bg-violet-50 border-b border-violet-200">
@@ -576,13 +700,13 @@ export default function Journey() {
           </div>
           <div className="space-y-3 text-sm min-w-0">
             <div className="flex items-center gap-2 flex-wrap">
-              {(selectedNode.flags || []).map((f, i) => (
-                <FlagPill
-                  key={i}
-                  text={f.replace(/_/g, ' ')}
-                  tone={f === 'shell_company' || f === 'part_of_cycle' ? 'red' : 'amber'}
-                />
-              ))}
+              {(selectedNode.flags || []).map((f, i) => {
+                const redFlags = ['shell_company', 'part_of_cycle', 'transit_node', 'outflow_zscore_anomaly'];
+                const tone = redFlags.includes(f) ? 'red'
+                           : f === 'velocity_burst' ? 'amber'
+                           : 'amber';
+                return <FlagPill key={i} text={f.replace(/_/g, ' ')} tone={tone} />;
+              })}
               {SIDE_LABEL[selectedNode.side] && <FlagPill text={SIDE_LABEL[selectedNode.side]} tone="indigo" />}
             </div>
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -620,6 +744,9 @@ export default function Journey() {
                         <p className="text-gray-500 truncate">
                           {formatINR(l.amount)} over {l.txn_count} txn{l.txn_count > 1 ? 's' : ''}
                           {l.ml_score != null && <> • ML {(l.ml_score * 100).toFixed(0)}</>}
+                          {l.txn_velocity != null && l.txn_velocity > 1 && (
+                            <> • <span className="text-amber-700 font-medium">{l.txn_velocity.toFixed(1)}/h</span></>
+                          )}
                         </p>
                       </li>
                     );

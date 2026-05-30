@@ -422,22 +422,45 @@ class FraudDetector:
         self.alerts.extend(alerts)
         return alerts
 
-    def compute_node_risk_scores(self) -> Dict[str, float]:
-        """Compute composite risk score for each node based on multiple signals."""
+    def compute_node_risk_scores(self, time_window_days: Optional[int] = None) -> Dict[str, float]:
+        """Compute composite risk score for each node based on multiple signals.
+
+        If `time_window_days` is set, betweenness + degree centrality are computed
+        on a subgraph containing only edges with `last_seen` within the window.
+        This is much closer to real AML practice: a shell node that was active
+        in 2023 but quiet for two years shouldn't drive today's risk score.
+        """
         scores = {}
 
-        # Centrality is O(VE) — cache it so re-runs (e.g. after threshold changes)
-        # don't pay the full cost again.
-        if self._centrality_cache is None:
+        # Cache key: include window so different windows don't collide.
+        cache_key = time_window_days if time_window_days is not None else "all"
+        if self._centrality_cache is None or self._centrality_cache.get("__key__") != cache_key:
+            target = self.graph
+            if time_window_days is not None and self.graph.number_of_edges() > 0:
+                from datetime import datetime, timedelta
+                last_seens = [
+                    d.get("last_seen") for _, _, d in self.graph.edges(data=True)
+                    if d.get("last_seen") is not None
+                ]
+                if last_seens:
+                    max_ts = pd.to_datetime(max(last_seens))
+                    cutoff = max_ts - timedelta(days=time_window_days)
+                    keep_edges = [
+                        (u, v) for u, v, d in self.graph.edges(data=True)
+                        if d.get("last_seen") is not None
+                        and pd.to_datetime(d["last_seen"]) >= cutoff
+                    ]
+                    target = self.graph.edge_subgraph(keep_edges).copy()
             try:
-                betweenness = nx.betweenness_centrality(self.graph, weight="total_amount")
+                betweenness = nx.betweenness_centrality(target, weight="total_amount")
             except Exception:
                 betweenness = {n: 0 for n in self.graph.nodes()}
             try:
-                degree_centrality = nx.degree_centrality(self.graph)
+                degree_centrality = nx.degree_centrality(target)
             except Exception:
                 degree_centrality = {n: 0 for n in self.graph.nodes()}
             self._centrality_cache = {
+                "__key__": cache_key,
                 "betweenness": betweenness,
                 "degree": degree_centrality,
             }
