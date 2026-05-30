@@ -69,6 +69,7 @@ export default function Settings() {
   const [draft, setDraft] = useState({});
   const [saving, setSaving] = useState(false);
   const [rerunning, setRerunning] = useState(false);
+  const [pipelineRunning, setPipelineRunning] = useState(false);
   const [rerunResult, setRerunResult] = useState(null);
   const [error, setError] = useState(null);
 
@@ -125,6 +126,18 @@ export default function Settings() {
       setError(e.message);
     } finally {
       setRerunning(false);
+    }
+  }
+
+  async function runPipeline() {
+    setPipelineRunning(true); setRerunResult(null); setError(null);
+    try {
+      await postAPI('/api/pipeline/run', {});
+      setRerunResult({ message: 'Full pipeline completed — reload the app to refresh all pages.' });
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setPipelineRunning(false);
     }
   }
 
@@ -220,22 +233,35 @@ export default function Settings() {
         </button>
         <button
           onClick={rerun}
-          disabled={!isAdmin || rerunning}
+          disabled={!isAdmin || rerunning || pipelineRunning}
           className="ml-auto px-4 py-2 text-sm bg-emerald-600 text-white rounded-lg hover:bg-emerald-700 disabled:opacity-50"
         >
           {rerunning ? 'Re-running...' : 'Re-run all detectors'}
+        </button>
+        <button
+          onClick={runPipeline}
+          disabled={!isAdmin || pipelineRunning || rerunning}
+          className="px-4 py-2 text-sm border border-indigo-300 text-indigo-700 rounded-lg hover:bg-indigo-50 disabled:opacity-50"
+        >
+          {pipelineRunning ? 'Pipeline running...' : 'Run full pipeline'}
         </button>
       </div>
 
       {rerunResult && (
         <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-4 text-sm">
-          <p className="font-semibold text-emerald-900">Detection re-ran successfully.</p>
-          <p className="text-emerald-800 mt-1">
-            {rerunResult.alert_count} alerts → {rerunResult.incident_count} incidents.
+          <p className="font-semibold text-emerald-900">
+            {rerunResult.message || 'Detection re-ran successfully.'}
           </p>
-          <p className="text-xs text-emerald-700 mt-1">
-            Critical: {rerunResult.summary?.critical_alerts ?? 0} • High: {rerunResult.summary?.high_alerts ?? 0} • Medium: {rerunResult.summary?.medium_alerts ?? 0}
-          </p>
+          {rerunResult.alert_count != null && (
+            <p className="text-emerald-800 mt-1">
+              {rerunResult.alert_count} alerts → {rerunResult.incident_count} incidents.
+            </p>
+          )}
+          {rerunResult.summary && (
+            <p className="text-xs text-emerald-700 mt-1">
+              Critical: {rerunResult.summary?.critical_alerts ?? 0} • High: {rerunResult.summary?.high_alerts ?? 0} • Medium: {rerunResult.summary?.medium_alerts ?? 0}
+            </p>
+          )}
         </div>
       )}
     </div>

@@ -113,6 +113,15 @@ function RoleSwitcher() {
   );
 }
 
+function NotFound() {
+  return (
+    <div className="p-12 text-center">
+      <h1 className="text-xl font-bold text-gray-900">Page not found</h1>
+      <p className="text-sm text-gray-500 mt-2">This route is not registered in the RUDRA app.</p>
+    </div>
+  );
+}
+
 export default function App() {
   return (
     <ErrorBoundary>
@@ -173,6 +182,7 @@ export default function App() {
               <Route path="/sar" element={<SarReports />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/aa" element={<AccountAggregator />} />
+              <Route path="*" element={<NotFound />} />
             </Routes>
             </div>
           </main>

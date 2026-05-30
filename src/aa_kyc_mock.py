@@ -85,6 +85,14 @@ def aa_pull_data(consent_handle: str, days_back: int = 30) -> Dict:
         return {"error": "Invalid or expired consent handle.", "status": 401}
     if artefact["status"] != "ACTIVE":
         return {"error": f"Consent is {artefact['status']}.", "status": 401}
+    expires_at = artefact.get("expires_at")
+    if expires_at:
+        try:
+            if datetime.fromisoformat(expires_at) < datetime.now():
+                artefact["status"] = "EXPIRED"
+                return {"error": "Consent has expired.", "status": 401}
+        except ValueError:
+            pass
 
     # Generate plausible-looking AA transactions for the demo
     rng = random.Random(consent_handle)

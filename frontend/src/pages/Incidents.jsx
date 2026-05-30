@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { fetchAPI } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
 
@@ -14,9 +14,10 @@ const SEVERITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 
 export default function Incidents() {
   const navigate = useNavigate();
+  const [params, setParams] = useSearchParams();
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [selected, setSelected] = useState(null);
+  const [selected, setSelected] = useState(params.get('id'));
   const [detail, setDetail] = useState(null);
 
   useEffect(() => {
@@ -56,7 +57,7 @@ export default function Incidents() {
                 return (
                   <button
                     key={inc.incident_id}
-                    onClick={() => setSelected(inc.incident_id)}
+                    onClick={() => { setSelected(inc.incident_id); setParams({ id: inc.incident_id }); }}
                     className={`w-full text-left rounded-xl border p-4 transition-colors ${
                       isSel
                         ? 'border-indigo-500 bg-indigo-50'
