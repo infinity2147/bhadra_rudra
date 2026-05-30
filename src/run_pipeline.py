@@ -9,7 +9,8 @@ Order of operations:
   5. Train XGBoost on the synthetic graph (variant="synthetic")
   6. Train GraphSAGE GNN on the same graph (if torch + PyG installed)
   7. If real datasets present in data/real/, train extra model variants
-  8. Generate SAR PDFs for HIGH+ alerts
+
+SAR reports are not pre-generated here — use the UI or GET /api/sar/generate/{alert_id}.
 """
 
 import json
@@ -27,9 +28,6 @@ from graph_engine import FundFlowGraph
 from fraud_detector import FraudDetector
 from advanced_detectors import DormantActivationDetector, ProfileMismatchDetector
 from incident_clustering import cluster_alerts
-from sar_generator import SARGenerator
-
-
 def run_full_pipeline(data_dir: str, seed: int = 42, verbose: bool = True) -> dict:
     """Run the complete RUDRA pipeline and write artefacts under data_dir."""
 
@@ -158,15 +156,6 @@ def run_full_pipeline(data_dir: str, seed: int = 42, verbose: bool = True) -> di
             log(f"    IEEE-CIS: F1 {m['f1']:.3f} | AUC {m['auc']:.3f} on {m['n_features']} features")
         except Exception as e:
             log(f"    IEEE-CIS training failed: {e}")
-
-    log("\n[7/7] Generating SAR reports (HIGH+ severity)...")
-    sar_gen = SARGenerator(graph, df, all_alerts, fraud_cases)
-    sar_reports = sar_gen.generate_all_sars(min_severity="HIGH")
-    sar_dir = os.path.join(data_dir, "sar_reports")
-    os.makedirs(sar_dir, exist_ok=True)
-    for sar in sar_reports:
-        sar_gen.export_sar_pdf(sar, sar_dir)
-    log(f"  {len(sar_reports)} SAR PDFs in {sar_dir}/")
 
     return {
         "alerts": all_alerts,

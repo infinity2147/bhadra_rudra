@@ -848,36 +848,27 @@ elif page == "🤖 AI Copilot":
 # ═══════════════════════════════════════════════════════════
 elif page == "📄 SAR Reports":
     st.markdown('<p class="main-header">SAR Report Generator</p>', unsafe_allow_html=True)
-    st.markdown('<p class="sub-header">Auto-generated Suspicious Activity Reports with regulatory citations</p>', unsafe_allow_html=True)
+    st.markdown('<p class="sub-header">Generate a Suspicious Activity Report for one alert ID at a time</p>', unsafe_allow_html=True)
 
     from sar_generator import SARGenerator
 
     sar_gen = SARGenerator(graph, transactions, alerts, fraud_cases)
 
-    # Generate reports
-    st.markdown("### Generate Reports")
+    alert_id_input = st.text_input(
+        "Alert ID",
+        placeholder="e.g. ALERT_CIRC_0001",
+        help="Enter the alert ID from the Alerts page. Reports are not pre-generated.",
+    )
 
-    gen_col1, gen_col2 = st.columns(2)
-    with gen_col1:
-        min_sev = st.selectbox("Minimum Severity", ["CRITICAL", "HIGH", "MEDIUM"], index=1)
-    with gen_col2:
-        if st.button("Generate All SAR Reports", width="stretch"):
-            with st.spinner("Generating SAR reports..."):
-                sar_reports = sar_gen.generate_all_sars(min_sev)
-                st.session_state.sar_reports = sar_reports
-                st.success(f"Generated {len(sar_reports)} SAR reports!")
-
-    # Individual alert SAR generation
-    st.markdown("### Generate SAR for Specific Alert")
-    alert_options = [(a["alert_id"], f"{a['alert_id']} — {a['pattern_type']} ({a['severity']})") for a in alerts]
-    selected_alert = st.selectbox("Select Alert", options=alert_options, format_func=lambda x: x[1])
-
-    if st.button("Generate SAR for Selected Alert"):
-        alert = next(a for a in alerts if a["alert_id"] == selected_alert[0])
-        with st.spinner("Generating SAR..."):
-            sar = sar_gen.generate_sar(alert)
-            st.session_state.current_sar = sar
-        st.success(f"SAR {sar['report_id']} generated!")
+    if st.button("Generate SAR", disabled=not (alert_id_input or "").strip()):
+        alert = next((a for a in alerts if a.get("alert_id") == alert_id_input.strip()), None)
+        if not alert:
+            st.error(f"Alert not found: {alert_id_input.strip()}")
+        else:
+            with st.spinner("Generating SAR..."):
+                sar = sar_gen.generate_sar(alert)
+                st.session_state.current_sar = sar
+            st.success(f"SAR {sar['report_id']} generated!")
 
     # Display SAR report
     if "current_sar" in st.session_state:
@@ -908,23 +899,6 @@ elif page == "📄 SAR Reports":
 
         # Display report
         st.markdown(f'<div class="sar-report">{report_text}</div>', unsafe_allow_html=True)
-
-    # Previously generated reports
-    if "sar_reports" in st.session_state and st.session_state.sar_reports:
-        st.markdown("---")
-        st.markdown("### Generated Reports")
-        for sar in st.session_state.sar_reports:
-            with st.expander(f"{sar['report_id']} — {sar['pattern_type']} ({sar['severity']})"):
-                st.markdown(f"**Alert:** {sar['alert_id']}")
-                st.markdown(f"**Total Flow:** ₹{sar['total_flow']:,.0f}")
-                st.markdown(f"**Confidence:** {sar['confidence']}%")
-                report_text = sar["report_text"]
-                st.download_button(
-                    f"Download {sar['report_id']}",
-                    data=report_text,
-                    file_name=f"{sar['report_id']}.txt",
-                    mime="text/plain",
-                )
 
 # ═══════════════════════════════════════════════════════════
 # PAGE: LIVE MONITOR

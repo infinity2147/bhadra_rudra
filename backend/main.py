@@ -19,6 +19,7 @@ import sys
 import json
 import random
 import time
+import tempfile
 from io import BytesIO
 from typing import Optional, List, Dict
 
@@ -827,15 +828,13 @@ def download_fiu_package(alert_id: str, role: str = Depends(get_role)):
     alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
     if not alert:
         raise HTTPException(404, "Alert not found")
-    sar_dir = os.path.join(DATA_DIR, "sar_reports")
-    sar_pdf_path = None
-    if os.path.isdir(sar_dir):
-        sar = state["sar_gen"].generate_sar(alert)
-        sar_pdf_path = state["sar_gen"].export_sar_pdf(sar, sar_dir)
     case = state["cases"].get(alert_id)
-    zip_bytes = build_fiu_package(
-        state["graph"], state["transactions"], alert, sar_pdf_path, case=case,
-    )
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        sar = state["sar_gen"].generate_sar(alert)
+        sar_pdf_path = state["sar_gen"].export_sar_pdf(sar, tmp_dir)
+        zip_bytes = build_fiu_package(
+            state["graph"], state["transactions"], alert, sar_pdf_path, case=case,
+        )
     return StreamingResponse(
         BytesIO(zip_bytes),
         media_type="application/zip",

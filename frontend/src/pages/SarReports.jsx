@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { fetchAPI } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
 
@@ -20,31 +20,24 @@ function downloadFile(filename, content, mimeType) {
 }
 
 export default function SarReports() {
-  const [alerts, setAlerts] = useState([]);
-  const [selectedAlert, setSelectedAlert] = useState('');
+  const [alertId, setAlertId] = useState('');
   const [report, setReport] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [alertsLoading, setAlertsLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  useEffect(() => {
-    fetchAPI('/api/alerts')
-      .then(data => {
-        const list = Array.isArray(data) ? data : data.alerts ?? [];
-        setAlerts(list);
-      })
-      .catch(() => setAlerts([]))
-      .finally(() => setAlertsLoading(false));
-  }, []);
-
-  async function handleGenerate() {
-    if (!selectedAlert) return;
+  async function handleGenerate(e) {
+    e?.preventDefault();
+    const id = alertId.trim();
+    if (!id) return;
     setLoading(true);
     setReport(null);
+    setError('');
     try {
-      const data = await fetchAPI(`/api/sar/generate/${selectedAlert}`);
+      const data = await fetchAPI(`/api/sar/generate/${encodeURIComponent(id)}`);
       setReport(data);
     } catch {
       setReport(null);
+      setError('Alert not found. Check the alert ID and try again.');
     } finally {
       setLoading(false);
     }
@@ -52,42 +45,42 @@ export default function SarReports() {
 
   function handleDownloadTxt() {
     if (!report?.report_text) return;
-    const filename = `SAR_${report.report_id ?? selectedAlert}_${Date.now()}.txt`;
+    const filename = `SAR_${report.report_id ?? alertId}_${Date.now()}.txt`;
     downloadFile(filename, report.report_text, 'text/plain');
   }
 
   function handleDownloadJson() {
     if (!report) return;
-    const filename = `SAR_${report.report_id ?? selectedAlert}_${Date.now()}.json`;
+    const filename = `SAR_${report.report_id ?? alertId}_${Date.now()}.json`;
     downloadFile(filename, JSON.stringify(report, null, 2), 'application/json');
   }
 
   return (
     <div className="h-full overflow-y-auto">
       <div className="p-6 max-w-4xl">
-        {/* Header */}
         <h1 className="text-2xl font-bold text-gray-900">SAR Report Generator</h1>
-        <p className="text-sm text-gray-500 mt-1">Generate Suspicious Activity Reports from fraud alerts</p>
+        <p className="text-sm text-gray-500 mt-1">
+          Enter an alert ID to generate a Suspicious Activity Report on demand (nothing is pre-generated).
+        </p>
 
-        {/* Alert Selector */}
-        <div className="mt-6 bg-white border border-gray-200 rounded-xl p-5">
-          <label className="block text-sm font-medium text-gray-700 mb-2">Select Alert</label>
+        <form onSubmit={handleGenerate} className="mt-6 bg-white border border-gray-200 rounded-xl p-5">
+          <label htmlFor="alert-id" className="block text-sm font-medium text-gray-700 mb-2">
+            Alert ID
+          </label>
           <div className="flex gap-3">
-            <select
-              value={selectedAlert}
-              onChange={e => { setSelectedAlert(e.target.value); setReport(null); }}
-              className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-            >
-              <option value="">-- Choose an alert --</option>
-              {alerts.map(alert => (
-                <option key={alert.alert_id ?? alert.id} value={alert.alert_id ?? alert.id}>
-                  {(alert.alert_id ?? alert.id)} — {alert.pattern_type ?? 'Unknown'} — {alert.severity ?? 'N/A'}
-                </option>
-              ))}
-            </select>
+            <input
+              id="alert-id"
+              type="text"
+              value={alertId}
+              onChange={e => { setAlertId(e.target.value); setReport(null); setError(''); }}
+              placeholder="e.g. ALERT_CIRC_0001"
+              className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+              autoComplete="off"
+              spellCheck={false}
+            />
             <button
-              onClick={handleGenerate}
-              disabled={!selectedAlert || loading}
+              type="submit"
+              disabled={!alertId.trim() || loading}
               className="px-6 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
             >
               {loading ? (
@@ -108,19 +101,24 @@ export default function SarReports() {
               )}
             </button>
           </div>
-          {alertsLoading && <p className="text-xs text-gray-400 mt-2">Loading alerts...</p>}
-        </div>
+          {error && <p className="text-sm text-red-600 mt-2">{error}</p>}
+          <p className="text-xs text-gray-400 mt-2">
+            Copy the alert ID from the Alerts page. Reports are created only for the ID you submit.
+          </p>
+        </form>
 
-        {/* Report Output */}
         {report && (
           <div className="mt-6 space-y-5">
-            {/* Report Summary */}
             <div className="bg-white border border-gray-200 rounded-xl p-5">
               <h2 className="text-lg font-bold text-gray-900 mb-4">Report Summary</h2>
               <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
                 <div>
                   <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Report ID</p>
                   <p className="text-sm font-semibold mt-1">{report.report_id ?? '--'}</p>
+                </div>
+                <div>
+                  <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Alert ID</p>
+                  <p className="text-sm font-semibold mt-1">{report.alert_id ?? alertId}</p>
                 </div>
                 <div>
                   <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Severity</p>
@@ -141,7 +139,6 @@ export default function SarReports() {
               </div>
             </div>
 
-            {/* Report Text */}
             <div className="bg-white border border-gray-200 rounded-xl p-5">
               <h2 className="text-lg font-bold text-gray-900 mb-3">Report Text</h2>
               <pre className="bg-gray-900 text-gray-100 rounded-lg p-5 text-xs leading-relaxed overflow-auto max-h-[500px] whitespace-pre-wrap font-mono">
@@ -149,24 +146,19 @@ export default function SarReports() {
               </pre>
             </div>
 
-            {/* Download Buttons */}
             <div className="flex gap-3">
               <button
+                type="button"
                 onClick={handleDownloadTxt}
                 className="px-5 py-2.5 bg-white border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
               >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
                 Download TXT
               </button>
               <button
+                type="button"
                 onClick={handleDownloadJson}
                 className="px-5 py-2.5 bg-white border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition-colors flex items-center gap-2"
               >
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                </svg>
                 Download JSON
               </button>
             </div>

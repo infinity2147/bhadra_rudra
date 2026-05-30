@@ -100,7 +100,7 @@ The pipeline is orchestrated by `src/run_pipeline.py` in this order:
 | `data/incidents.json` | Clustered incidents (~6) |
 | `data/ml/synthetic/` | XGBoost `model.pkl`, `metrics.json`, `edge_scores.json` |
 | `data/ml/synthetic/gnn/` | GraphSAGE weights + metrics |
-| `data/sar_reports/*.pdf` | Pre-generated SAR PDFs for HIGH+ alerts |
+| `data/sar_reports/` | On-demand SAR PDFs (not created by pipeline; use `/api/sar/generate/{alert_id}`) |
 | `data/rudra.db` | SQLite — cases, audit log, config thresholds |
 
 Run `python src/run_pipeline.py` to generate all of these.
