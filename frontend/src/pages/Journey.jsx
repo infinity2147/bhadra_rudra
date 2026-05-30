@@ -1,8 +1,6 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import ForceGraph2D from 'react-force-graph-2d';
 import { fetchAPI, downloadFromAPI } from '../api';
-import Sankey from '../components/Sankey';
 
 const NODE_FILL = {
   individual: '#3b82f6',
@@ -63,6 +61,478 @@ function GraphLegend() {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Flow Story view — replaces Sankey
+//
+// What it shows: sources → focus → destinations as readable cards with
+// curved arrows. Hard-caps at top-N edges by amount so it never becomes a
+// hairball, no matter how many entities the trace returns.
+// ─────────────────────────────────────────────────────────────────────────────
+
+function FlowStoryView({ data, focusId, panelSize, selectedNodeId, onSelectNode }) {
+  const TOP_EDGES = 18;       // never show more — keeps the diagram readable
+  const MAX_PER_COL = 9;      // max nodes per column
+
+  const { columns, edges } = useMemo(() => {
+    if (!data?.nodes?.length) return { columns: { upstream: [], focus: [], downstream: [] }, edges: [] };
+
+    // Normalise links — react-force-graph used to mutate source/target into
+    // node refs; defensive normalisation keeps the comparisons working.
+    const allLinks = data.links.map(l => ({
+      ...l,
+      source: typeof l.source === 'object' ? l.source.id : l.source,
+      target: typeof l.target === 'object' ? l.target.id : l.target,
+    }));
+
+    const nodeMap = new Map(data.nodes.map(n => [n.id, n]));
+    const focus = focusId
+      || data.nodes.find(n => n.side === 'focus' || n.side === 'alert')?.id
+      || data.nodes[0]?.id;
+    const alertSet = new Set(
+      data.nodes.filter(n => n.side === 'focus' || n.side === 'alert').map(n => n.id),
+    );
+    alertSet.add(focus);
+
+    // 1. Rank top-N edges by raw amount.  No "boost focus": for funnel and
+    //    smurfing patterns the genuinely highest-amount edges already touch
+    //    the alert entities, and the boost was burying them.
+    const ranked = [...allLinks].sort((a, b) => b.amount - a.amount).slice(0, TOP_EDGES);
+
+    // 2. Build per-node net-flow stats from those edges + always include
+    //    the alert entities in the visible set, even if no top-N edge
+    //    touches them (so the focus column is never empty).
+    const outFlow = new Map();
+    const inFlow  = new Map();
+    const visible = new Set(alertSet);
+    for (const e of ranked) {
+      visible.add(e.source); visible.add(e.target);
+      outFlow.set(e.source, (outFlow.get(e.source) || 0) + e.amount);
+      inFlow.set(e.target,  (inFlow.get(e.target)  || 0) + e.amount);
+    }
+
+    // 3. Classify each visible node into a column by net-flow direction.
+    //    Alert entities default to focus; balanced nodes (in≈out) also focus.
+    const upstream = [];
+    const focusCol = [];
+    const downstream = [];
+    for (const id of visible) {
+      const out = outFlow.get(id) || 0;
+      const inn = inFlow.get(id) || 0;
+      const isAlert = alertSet.has(id);
+      if (isAlert && out + inn === 0) {
+        focusCol.push(id);
+      } else if (out > inn * 1.5 && !isAlert) {
+        upstream.push(id);
+      } else if (inn > out * 1.5 && !isAlert) {
+        downstream.push(id);
+      } else {
+        focusCol.push(id);  // balanced, mid-chain, or alert
+      }
+    }
+
+    // 4. Sort each column by total activity (most active first), cap at MAX_PER_COL.
+    const activity = id => (outFlow.get(id) || 0) + (inFlow.get(id) || 0);
+    const sortAndCap = arr => arr.sort((a, b) => activity(b) - activity(a)).slice(0, MAX_PER_COL);
+    const finalUp    = sortAndCap(upstream);
+    const finalFocus = sortAndCap(focusCol);
+    const finalDown  = sortAndCap(downstream);
+    const finalVisible = new Set([...finalUp, ...finalFocus, ...finalDown]);
+
+    return {
+      columns: {
+        upstream:   finalUp.map(id => nodeMap.get(id)).filter(Boolean),
+        focus:      finalFocus.map(id => nodeMap.get(id)).filter(Boolean),
+        downstream: finalDown.map(id => nodeMap.get(id)).filter(Boolean),
+      },
+      edges: ranked.filter(e => finalVisible.has(e.source) && finalVisible.has(e.target)),
+    };
+  }, [data, focusId]);
+
+  const width = panelSize.width;
+  const height = Math.max(panelSize.height, 60 + 70 * Math.max(
+    columns.upstream.length, columns.focus.length, columns.downstream.length, 1,
+  ));
+  const colWidth = width / 3;
+  const cardW = Math.min(190, colWidth - 24);
+  const cardH = 56;
+  const headerY = 22;
+
+  function positionFor(colIdx, rowIdx, total) {
+    const cx = colIdx * colWidth + colWidth / 2;
+    const usable = height - headerY - 50;
+    const step = usable / Math.max(total, 1);
+    const cy = headerY + 30 + step * (rowIdx + 0.5);
+    return { cx, cy };
+  }
+
+  const positions = useMemo(() => {
+    const p = {};
+    columns.upstream.forEach((n, i) => { p[n.id] = positionFor(0, i, columns.upstream.length); });
+    columns.focus.forEach((n, i) =>    { p[n.id] = positionFor(1, i, columns.focus.length); });
+    columns.downstream.forEach((n, i) => { p[n.id] = positionFor(2, i, columns.downstream.length); });
+    return p;
+  }, [columns, width, height]);   // eslint-disable-line react-hooks/exhaustive-deps
+
+  const visibleEdges = edges.filter(e => positions[e.source] && positions[e.target]);
+  const maxAmount = Math.max(...visibleEdges.map(e => e.amount), 1);
+
+  const [hoverEdge, setHoverEdge] = useState(null);
+
+  function edgeColor(e) {
+    if (e.fraud_count > 0 || e.is_fraud) return '#dc2626';
+    if ((e.ml_score ?? 0) >= 0.6) return '#f59e0b';
+    return '#94a3b8';
+  }
+
+  const empty = !columns.upstream.length && !columns.focus.length && !columns.downstream.length;
+  if (empty) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
+        No flow data to display for this trace.
+      </div>
+    );
+  }
+
+  return (
+    <div className="absolute inset-0 overflow-auto">
+      <svg width={width} height={height} className="bg-gradient-to-b from-white to-gray-50">
+        {/* Column headers */}
+        {[
+          { x: colWidth * 0.5, label: 'SOURCES', count: columns.upstream.length },
+          { x: colWidth * 1.5, label: 'FOCUS',   count: columns.focus.length },
+          { x: colWidth * 2.5, label: 'DESTINATIONS', count: columns.downstream.length },
+        ].map(h => (
+          <g key={h.label}>
+            <text x={h.x} y={headerY} textAnchor="middle"
+                  className="text-[11px] font-semibold uppercase tracking-wider"
+                  fill="#6b7280">
+              {h.label}
+              {h.count > 0 && <tspan fill="#9ca3af" fontWeight={400}>  ({h.count})</tspan>}
+            </text>
+            <line x1={h.x - 30} x2={h.x + 30} y1={headerY + 4} y2={headerY + 4}
+                  stroke="#e5e7eb" />
+          </g>
+        ))}
+
+        {/* Curved edges first so cards sit on top */}
+        {visibleEdges.map((e, i) => {
+          const s = positions[e.source];
+          const t = positions[e.target];
+          const isHover = hoverEdge === i;
+          const color = edgeColor(e);
+          const sx = s.cx + cardW / 2;
+          const sy = s.cy;
+          const tx = t.cx - cardW / 2;
+          const ty = t.cy;
+          const midX = (sx + tx) / 2;
+          const w = Math.max(1.5, Math.min(7, 1 + Math.log10(e.amount + 1) * 0.9));
+          return (
+            <g key={`e-${i}`}
+               onMouseEnter={() => setHoverEdge(i)}
+               onMouseLeave={() => setHoverEdge(null)}
+               style={{ cursor: 'pointer' }}>
+              <path
+                d={`M ${sx} ${sy} C ${midX} ${sy}, ${midX} ${ty}, ${tx} ${ty}`}
+                fill="none"
+                stroke={color}
+                strokeWidth={isHover ? w + 2 : w}
+                opacity={isHover ? 1 : 0.55}
+              />
+              {/* Amount label, centered on the arc */}
+              <g transform={`translate(${midX}, ${(sy + ty) / 2 - 4})`}>
+                <rect x={-32} y={-9} width={64} height={16} rx={8}
+                      fill="white" stroke={color} strokeWidth={0.75}
+                      opacity={isHover ? 1 : 0.9} />
+                <text x={0} y={3} textAnchor="middle"
+                      className="text-[10px] font-semibold tabular-nums"
+                      fill={color}>
+                  {formatINR(e.amount)}
+                </text>
+              </g>
+              {/* Arrow head */}
+              <polygon
+                points={`${tx},${ty} ${tx - 6},${ty - 4} ${tx - 6},${ty + 4}`}
+                fill={color}
+                opacity={isHover ? 1 : 0.7}
+              />
+            </g>
+          );
+        })}
+
+        {/* Node cards */}
+        {Object.entries(positions).map(([id, pos]) => {
+          const n = data.nodes.find(nn => nn.id === id);
+          if (!n) return null;
+          const isSel = selectedNodeId === id;
+          const isFocus = n.side === 'focus' || n.side === 'alert' || id === focusId;
+          const fill = NODE_FILL[n.type] || '#9ca3af';
+          const flags = (n.flags || []).slice(0, 2);
+          return (
+            <g key={`n-${id}`}
+               transform={`translate(${pos.cx - cardW / 2}, ${pos.cy - cardH / 2})`}
+               style={{ cursor: 'pointer' }}
+               onClick={() => onSelectNode(id)}>
+              <rect width={cardW} height={cardH} rx={6}
+                    fill="white"
+                    stroke={isSel ? '#1e1b4b' : isFocus ? '#4338ca' : '#cbd5e1'}
+                    strokeWidth={isSel ? 2.5 : isFocus ? 2 : 1} />
+              {/* Type color strip */}
+              <rect x={0} y={0} width={4} height={cardH} fill={fill} rx={2} />
+              <text x={12} y={18} className="text-[11px] font-semibold" fill="#1f2937">
+                {(n.name || id).slice(0, 22)}
+              </text>
+              <text x={12} y={32} className="text-[10px]" fill="#6b7280">
+                {(n.type || '').replace('_', ' ')}
+                {n.branch ? ` · ${n.branch.slice(0, 10)}` : ''}
+              </text>
+              {flags.length > 0 && (
+                <g transform={`translate(12, 38)`}>
+                  {flags.map((f, i) => (
+                    <g key={f} transform={`translate(${i * 64}, 0)`}>
+                      <rect width={60} height={12} rx={3} fill="#fef3c7" stroke="#fcd34d" />
+                      <text x={30} y={9} textAnchor="middle"
+                            className="text-[8px] font-medium" fill="#92400e">
+                        {f.replace(/_/g, ' ').slice(0, 11)}
+                      </text>
+                    </g>
+                  ))}
+                </g>
+              )}
+              {/* Risk score badge */}
+              {n.risk_score >= 0.4 && (
+                <g transform={`translate(${cardW - 30}, 4)`}>
+                  <rect width={26} height={14} rx={3}
+                        fill={n.risk_score >= 0.7 ? '#fee2e2' : '#fef3c7'}
+                        stroke={n.risk_score >= 0.7 ? '#dc2626' : '#f59e0b'}
+                        strokeWidth={0.5} />
+                  <text x={13} y={11} textAnchor="middle"
+                        className="text-[9px] font-bold tabular-nums"
+                        fill={n.risk_score >= 0.7 ? '#991b1b' : '#92400e'}>
+                    {(n.risk_score * 100).toFixed(0)}
+                  </text>
+                </g>
+              )}
+            </g>
+          );
+        })}
+
+        {/* Hover tooltip */}
+        {hoverEdge != null && visibleEdges[hoverEdge] && (() => {
+          const e = visibleEdges[hoverEdge];
+          const s = positions[e.source];
+          const t = positions[e.target];
+          const tx = (s.cx + t.cx) / 2 + cardW / 4;
+          const ty = (s.cy + t.cy) / 2 + 30;
+          return (
+            <g transform={`translate(${tx}, ${ty})`}>
+              <rect x={-90} y={-2} width={180} height={56} rx={6}
+                    fill="#111827" opacity={0.92} />
+              <text x={-82} y={14} className="text-[10px]" fill="white">
+                <tspan fontWeight={600}>{formatINR(e.amount)}</tspan>
+                <tspan fill="#9ca3af"> · {e.txn_count} txn{e.txn_count > 1 ? 's' : ''}</tspan>
+              </text>
+              <text x={-82} y={28} className="text-[10px]" fill="#9ca3af">
+                {e.first_seen?.slice(0, 16)} – {e.last_seen?.slice(0, 16)}
+              </text>
+              <text x={-82} y={42} className="text-[10px]" fill="#9ca3af">
+                velocity {e.txn_velocity?.toFixed(2) || '—'}/h
+                {e.ml_score != null && ` · ML ${(e.ml_score * 100).toFixed(0)}`}
+                {e.fraud_count > 0 && <tspan fill="#fca5a5" fontWeight={600}> · FRAUD</tspan>}
+              </text>
+            </g>
+          );
+        })()}
+      </svg>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Timeline view — each entity gets a row, transactions plotted in time
+//
+// Reveals: burst patterns (clusters of dots), layering chains (diagonal
+// stripes from upper rows down), cycles (criss-crossing in both directions).
+// ─────────────────────────────────────────────────────────────────────────────
+
+function TimelineView({ data, panelSize, selectedNodeId, onSelectNode }) {
+  const MAX_ENTITIES = 14;
+
+  const { entities, txns, tMin, tMax, entityIdx } = useMemo(() => {
+    const allTxns = (data.timeline || []).filter(t => t.timestamp);
+    if (!allTxns.length) return { entities: [], txns: [], tMin: 0, tMax: 1, entityIdx: new Map() };
+
+    // Count entity involvement (sender or receiver)
+    const counts = new Map();
+    for (const t of allTxns) {
+      counts.set(t.sender_id, (counts.get(t.sender_id) || 0) + 1);
+      counts.set(t.receiver_id, (counts.get(t.receiver_id) || 0) + 1);
+    }
+    // Top entities by involvement (focus + alert entities ranked first)
+    const focusSet = new Set(
+      data.nodes.filter(n => n.side === 'focus' || n.side === 'alert').map(n => n.id),
+    );
+    const sortedIds = [...counts.keys()].sort((a, b) => {
+      const af = focusSet.has(a) ? 1 : 0;
+      const bf = focusSet.has(b) ? 1 : 0;
+      if (af !== bf) return bf - af;
+      return (counts.get(b) || 0) - (counts.get(a) || 0);
+    }).slice(0, MAX_ENTITIES);
+
+    const idx = new Map(sortedIds.map((id, i) => [id, i]));
+    const nodeMap = new Map(data.nodes.map(n => [n.id, n]));
+    const ents = sortedIds.map(id => ({
+      id,
+      name: nodeMap.get(id)?.name || id,
+      type: nodeMap.get(id)?.type,
+      risk: nodeMap.get(id)?.risk_score || 0,
+      txns: counts.get(id) || 0,
+    }));
+
+    const times = allTxns.map(t => new Date(t.timestamp).getTime()).filter(t => !isNaN(t));
+    return {
+      entities: ents,
+      txns: allTxns.filter(t => idx.has(t.sender_id) && idx.has(t.receiver_id)),
+      tMin: Math.min(...times),
+      tMax: Math.max(...times),
+      entityIdx: idx,
+    };
+  }, [data]);
+
+  if (!entities.length) {
+    return (
+      <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
+        No timeline data to display.
+      </div>
+    );
+  }
+
+  const labelW = 170;
+  const padTop = 30;
+  const padBottom = 26;
+  const rowH = Math.max(28, Math.floor((panelSize.height - padTop - padBottom) / entities.length));
+  const innerW = panelSize.width - labelW - 30;
+  const totalH = padTop + rowH * entities.length + padBottom;
+  const tRange = tMax - tMin || 1;
+
+  function xFor(ts) {
+    const t = new Date(ts).getTime();
+    if (isNaN(t)) return labelW;
+    return labelW + ((t - tMin) / tRange) * innerW;
+  }
+
+  // Time-axis tick labels
+  const tickCount = 5;
+  const ticks = Array.from({ length: tickCount + 1 }, (_, i) => {
+    const t = tMin + (tRange * i) / tickCount;
+    return { t, x: xFor(new Date(t).toISOString()) };
+  });
+
+  const [hoverTxn, setHoverTxn] = useState(null);
+
+  return (
+    <div className="absolute inset-0 overflow-auto">
+      <svg width={Math.max(panelSize.width, 800)} height={Math.max(totalH, panelSize.height)}>
+        {/* Entity rows */}
+        {entities.map((e, i) => {
+          const y = padTop + i * rowH + rowH / 2;
+          const isSel = selectedNodeId === e.id;
+          const fill = NODE_FILL[e.type] || '#9ca3af';
+          return (
+            <g key={e.id}>
+              <rect x={0} y={padTop + i * rowH} width={panelSize.width} height={rowH}
+                    fill={i % 2 === 0 ? '#fafafa' : 'white'} opacity={isSel ? 0.5 : 1} />
+              <rect x={2} y={padTop + i * rowH + 4} width={3} height={rowH - 8}
+                    fill={fill} rx={1.5} />
+              <text x={labelW - 10} y={y - 3} textAnchor="end"
+                    className="text-[11px] font-medium"
+                    fill={isSel ? '#1e1b4b' : '#1f2937'}
+                    fontWeight={isSel ? 700 : 500}
+                    style={{ cursor: 'pointer' }}
+                    onClick={() => onSelectNode(e.id)}>
+                {e.name.slice(0, 22)}
+              </text>
+              <text x={labelW - 10} y={y + 9} textAnchor="end"
+                    className="text-[9px]" fill="#9ca3af">
+                {e.txns} txn{e.txns > 1 ? 's' : ''}
+                {e.risk >= 0.4 && <tspan fill="#dc2626"> · risk {(e.risk * 100).toFixed(0)}</tspan>}
+              </text>
+              <line x1={labelW} x2={labelW + innerW} y1={y} y2={y}
+                    stroke="#e5e7eb" strokeDasharray="2,3" />
+            </g>
+          );
+        })}
+
+        {/* Time-axis ticks */}
+        {ticks.map((tk, i) => (
+          <g key={i}>
+            <line x1={tk.x} x2={tk.x} y1={padTop - 4} y2={padTop + entities.length * rowH}
+                  stroke="#f3f4f6" />
+            <text x={tk.x} y={padTop + entities.length * rowH + 16}
+                  textAnchor="middle" className="text-[9px]" fill="#9ca3af">
+              {new Date(tk.t).toISOString().slice(5, 16).replace('T', ' ')}
+            </text>
+          </g>
+        ))}
+
+        {/* Transactions: vertical arrows from sender row to receiver row */}
+        {txns.map((t, i) => {
+          const si = entityIdx.get(t.sender_id);
+          const ri = entityIdx.get(t.receiver_id);
+          if (si == null || ri == null) return null;
+          const x = xFor(t.timestamp);
+          const y1 = padTop + si * rowH + rowH / 2;
+          const y2 = padTop + ri * rowH + rowH / 2;
+          const isFraud = !!t.is_fraud;
+          const color = isFraud ? '#dc2626' : '#3b82f6';
+          const isHover = hoverTxn === i;
+          return (
+            <g key={i}
+               onMouseEnter={() => setHoverTxn(i)}
+               onMouseLeave={() => setHoverTxn(null)}
+               style={{ cursor: 'pointer' }}>
+              <line x1={x} x2={x} y1={y1} y2={y2}
+                    stroke={color} strokeWidth={isHover ? 2.5 : 1.2}
+                    opacity={isHover ? 1 : 0.7} />
+              <circle cx={x} cy={y1} r={isHover ? 4 : 2.5} fill={color}
+                      opacity={isHover ? 1 : 0.85} />
+              <polygon
+                points={`${x},${y2} ${x - 3.5},${y2 + (y2 > y1 ? -5 : 5)} ${x + 3.5},${y2 + (y2 > y1 ? -5 : 5)}`}
+                fill={color} opacity={isHover ? 1 : 0.85}
+              />
+            </g>
+          );
+        })}
+
+        {/* Tooltip */}
+        {hoverTxn != null && txns[hoverTxn] && (() => {
+          const t = txns[hoverTxn];
+          const x = Math.min(xFor(t.timestamp) + 8, panelSize.width - 220);
+          const y = padTop + 4;
+          return (
+            <g transform={`translate(${x}, ${y})`}>
+              <rect x={0} y={0} width={210} height={66} rx={6}
+                    fill="#111827" opacity={0.93} />
+              <text x={8} y={16} className="text-[10px]" fill="white" fontWeight={600}>
+                {formatINR(t.amount)}
+              </text>
+              <text x={8} y={30} className="text-[10px]" fill="#9ca3af">
+                {(t.sender_name || t.sender_id || '').slice(0, 24)} →
+              </text>
+              <text x={8} y={42} className="text-[10px]" fill="#9ca3af">
+                {(t.receiver_name || t.receiver_id || '').slice(0, 24)}
+              </text>
+              <text x={8} y={56} className="text-[10px]" fill="#9ca3af">
+                {(t.timestamp || '').slice(0, 16)} · {t.transaction_type || ''}
+                {t.is_fraud && <tspan fill="#fca5a5" fontWeight={600}> · FRAUD</tspan>}
+              </text>
+            </g>
+          );
+        })()}
+      </svg>
+    </div>
+  );
+}
+
 export default function Journey() {
   const [params, setParams] = useSearchParams();
   const navigate = useNavigate();
@@ -84,13 +554,36 @@ export default function Journey() {
   const [alertOptions, setAlertOptions] = useState([]);
   const [entityOptions, setEntityOptions] = useState([]);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
-  const [viewMode, setViewMode] = useState('auto'); // 'auto' | 'sankey' | 'force'
+  const [viewMode, setViewMode] = useState('flow'); // 'flow' | 'timeline'
   const [explanation, setExplanation] = useState(null);
   const [explainLoading, setExplainLoading] = useState(false);
 
-  const fgRef = useRef();
   const graphPanelRef = useRef(null);
-  const [panelSize, setPanelSize] = useState({ width: 800, height: 300 });
+  const graphContainerRef = useRef(null);   // the whole lower section, what goes fullscreen
+  const [panelSize, setPanelSize] = useState({ width: 800, height: 600 });
+  const [panelMode, setPanelMode] = useState('large');  // 'compact' | 'large' | 'fullscreen'
+  const [isFullscreen, setIsFullscreen] = useState(false);
+
+  // Sync the React state with the browser's actual fullscreen status
+  useEffect(() => {
+    const onFsChange = () => {
+      const fs = !!document.fullscreenElement;
+      setIsFullscreen(fs);
+      if (!fs && panelMode === 'fullscreen') setPanelMode('large');
+    };
+    document.addEventListener('fullscreenchange', onFsChange);
+    return () => document.removeEventListener('fullscreenchange', onFsChange);
+  }, [panelMode]);
+
+  function toggleFullscreen() {
+    const el = graphContainerRef.current;
+    if (!el) return;
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.();
+    } else {
+      el.requestFullscreen?.().then(() => setPanelMode('fullscreen')).catch(() => {});
+    }
+  }
 
   useEffect(() => {
     const el = graphPanelRef.current;
@@ -162,144 +655,6 @@ export default function Journey() {
   }, [mode, alertId]);
 
   // Decide effective view mode: force graph for cycles or dense traces,
-  // Sankey only for small linear/branching flows where columns are readable.
-  const effectiveView = useMemo(() => {
-    if (viewMode !== 'auto') return viewMode;
-    if (!data) return 'force';
-    const sides = new Set((data.nodes || []).map((n) => n.side));
-    const nodeCount = (data.nodes || []).length;
-    // Sankey only stays readable up to ~25 nodes. Beyond that, columns get
-    // crushed into vertical strips — force-directed is the right call.
-    if (nodeCount > 25) return 'force';
-    const hasMulti = sides.size > 1;
-    return hasMulti ? 'sankey' : 'force';
-  }, [data, viewMode]);
-
-  // Build graph data with positions:
-  //   - entity-mode trace: upstream/focus/downstream get layered columns
-  //   - alert-mode trace: let the force layout settle (cycles look better as ring)
-  //   - if there are neighbors, expand to 3 columns (alert + neighbor)
-  const graphData = useMemo(() => {
-    if (!data) return { nodes: [], links: [] };
-    const isAlertMode = data.direction === 'alert_scope';
-    const hasMultipleSides = new Set(data.nodes.map(n => n.side)).size > 1;
-
-    let nodes;
-    if (isAlertMode && !hasMultipleSides) {
-      // Pure alert chain — let force layout shape it
-      nodes = data.nodes.map(n => ({ ...n }));
-    } else {
-      const sideOrder = { upstream: 0, source: 0, focus: 1, alert: 1, loop: 1, neighbor: 2, downstream: 2 };
-      const groups = {};
-      for (const n of data.nodes) {
-        const col = sideOrder[n.side] ?? 1;
-        groups[col] = groups[col] || [];
-        groups[col].push(n);
-      }
-      nodes = [];
-      const colKeys = Object.keys(groups).map(Number);
-      const minCol = Math.min(...colKeys);
-      const maxCol = Math.max(...colKeys);
-      const colSpan = maxCol - minCol || 1;
-      const hSpread = panelSize.width * 0.82;
-      Object.keys(groups).forEach(col => {
-        const arr = groups[col];
-        const colX = ((Number(col) - minCol) / colSpan - 0.5) * hSpread;
-        arr.forEach((n, i) => {
-          const colY = (i - arr.length / 2) * 56;
-          nodes.push({ ...n, fx: colX, fy: colY });
-        });
-      });
-    }
-    const nodeIds = new Set(nodes.map(n => n.id));
-    const links = (data.links || []).filter(l => nodeIds.has(l.source) && nodeIds.has(l.target));
-    return { nodes, links };
-  }, [data, panelSize.width]);
-
-  // Fit force graph inside the lower panel when data or size changes
-  useEffect(() => {
-    if (effectiveView !== 'force' || !fgRef.current || !graphData.nodes.length) return;
-    const t = setTimeout(() => {
-      try {
-        fgRef.current.zoomToFit(400, 48);
-      } catch {
-        /* graph may not be mounted yet */
-      }
-    }, 150);
-    return () => clearTimeout(t);
-  }, [graphData, effectiveView, panelSize.width, panelSize.height]);
-
-  // Node paint
-  const paintNode = useCallback((node, ctx, globalScale) => {
-    const isFocus = node.side === 'focus' || node.side === 'alert';
-    const isShell = node.type === 'shell_company';
-    const r = isFocus ? 7 : 4.5;
-
-    ctx.beginPath();
-    ctx.arc(node.x, node.y, r, 0, 2 * Math.PI);
-    ctx.fillStyle = isShell ? '#ef4444' : NODE_FILL[node.type] || '#6b7280';
-    ctx.fill();
-
-    // outline
-    if (selectedNodeId === node.id) {
-      ctx.strokeStyle = '#0f172a';
-      ctx.lineWidth = 3 / globalScale;
-      ctx.stroke();
-    } else if (isFocus) {
-      ctx.strokeStyle = '#1e1b4b';
-      ctx.lineWidth = 2 / globalScale;
-      ctx.stroke();
-    } else if (isShell) {
-      ctx.strokeStyle = '#7f1d1d';
-      ctx.lineWidth = 1.5 / globalScale;
-      ctx.stroke();
-    } else {
-      ctx.strokeStyle = 'rgba(0,0,0,0.15)';
-      ctx.lineWidth = 0.5 / globalScale;
-      ctx.stroke();
-    }
-
-    const label = (node.name || node.id).slice(0, 18);
-    const fontSize = Math.max(9 / globalScale, 2);
-    ctx.font = `${fontSize}px ui-sans-serif`;
-    ctx.fillStyle = '#111827';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'top';
-    ctx.fillText(label, node.x, node.y + r + 2);
-  }, [selectedNodeId]);
-
-  // Link paint
-  const paintLink = useCallback((link, ctx, globalScale) => {
-    const isFraud = (link.flags || []).includes('contains_fraud_txn') || (link.fraud_count || 0) > 0;
-    const mlHigh = (link.ml_score ?? 0) >= 0.6;
-    const amount = link.amount || 1;
-    const width = Math.max(0.6, Math.min(6, Math.log10(amount + 1) * 0.6));
-
-    ctx.beginPath();
-    const sx = link.source.x ?? 0, sy = link.source.y ?? 0;
-    const tx = link.target.x ?? 0, ty = link.target.y ?? 0;
-    ctx.moveTo(sx, sy);
-    ctx.lineTo(tx, ty);
-    ctx.strokeStyle = isFraud ? '#dc2626' : mlHigh ? '#f59e0b' : '#cbd5e1';
-    ctx.lineWidth = width / globalScale;
-    ctx.stroke();
-
-    // arrow head
-    const angle = Math.atan2(ty - sy, tx - sx);
-    const headLen = 4 / globalScale;
-    const baseX = tx - Math.cos(angle) * 10;
-    const baseY = ty - Math.sin(angle) * 10;
-    ctx.beginPath();
-    ctx.moveTo(baseX, baseY);
-    ctx.lineTo(baseX - headLen * Math.cos(angle - Math.PI / 6),
-                baseY - headLen * Math.sin(angle - Math.PI / 6));
-    ctx.moveTo(baseX, baseY);
-    ctx.lineTo(baseX - headLen * Math.cos(angle + Math.PI / 6),
-                baseY - headLen * Math.sin(angle + Math.PI / 6));
-    ctx.strokeStyle = isFraud ? '#dc2626' : mlHigh ? '#f59e0b' : '#94a3b8';
-    ctx.stroke();
-  }, []);
-
   // Selected node + edges
   const selectedNode = data?.nodes?.find(n => n.id === selectedNodeId);
   const selectedEdges = data?.links?.filter(
@@ -410,19 +765,18 @@ export default function Journey() {
 
         {/* View mode toggle */}
         <div className="inline-flex rounded-lg border border-gray-300 p-0.5 ml-auto">
-          {['auto', 'sankey', 'force'].map((m) => (
+          {[
+            { k: 'flow',     label: 'Flow Story' },
+            { k: 'timeline', label: 'Timeline' },
+          ].map((m) => (
             <button
-              key={m}
-              onClick={() => setViewMode(m)}
-              className={`px-2.5 py-1 text-xs rounded-md transition-colors capitalize ${
-                effectiveView === m && viewMode !== 'auto'
-                  ? 'bg-indigo-600 text-white'
-                  : viewMode === 'auto' && m === 'auto'
-                  ? 'bg-indigo-600 text-white'
-                  : 'text-gray-600 hover:bg-gray-50'
+              key={m.k}
+              onClick={() => setViewMode(m.k)}
+              className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+                viewMode === m.k ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-50'
               }`}
             >
-              {m}
+              {m.label}
             </button>
           ))}
         </div>
@@ -762,20 +1116,83 @@ export default function Journey() {
         </div>
       )}
 
-      {/* Lower panel — graph + legend (part of page scroll) */}
-      <div className="border-t border-gray-200 bg-gray-50 flex flex-col h-[min(42vh,400px)] min-h-[280px] w-full max-w-full overflow-hidden">
+      {/* Lower panel — graph + legend.  Three sizing modes:
+            compact  ~360 px  (small but visible)
+            large    ~720 px  (default — fits most laptop screens)
+            fullscreen        (browser-native, takes the whole viewport)
+       */}
+      <div
+        ref={graphContainerRef}
+        className={`border-t border-gray-200 bg-gray-50 flex flex-col w-full max-w-full overflow-hidden ${
+          panelMode === 'fullscreen'
+            ? 'fixed inset-0 z-50 h-screen'
+            : panelMode === 'large'
+            ? 'h-[min(75vh,720px)] min-h-[420px]'
+            : 'h-[min(42vh,400px)] min-h-[280px]'
+        }`}
+      >
         <div className="shrink-0 px-4 py-2 border-b border-gray-200 bg-white flex flex-wrap items-center gap-x-4 gap-y-2 min-w-0">
           <h3 className="text-sm font-semibold text-gray-800 shrink-0">Fund Flow</h3>
           <GraphLegend />
           {data && (
-            <span className="text-xs text-gray-500 ml-auto shrink-0 capitalize">
-              View: {effectiveView}
+            <span className="text-xs text-gray-500 ml-2 shrink-0">
+              View: {viewMode === 'flow' ? 'Flow Story' : 'Timeline'}
             </span>
           )}
+          {/* Size controls — pushed to the right */}
+          <div className="ml-auto flex items-center gap-1.5 shrink-0">
+            <div className="inline-flex rounded-md border border-gray-300 overflow-hidden text-xs">
+              <button
+                onClick={() => setPanelMode('compact')}
+                disabled={panelMode === 'fullscreen'}
+                className={`px-2 py-1 transition-colors ${
+                  panelMode === 'compact' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-50 disabled:opacity-50'
+                }`}
+                title="Compact view"
+              >
+                Compact
+              </button>
+              <button
+                onClick={() => setPanelMode('large')}
+                disabled={panelMode === 'fullscreen'}
+                className={`px-2 py-1 border-l border-gray-300 transition-colors ${
+                  panelMode === 'large' ? 'bg-indigo-600 text-white' : 'text-gray-600 hover:bg-gray-50 disabled:opacity-50'
+                }`}
+                title="Large view"
+              >
+                Large
+              </button>
+            </div>
+            <button
+              onClick={toggleFullscreen}
+              className="px-2 py-1 text-xs border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50 inline-flex items-center gap-1"
+              title={isFullscreen ? 'Exit fullscreen (Esc)' : 'Fullscreen'}
+            >
+              {isFullscreen ? (
+                <>
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M9 9V5h4M5 9V5h4m6 10v4h-4m4-4h4m-4 4v-4m-10 0H5v4h4" />
+                  </svg>
+                  Exit
+                </>
+              ) : (
+                <>
+                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M4 8V4h4m8 0h4v4m0 8v4h-4M8 20H4v-4" />
+                  </svg>
+                  Fullscreen
+                </>
+              )}
+            </button>
+          </div>
         </div>
         <div
           ref={graphPanelRef}
-          className="flex-1 min-h-0 min-w-0 w-full relative overflow-hidden bg-gradient-to-b from-white to-gray-50"
+          className="flex-1 min-h-0 min-w-0 w-full relative bg-gradient-to-b from-white to-gray-50"
+          style={{
+            overflowX: 'hidden',
+            overflowY: 'hidden',
+          }}
         >
           {loading && (
             <div className="absolute inset-0 z-20 flex items-center justify-center text-gray-400">
@@ -792,42 +1209,22 @@ export default function Journey() {
               Pick an alert or entity above to trace the fund flow.
             </div>
           )}
-          {data && effectiveView === 'sankey' && (
-            <div className="absolute inset-0 min-h-0">
-              <Sankey
-                nodes={data.nodes}
-                links={data.links}
-                width={panelSize.width}
-                onNodeClick={(n) => setSelectedNodeId(n.id)}
-                onLinkClick={(l) => {
-                  const sId = typeof l.source === 'object' ? l.source.id : l.source;
-                  setSelectedNodeId(sId);
-                }}
-              />
-            </div>
+          {data && viewMode === 'flow' && (
+            <FlowStoryView
+              data={data}
+              focusId={data.entity?.id}
+              panelSize={panelSize}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+            />
           )}
-          {data && effectiveView === 'force' && (
-            <div className="absolute inset-0">
-              <ForceGraph2D
-                ref={fgRef}
-                graphData={graphData}
-                nodeCanvasObject={paintNode}
-                nodeCanvasObjectMode={() => 'replace'}
-                linkCanvasObject={paintLink}
-                linkCanvasObjectMode={() => 'replace'}
-                onNodeClick={n => setSelectedNodeId(n.id)}
-                onLinkClick={l => {
-                  const sId = typeof l.source === 'object' ? l.source.id : l.source;
-                  setSelectedNodeId(sId);
-                }}
-                cooldownTicks={50}
-                d3VelocityDecay={0.5}
-                enableNodeDrag={false}
-                enableZoomInteraction={true}
-                enablePanInteraction={true}
-                backgroundColor="#fafafa"
-              />
-            </div>
+          {data && viewMode === 'timeline' && (
+            <TimelineView
+              data={data}
+              panelSize={panelSize}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+            />
           )}
         </div>
       </div>
