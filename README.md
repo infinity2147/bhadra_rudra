@@ -4,7 +4,7 @@
 > Built for **PSBs Hackathon Series 2026** — Problem Statement 3 (Fund Flow Tracking).
 > By **Team Bhadra**.
 
-[![tests](https://img.shields.io/badge/tests-66%20passing-brightgreen)](#tests) [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](#setup) [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
+[![tests](https://img.shields.io/badge/tests-43%20passing-brightgreen)](#tests) [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](#setup) [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
 ---
 
@@ -22,17 +22,17 @@ Indian PSBs detect fraud the day after it happens. By then, layered funds have a
 
 **Detection latency: ~1 s end-to-end · sub-ms per-transaction ML scoring.**
 
-Demo: `docker compose up` → http://localhost:5173
+> ⚠️ **Trained models, graph artefacts, and SAR PDFs are not committed to the repo** (license + size). First-time setup downloads one CSV from Kaggle and runs `python src/run_pipeline.py` once (~10–15 min). After that, `docker compose up` or local dev both light up the full stack.
 
 ---
 
 ## Table of contents
 
-1. [What you'll see](#what-youll-see)
-2. [Why this matters](#why-this-matters)
-3. [Architecture](#architecture)
-4. [Setup](#setup)
-5. [Running RUDRA](#run)
+1. [Setup](#setup)
+2. [Running RUDRA](#run)
+3. [What you'll see](#what-youll-see)
+4. [Why this matters](#why-this-matters)
+5. [Architecture](#architecture)
 6. [The 14 pages](#pages)
 7. [API surface](#api)
 8. [ML stack on IBM AML 100k](#ml-stack)
@@ -45,8 +45,144 @@ Demo: `docker compose up` → http://localhost:5173
 
 ---
 
+<a id="setup"></a>
+## 1. Setup
+
+### 1.1 Prerequisites
+
+| | Version |
+|---|---|
+| Python | 3.10+ |
+| Node | 20+ |
+| Docker + Docker Compose | 24+ (only if you want the Docker path) |
+| Disk | ~1.5 GB free (raw IBM AML CSV is 475 MB; trained models + SAR PDFs add ~500 MB) |
+| Time | ~15 min on first pipeline run (graph build + detectors + XGB + GraphSAGE + ensemble + SAR generation) |
+
+### 1.2 Clone and install Python deps
+
+```bash
+git clone https://github.com/infinity2147/bhadra_rudra.git
+cd bhadra_rudra
+pip install -r requirements.txt
+```
+
+### 1.3 Download the IBM AML benchmark (required)
+
+The repo does **not** ship the dataset. RUDRA uses a stratified 100k sample of HI-Small for honest, production-grade ML metrics — you have to fetch it once.
+
+1. Create your Kaggle account if you don't have one.
+2. Download `HI-Small_Trans.csv` from [Kaggle — IBM Transactions for AML](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml) (475 MB).
+3. Drop it at:
+
+```
+data/real/ibm_aml/HI-Small_Trans.csv
+```
+
+```bash
+mkdir -p data/real/ibm_aml
+# Then move/copy your downloaded file into that folder.
+```
+
+### 1.4 Run the pipeline (once)
+
+```bash
+python src/run_pipeline.py --dataset ibm_aml
+```
+
+This is the slow step. On first run it:
+
+1. Loads `HI-Small_Trans.csv`, takes a stratified 100k sample, caches it as `HI-Small_Trans_100k_sampled.csv` so future runs skip resampling.
+2. Builds the fund-flow graph (118k nodes / 87k edges).
+3. Runs all 6 detectors → ~7,700 alerts.
+4. Clusters alerts into ~7,000 incidents.
+5. Trains XGBoost edge classifier → `data/ml/ibm_aml/model.pkl`.
+6. Trains GraphSAGE GNN → `data/ml/ibm_aml/gnn/`.
+7. Trains the stacked ensemble (3-fold OOF: XGB + SAGE + GAT + LR meta) → `data/ml/ibm_aml/ensemble/`.
+8. Writes ~5,100 SAR PDFs for HIGH+ alerts → `data/ibm_aml/sar_reports/`.
+
+Re-running is idempotent and **skips GNN + ensemble re-training** when their metrics files already exist. Pass `--force-retrain-ml` to redo them.
+
+### 1.5 Optional — credentials for real integrations
+
+Every external integration falls back to a schema-accurate mock when its key is absent. Drop any of these in your shell (or in `.env` for Docker) to flip them to real mode:
+
+```bash
+export GEMINI_API_KEY="..."           # Gemini 2.0 Flash copilot (Google's free tier works)
+export SAHAMATI_CLIENT_ID="..."       # Sahamati AA sandbox
+export SAHAMATI_CLIENT_SECRET="..."
+export SAHAMATI_FIU_ID="..."
+export DILISENSE_API_KEY="..."        # KYC / sanctions screening
+```
+
+`GET /api/integrations/status` reports which providers are live vs mocked.
+
+### 1.6 Optional — PaySim secondary benchmark
+
+```bash
+mkdir -p data/real/paysim
+# Download paysim.csv from https://www.kaggle.com/datasets/ealtman2019/paysim1
+# Place it under data/real/paysim/
+python src/run_pipeline.py --dataset paysim
+```
+
+Then `RUDRA_DATASET=paysim` switches the entire stack onto it.
+
+---
+
+<a id="run"></a>
+## 2. Running RUDRA
+
+### Option A — Local dev (most common for evaluators)
+
+Two terminals:
+
+```bash
+# Terminal 1 — backend on :8000
+cd backend && RUDRA_DATASET=ibm_aml uvicorn main:app --reload --port 8000
+```
+
+```bash
+# Terminal 2 — frontend on :5173 (proxies /api → :8000)
+cd frontend && npm install && npm run dev
+```
+
+Open **http://localhost:5173**.
+
+The backend **fails loud** if `data/ibm_aml/` is missing — it does *not* silently fall back to fake data. If you see a startup error pointing at `data/ibm_aml/transactions.csv`, you skipped step 1.4.
+
+### Option B — Docker (after the pipeline has been run)
+
+```bash
+docker compose up
+```
+
+| Service | URL |
+|---|---|
+| Frontend | http://localhost:5173 |
+| Backend  | http://localhost:8000 |
+| Kafka    | `kafka:9092` (inside the network) / `localhost:29092` (from the host) |
+
+The Dockerfile attempts a one-time pipeline run during image build, but it will skip cleanly if the Kaggle CSV isn't present in the build context. To regenerate inside the container after starting up:
+
+```bash
+docker compose exec backend python src/run_pipeline.py --dataset ibm_aml
+```
+
+### Option C — Stream the benchmark over Kafka
+
+```bash
+docker compose up
+
+# Replay IBM AML onto the topic at 20 events/sec
+docker compose exec backend python -m streaming.kafka_producer --rate 20 --total 1000
+```
+
+Open the **Live Stream** page to watch events flow through the consumer → ML scoring → ring buffer.
+
+---
+
 <a id="what-youll-see"></a>
-## 1. What you'll see
+## 3. What you'll see
 
 An investigator opens RUDRA in the morning with a queue of fraud alerts from the overnight ingest. Within minutes:
 
@@ -63,7 +199,7 @@ Total time saved vs the old T+1 + manual STR drafting workflow: roughly **a day 
 ---
 
 <a id="why-this-matters"></a>
-## 2. Why this matters
+## 4. Why this matters
 
 The RBI's 2023 Framework for Real-time Fraud Risk Monitoring (FRM) mandates sub-second fraud detection. Most PSBs still run nightly batch jobs — by which time the layered funds are gone.
 
@@ -78,7 +214,7 @@ Plus the foundations PS3 explicitly asks for: graph visualisation of fund flows,
 ---
 
 <a id="architecture"></a>
-## 3. Architecture
+## 5. Architecture
 
 ```
 ┌──────────────────────────────────────────────────────────────────────┐
@@ -119,12 +255,12 @@ Plus the foundations PS3 explicitly asks for: graph visualisation of fund flows,
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Data layout
+### Data layout (after the pipeline has run)
 
 ```
 data/
 ├── real/                          # Raw downloaded datasets (you bring these)
-│   ├── ibm_aml/HI-Small_Trans.csv          # full IBM AML
+│   ├── ibm_aml/HI-Small_Trans.csv          # full IBM AML  ← step 1.3
 │   ├── ibm_aml/HI-Small_Trans_100k_sampled.csv  # cached stratified sample
 │   ├── paysim/*.csv                         # optional, secondary benchmark
 │   └── ieee_cis/*.csv                       # optional, tabular baseline
@@ -146,132 +282,7 @@ data/
         └── ensemble/                        # XGB + SAGE + GAT base models + LR meta
 ```
 
-Switch datasets by exporting `RUDRA_DATASET=paysim` (after dropping PaySim CSV under `data/real/paysim/` and running `python src/run_pipeline.py --dataset paysim`).
-
----
-
-<a id="setup"></a>
-## 4. Setup
-
-### 4.1 Prerequisites
-
-| | Version |
-|---|---|
-| Python | 3.10+ |
-| Node | 20+ |
-| Docker + Docker Compose | 24+ |
-| Disk | ~2 GB (raw IBM AML is 475 MB) |
-
-### 4.2 Clone and install Python deps
-
-```bash
-git clone https://github.com/infinity2147/bhadra_rudra.git
-cd bhadra_rudra
-pip install -r requirements.txt
-```
-
-### 4.3 Download the IBM AML benchmark
-
-This is the **only required dataset**. RUDRA uses a stratified 100k sample of HI-Small for production-grade ML metrics.
-
-```bash
-mkdir -p data/real/ibm_aml
-```
-
-Download `HI-Small_Trans.csv` (475 MB) from [Kaggle — IBM Transactions for AML](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml) and place it at:
-
-```
-data/real/ibm_aml/HI-Small_Trans.csv
-```
-
-The pipeline will produce a stratified 100k sample on first run and cache it as `HI-Small_Trans_100k_sampled.csv` so subsequent runs don't re-stratify the full 30M rows.
-
-### 4.4 (Optional) PaySim secondary benchmark
-
-```bash
-mkdir -p data/real/paysim
-# Download paysim.csv from https://www.kaggle.com/datasets/ealtman2019/paysim1
-# Place under data/real/paysim/
-```
-
-### 4.5 (Optional) API credentials for real integrations
-
-Export any of these — adapters flip to real mode without a code change. Missing → schema-accurate mock fallback.
-
-```bash
-export GEMINI_API_KEY="..."           # LLM copilot (free tier works)
-export SAHAMATI_CLIENT_ID="..."       # Account Aggregator sandbox
-export SAHAMATI_CLIENT_SECRET="..."
-export SAHAMATI_FIU_ID="..."
-export DILISENSE_API_KEY="..."        # KYC / sanctions screening
-```
-
-`GET /api/integrations/status` reports which providers are live vs mocked.
-
----
-
-<a id="run"></a>
-## 5. Running RUDRA
-
-### Option A — Docker (recommended for evaluators)
-
-One command brings up backend + frontend + Kafka:
-
-```bash
-docker compose up
-```
-
-| Service | URL |
-|---|---|
-| Frontend | http://localhost:5173 |
-| Backend  | http://localhost:8000 |
-| Kafka    | `kafka:9092` (internal) / `localhost:29092` (host) |
-
-The first start expects `data/ibm_aml/` to already be populated. To regenerate inside the container:
-
-```bash
-docker compose exec backend python src/run_pipeline.py --dataset ibm_aml
-```
-
-### Option B — Local dev
-
-```bash
-# 1. Generate IBM AML data + train all models + write SAR PDFs
-python src/run_pipeline.py --dataset ibm_aml
-# (~15 min on first run; re-runs skip GNN/ensemble re-training if metrics exist.
-#  Pass --force-retrain-ml to force a fresh ML run.)
-
-# 2. Start the backend (port 8000)
-cd backend && RUDRA_DATASET=ibm_aml uvicorn main:app --reload --port 8000
-
-# 3. In another terminal — start the frontend (port 5173)
-cd frontend && npm install && npm run dev
-
-# 4. Open http://localhost:5173
-```
-
-The backend **fails loud** if `data/ibm_aml/` is missing — it does not silently fall back to fake data. Run step 1 first.
-
-### Option C — Stream the benchmark over Kafka
-
-```bash
-docker compose up        # starts backend, frontend, Kafka
-
-# In another terminal — replay IBM AML onto the topic
-docker compose exec backend python -m streaming.kafka_producer --rate 20 --total 1000
-```
-
-Open the **Live Stream** page to watch events flow through the consumer → ML scoring → ring buffer.
-
-### After `--dataset paysim`
-
-After regenerating data for PaySim:
-
-```bash
-RUDRA_DATASET=paysim cd backend && uvicorn main:app --reload --port 8000
-```
-
-The backend, all detectors, ML metrics, SAR generation, FIU packaging — everything follows `RUDRA_DATASET`.
+Everything except `data/real/*/README.md` is git-ignored. The pipeline rebuilds the whole tree deterministically (seed=42).
 
 ---
 
@@ -284,13 +295,13 @@ The backend, all detectors, ML metrics, SAR generation, FIU packaging — everyt
 | `/incidents` Incidents | Alerts clustered by entity overlap |
 | `/cases` Case Workbench | Triage queue, SHAP per alert, hash-verified audit log, role-gated actions |
 | `/journey` Fund Journey | Sankey for small flows / force-graph for large; red-flag annotation, timeline below |
-| `/graph` Network Graph | Top-N by risk with filters: fraud-only, high-risk-only, min-amount, custom limit |
+| `/graph` Network Graph | Top-N by risk with filters (fraud-only, high-risk-only, min-amount, custom limit) and three layouts (Matrix / Arc / Force) |
 | `/analytics` Channel/Branch | Volume + fraud-rate by channel, rail, hour, branch, product |
 | `/patterns` Pattern Library | Per-pattern alert list + raw transactions |
 | `/entities` Entity Explorer | Search entities, view risk score, transaction history |
 | `/model` ML Models | XGBoost + GraphSAGE + ensemble metrics (F1/AUC/precision/recall/CM/feature-importance) |
 | `/live` Live Stream | Per-txn ML scoring with mean+p95 latency tile; start/stop |
-| `/copilot` AI Copilot | Natural-language investigation; Gemini-powered with tool calling |
+| `/copilot` AI Copilot | Natural-language investigation; Gemini-powered with tool calling (falls back to quick-commands if no key) |
 | `/sar` SAR Reports | Generate the formal SAR text per alert |
 | `/settings` Detector Settings | Threshold sliders per detector (ADMIN only), re-run detection on save |
 | `/aa` Account Aggregator | AA consent issue/pull/revoke + DiliSense KYC screening |
@@ -318,7 +329,7 @@ Every endpoint accepts an optional `X-User-Role` header for RBAC.
 - `GET  /api/cases/{id}/verify` — verify the hash chain (Supervisor+)
 
 ### Graph + journey
-- `GET  /api/graph?fraud_only=&high_risk_only=&min_amount=&limit=` — capped by default to top-N by risk so the response stays usable on 100k+ node graphs. `limit=0` removes the cap. Response includes `total_nodes` / `showing_nodes` so the UI can show a counter.
+- `GET  /api/graph?fraud_only=&high_risk_only=&min_amount=&limit=` — capped to top-N by risk by default so the response stays usable on 100k+ node graphs. `limit=0` removes the cap. Response includes `total_nodes` / `showing_nodes`.
 - `GET  /api/graph/{entity}?hops=N` — entity subgraph
 - `GET  /api/journey/{entity}?direction=&hops=&min_amount=` — forward/backward fund journey
 - `GET  /api/journey/alert/{id}?include_neighbors=` — journey scoped to an alert
@@ -434,12 +445,12 @@ In production this is replaced by the bank's IDP. The current implementation is 
 
 ```bash
 python -m pytest tests/ -v
-# → 66 passed
+# → 43 passed
 ```
 
-66 tests cover: every detector, ML feature matrix, train/save/load cycle, predict_one, case state machine, hash-chain integrity, hash-chain tampering detection, journey tracer, FIU package contents, STR XML well-formedness, incident clustering, RBAC permission matrix, AA consent flow, DiliSense determinism, live scoring, latency benchmark, config store.
+The tests are **hermetic** — they use a small in-memory synthetic graph (`src/data_generator.py` → `TransactionGenerator`), so they run without the IBM AML download.
 
-Tests use a small in-memory synthetic dataset (`src/data_generator.py`) so they're hermetic and don't depend on the IBM AML download.
+Coverage includes: every detector, ML feature matrix, train/save/load cycle, predict_one, case state machine, hash-chain integrity, hash-chain tampering detection, journey tracer, FIU package contents, STR XML well-formedness, incident clustering, RBAC permission matrix, AA consent flow, DiliSense determinism, live scoring, latency benchmark, config store.
 
 ---
 
