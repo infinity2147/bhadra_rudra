@@ -307,22 +307,6 @@ def _alerts_with_case_status() -> List[Dict]:
     return out
 
 
-def _filter_by_time_window(df: pd.DataFrame, until: Optional[str]) -> pd.DataFrame:
-    """Time-travel slicing — return txns up to `until` (inclusive).
-
-    Raises HTTPException(400) on an unparseable `until` rather than silently
-    returning the full DataFrame — the caller deserves to know their query
-    parameter was rejected.
-    """
-    if not until:
-        return df
-    try:
-        cutoff = pd.to_datetime(until)
-    except Exception as e:
-        raise HTTPException(400, f"Invalid 'until' timestamp: {until!r} ({e})")
-    return df[df["timestamp"] <= cutoff]
-
-
 # ── Health ──────────────────────────────────────────────────────────────────
 
 @app.get("/")
@@ -350,8 +334,8 @@ def me(role: str = Depends(get_role)):
 # ── Dashboard ──────────────────────────────────────────────────────────────
 
 @app.get("/api/dashboard")
-def get_dashboard(until: Optional[str] = None):
-    df = _filter_by_time_window(state["transactions"], until)
+def get_dashboard():
+    df = state["transactions"]
     alerts = state["alerts"]
     summary = state["summary"]
 
@@ -400,12 +384,6 @@ def get_dashboard(until: Optional[str] = None):
             "fraud_count": int(sub["is_fraud"].sum()),
         })
 
-    time_window = {
-        "start": df["timestamp"].min().isoformat() if len(df) else None,
-        "end": df["timestamp"].max().isoformat() if len(df) else None,
-        "applied_until": until,
-    }
-
     # New AML signals — pre-computed at startup, just look up the counts
     burst_counts = state.get("_burst_counts") or {}
     transit_ratios = state.get("_transit_ratios") or {}
@@ -433,7 +411,6 @@ def get_dashboard(until: Optional[str] = None):
         "risk_distribution": risk_dist,
         "case_status_counts": case_status_counts,
         "amount_distribution": amount_distribution,
-        "time_window": time_window,
     }
 
 

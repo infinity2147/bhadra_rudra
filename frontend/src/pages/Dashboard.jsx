@@ -23,46 +23,22 @@ function formatCr(value) {
   return `₹${cr.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Cr`;
 }
 
-function isoFromInput(s) {
-  if (!s) return '';
-  return s.replace('T', ' ') + ':00';
-}
-
-function inputFromIso(s) {
-  if (!s) return '';
-  return s.slice(0, 16); // 'YYYY-MM-DDTHH:MM'
-}
-
 export default function Dashboard() {
   const navigate = useNavigate();
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [until, setUntil] = useState('');         // '' = no time travel
   const [bench, setBench] = useState(null);
 
-  const load = (untilParam) => {
+  const load = () => {
     setLoading(true);
-    const qs = untilParam ? `?until=${encodeURIComponent(untilParam)}` : '';
-    fetchAPI(`/api/dashboard${qs}`)
+    fetchAPI('/api/dashboard')
       .then(setData)
       .catch((err) => setError(err.message))
       .finally(() => setLoading(false));
   };
 
   useEffect(() => { load(); }, []);
-
-  // Once we know the window, set the slider to the end as default
-  useEffect(() => {
-    if (data?.time_window?.end && !until) {
-      // leave 'until' empty so default fetch shows everything
-    }
-  }, [data, until]);
-
-  function onTimeTravel(value) {
-    setUntil(value);
-    load(value ? isoFromInput(value) : null);
-  }
 
   async function runBenchmark() {
     setBench({ loading: true });
@@ -80,17 +56,13 @@ export default function Dashboard() {
   if (error) return <div className="flex items-center justify-center h-full text-red-600">Error: {error}</div>;
   if (!data) return null;
 
-  const { kpis, pattern_breakdown, risk_distribution, case_status_counts, amount_distribution, time_window } = data;
+  const { kpis, pattern_breakdown, risk_distribution, case_status_counts, amount_distribution } = data;
   const risk_data = Object.entries(risk_distribution || {}).map(([level, count]) => ({ level, count }));
   const case_data = Object.entries(case_status_counts || {}).map(([status, count]) => ({ status, count }));
   const pattern_data = (pattern_breakdown || []).map(p => ({
     ...p,
     pattern: (p.fraud_pattern || '').replace(/_/g, ' '),
   }));
-
-  // Time-travel slider derives min/max from the full window
-  const windowStart = time_window?.start || '';
-  const windowEnd = time_window?.end || '';
 
   return (
     <div className="p-6 space-y-6 max-w-[1600px] mx-auto">
@@ -100,62 +72,6 @@ export default function Dashboard() {
           {kpis.total_transactions.toLocaleString('en-IN')} transactions monitored across {Object.keys(risk_distribution || {}).length}
           {' '}risk tiers and {kpis.incidents} clustered incidents. Click any card to drill in.
         </p>
-      </div>
-
-      {/* Time-travel slider */}
-      <div className="bg-white rounded-xl border border-gray-200 p-4">
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div>
-            <p className="text-sm font-semibold text-gray-800">Time travel</p>
-            <p className="text-xs text-gray-500">
-              Replay the dataset up to any point — KPIs and charts recompute on the sliced data.
-            </p>
-          </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="datetime-local"
-              value={until || (windowEnd ? inputFromIso(windowEnd) : '')}
-              min={windowStart ? inputFromIso(windowStart) : undefined}
-              max={windowEnd ? inputFromIso(windowEnd) : undefined}
-              onChange={(e) => onTimeTravel(e.target.value)}
-              className="px-2 py-1.5 border border-gray-300 rounded text-sm"
-            />
-            {until && (
-              <button
-                onClick={() => onTimeTravel('')}
-                className="text-xs text-indigo-600 hover:text-indigo-800"
-              >
-                Reset
-              </button>
-            )}
-          </div>
-        </div>
-        <input
-          type="range"
-          min={0}
-          max={100}
-          value={until && windowStart && windowEnd ? (() => {
-            const lo = new Date(windowStart).getTime();
-            const hi = new Date(windowEnd).getTime();
-            const cur = new Date(isoFromInput(until)).getTime();
-            return Math.round(((cur - lo) / (hi - lo)) * 100);
-          })() : 100}
-          onChange={(e) => {
-            if (!windowStart || !windowEnd) return;
-            const lo = new Date(windowStart).getTime();
-            const hi = new Date(windowEnd).getTime();
-            const pct = Number(e.target.value) / 100;
-            const ms = lo + pct * (hi - lo);
-            const iso = new Date(ms).toISOString().slice(0, 16);
-            onTimeTravel(iso);
-          }}
-          className="w-full mt-3"
-        />
-        <div className="mt-1 flex items-center justify-between text-[10px] text-gray-400 font-mono">
-          <span>{windowStart?.slice(0, 10) || '—'}</span>
-          <span>{until || windowEnd?.slice(0, 16) || '—'}</span>
-          <span>{windowEnd?.slice(0, 10) || '—'}</span>
-        </div>
       </div>
 
       {/* Primary KPIs */}
