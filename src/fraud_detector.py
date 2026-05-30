@@ -74,6 +74,7 @@ class FraudDetector:
         Strongly-connected-component decomposition is what keeps this tractable
         on dense graphs — without it Johnson's would explode.
         """
+        import time as _time
         alerts = []
         seen_cycles = set()
 
@@ -87,12 +88,24 @@ class FraudDetector:
         # signal-aware pruning that matches the structure of the fraud we
         # actually want to detect.
         max_cycles_per_bucket = 5_000
+        # Cap SCC size + wall-clock per SCC. On IBM AML the bank-to-bank
+        # graph has one giant SCC of 50k+ nodes with 10^9+ simple cycles —
+        # AML rings are tight clusters of 3-20 shell accounts, not the
+        # whole interbank topology. Skipping the giant SCC matches the
+        # structure of the fraud and keeps the pipeline tractable.
+        scc_size_cap = self._cfg("circular_scc_size_cap", 200)
+        scc_time_budget = float(self._cfg("circular_scc_time_budget_s", 8.0))
+        scc_skipped = 0
 
         for scc in nx.strongly_connected_components(self.graph):
             if len(alerts) >= max_alerts:
                 break
             if len(scc) < 3:
                 continue
+            if len(scc) > scc_size_cap:
+                scc_skipped += 1
+                continue
+            scc_start = _time.perf_counter()
             sub = self.graph.subgraph(scc)
 
             # Group edges by log-amount bucket (0.2 = ±20% in log10 space).
@@ -127,6 +140,10 @@ class FraudDetector:
                 for cycle in cycles_iter:
                     examined += 1
                     if examined >= max_cycles_per_bucket or len(alerts) >= max_alerts:
+                        break
+                    # Per-SCC wall-clock budget so a single degenerate SCC
+                    # can't lock the pipeline forever.
+                    if _time.perf_counter() - scc_start > scc_time_budget:
                         break
                     if len(cycle) < 3:
                         continue
@@ -708,8 +725,17 @@ class FraudDetector:
                         and pd.to_datetime(d["last_seen"]) >= cutoff
                     ]
                     target = self.graph.edge_subgraph(keep_edges).copy()
+            # Exact betweenness is O(VE) — on 100k+ node graphs (IBM AML)
+            # that's multi-hour. Monte Carlo with k pivots (BFS, unweighted)
+            # gives a usable ranking in seconds at any scale. Variance scales
+            # as O(1/sqrt(k)); k=500 is plenty for risk ordering.
+            n_nodes = target.number_of_nodes()
+            sample_k = self._cfg("centrality_sample_k", 500)
             try:
-                betweenness = nx.betweenness_centrality(target, weight="total_amount")
+                if n_nodes > 2_000 and sample_k and sample_k < n_nodes:
+                    betweenness = nx.betweenness_centrality(target, k=sample_k, seed=42)
+                else:
+                    betweenness = nx.betweenness_centrality(target, weight="total_amount")
             except Exception:
                 betweenness = {n: 0 for n in self.graph.nodes()}
             try:

@@ -39,10 +39,12 @@ from prev_hash + canonical_entry_json, compare. Mismatch = tampering.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime
 from typing import Dict, List, Optional
 
@@ -53,6 +55,22 @@ VALID_STATUSES = {"OPEN", "INVESTIGATING", "SAR_FILED", "DISMISSED", "ESCALATED"
 _HASH_FIELDS = ("alert_id", "timestamp", "author", "action", "from_status", "to_status", "note")
 
 GENESIS_HASH = "GENESIS"
+
+
+def _synchronized(method):
+    """Serialize access to the SQLite connection across FastAPI worker threads.
+
+    sqlite3 with check_same_thread=False permits sharing a connection across
+    threads but explicitly requires the caller to serialize — two concurrent
+    cursors on one connection scramble each other's row descriptions
+    (we saw `IndexError: tuple index out of range` on Row column access).
+    RLock so internal calls between methods don't self-deadlock.
+    """
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._lock:
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 def _canonical_entry(row: Dict) -> str:
@@ -81,13 +99,16 @@ class CaseStore:
     def __init__(self, data_dir: str):
         self.path = os.path.join(data_dir, "rudra.db")
         os.makedirs(data_dir, exist_ok=True)
-        # check_same_thread=False because FastAPI handlers may run on different threads
+        # check_same_thread=False because FastAPI handlers may run on different threads;
+        # the @_synchronized decorator serializes actual access (see module top).
         self.conn = sqlite3.connect(self.path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        self._lock = threading.RLock()
         self._init_schema()
         self._maybe_migrate_from_json(data_dir)
 
     # ── Schema ──────────────────────────────────────────────────
+    @_synchronized
     def _init_schema(self) -> None:
         c = self.conn.cursor()
         c.executescript("""
@@ -121,6 +142,7 @@ class CaseStore:
         """)
         self.conn.commit()
 
+    @_synchronized
     def _maybe_migrate_from_json(self, data_dir: str) -> None:
         """One-time migration: import old cases.json if present and table is empty."""
         json_path = os.path.join(data_dir, "cases.json")
@@ -145,6 +167,7 @@ class CaseStore:
             self.conn.rollback()
 
     # ── Internal helpers ────────────────────────────────────────
+    @_synchronized
     def _upsert_case(self, case: Dict) -> None:
         c = self.conn.cursor()
         c.execute("""
@@ -174,6 +197,7 @@ class CaseStore:
             case.get("incident_id"),
         ))
 
+    @_synchronized
     def _raw_insert_audit(self, entry: Dict, alert_id: str) -> str:
         """Insert an audit entry computing its hash from the case's previous one."""
         c = self.conn.cursor()
@@ -210,6 +234,7 @@ class CaseStore:
         ))
         return this_hash
 
+    @_synchronized
     def _audit_rows(self, alert_id: str) -> List[Dict]:
         c = self.conn.cursor()
         c.execute("SELECT * FROM audit_log WHERE alert_id = ? ORDER BY id", (alert_id,))
@@ -231,12 +256,14 @@ class CaseStore:
         }
 
     # ── Public API ──────────────────────────────────────────────
+    @_synchronized
     def get(self, alert_id: str) -> Optional[Dict]:
         c = self.conn.cursor()
         c.execute("SELECT * FROM cases WHERE alert_id = ?", (alert_id,))
         row = c.fetchone()
         return self._row_to_case(row) if row else None
 
+    @_synchronized
     def list(self, status: Optional[str] = None) -> List[Dict]:
         c = self.conn.cursor()
         if status:
@@ -245,6 +272,7 @@ class CaseStore:
             c.execute("SELECT * FROM cases ORDER BY updated_at DESC")
         return [self._row_to_case(r) for r in c.fetchall()]
 
+    @_synchronized
     def status_counts(self, all_alerts: List[Dict]) -> Dict[str, int]:
         c = self.conn.cursor()
         c.execute("SELECT status, COUNT(*) as cnt FROM cases GROUP BY status")
@@ -262,6 +290,7 @@ class CaseStore:
                 counts["OPEN"] += 1
         return counts
 
+    @_synchronized
     def open_case(self, alert: Dict) -> Dict:
         aid = alert.get("alert_id")
         if not aid:
@@ -294,6 +323,7 @@ class CaseStore:
         self.conn.commit()
         return self.get(aid)
 
+    @_synchronized
     def dispose(
         self,
         alert_id: str,
@@ -327,6 +357,7 @@ class CaseStore:
         self.conn.commit()
         return self.get(alert_id)
 
+    @_synchronized
     def add_note(self, alert_id: str, note: str, author: str = "investigator") -> Dict:
         case = self.get(alert_id)
         if not case:
@@ -345,11 +376,13 @@ class CaseStore:
         self.conn.commit()
         return self.get(alert_id)
 
+    @_synchronized
     def set_incident(self, alert_id: str, incident_id: Optional[str]) -> None:
         c = self.conn.cursor()
         c.execute("UPDATE cases SET incident_id = ? WHERE alert_id = ?", (incident_id, alert_id))
         self.conn.commit()
 
+    @_synchronized
     def bulk_open_all(self, alerts: List[Dict]) -> int:
         opened = 0
         for a in alerts:
@@ -362,6 +395,7 @@ class CaseStore:
         return opened
 
     # ── Hash-chain verification ─────────────────────────────────
+    @_synchronized
     def verify_chain(self, alert_id: str) -> Dict:
         """Recompute every hash in the chain and report tamper status."""
         rows = self._audit_rows(alert_id)
@@ -395,6 +429,7 @@ class CaseStore:
                 "head_hash": prev_hash}
 
     # ── Test helper: simulate tampering (only used by tests) ────
+    @_synchronized
     def _test_tamper(self, alert_id: str) -> None:  # pragma: no cover
         c = self.conn.cursor()
         c.execute("UPDATE audit_log SET note = 'TAMPERED' WHERE alert_id = ? AND id = "

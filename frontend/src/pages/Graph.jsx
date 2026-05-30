@@ -39,7 +39,14 @@ function normalize(data) {
       val: Math.min(6, 1.5 + Math.sqrt(degree) * 0.6),
     };
   });
-  return { nodes, links };
+  return {
+    nodes, links,
+    totalNodes: data.total_nodes ?? nodes.length,
+    totalEdges: data.total_edges ?? links.length,
+    showingNodes: data.showing_nodes ?? nodes.length,
+    showingEdges: data.showing_edges ?? links.length,
+    appliedLimit: data.applied_limit ?? 0,
+  };
 }
 
 // Map an amount to a hue/lightness for the heatmap palette.
@@ -629,6 +636,9 @@ export default function Graph() {
   const [highRiskOnly, setHighRiskOnly] = useState(false);
   const [minAmount, setMinAmount] = useState(0);
   const [topEdgePct, setTopEdgePct] = useState(100);   // % of strongest edges to keep
+  // Server-side cap — IBM AML has 100k+ entities, so the first paint must be
+  // bounded. limit=0 lets the backend return everything.
+  const [limit, setLimit] = useState(200);
 
   // Scope + layout
   const [view, setView] = useState('full');           // 'full' | 'subgraph'
@@ -668,12 +678,13 @@ export default function Graph() {
     if (fraudOnly) params.set('fraud_only', 'true');
     if (highRiskOnly) params.set('high_risk_only', 'true');
     if (minAmount > 0) params.set('min_amount', String(minAmount));
+    params.set('limit', String(limit));
 
-    fetchAPI(`/api/graph${params.toString() ? `?${params}` : ''}`)
+    fetchAPI(`/api/graph?${params.toString()}`)
       .then((d) => setGraphData(normalize(d)))
       .catch((e) => setError(e.message))
       .finally(() => setLoading(false));
-  }, [fraudOnly, highRiskOnly, minAmount]);
+  }, [fraudOnly, highRiskOnly, minAmount, limit]);
 
   // Reset selection when view changes
   useEffect(() => { setSelectedNodeId(null); setHoveredNodeId(null); }, [view, layout]);
@@ -758,12 +769,22 @@ export default function Graph() {
   return (
     <div className="flex flex-col h-full bg-gray-50">
       {/* Header */}
-      <div className="px-6 pt-6 pb-2">
-        <h1 className="text-2xl font-bold text-gray-900">Network Graph</h1>
-        <p className="text-sm text-gray-500 mt-1">
-          Three layouts for {graphData.nodes.length}-node bank graph. Matrix shows every edge in a fixed grid (best for the full graph),
-          Arc reveals clusters along a line, Force is best for focused subgraphs.
-        </p>
+      <div className="px-6 pt-6 pb-2 flex items-baseline justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-gray-900">Network Graph</h1>
+          <p className="text-sm text-gray-500 mt-1">
+            Three layouts for {graphData.nodes.length}-node bank graph. Matrix shows every edge in a fixed grid (best for the full graph),
+            Arc reveals clusters along a line, Force is best for focused subgraphs.
+          </p>
+        </div>
+        {!loading && !error && graphData.totalNodes != null && (
+          <p className="text-xs text-gray-500 shrink-0">
+            Showing <span className="font-semibold text-gray-800">{graphData.showingNodes}</span> of
+            {' '}<span className="font-semibold text-gray-800">{graphData.totalNodes.toLocaleString()}</span> entities,
+            {' '}<span className="font-semibold text-gray-800">{graphData.showingEdges}</span> of
+            {' '}<span className="font-semibold text-gray-800">{graphData.totalEdges.toLocaleString()}</span> edges
+          </p>
+        )}
       </div>
 
       {/* Tabs + filters */}
@@ -857,6 +878,23 @@ export default function Graph() {
             onChange={(e) => setTopEdgePct(Number(e.target.value))}
             className="w-32"
           />
+        </label>
+
+        {/* Server-side cap — IBM AML has 100k+ nodes so the first paint must be bounded. */}
+        <label className="flex items-center gap-2 text-sm text-gray-700">
+          Show
+          <select
+            value={limit}
+            onChange={(e) => setLimit(Number(e.target.value))}
+            className="rounded-md border border-gray-300 px-2 py-1 text-sm focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500"
+          >
+            <option value={50}>Top 50 by risk</option>
+            <option value={100}>Top 100</option>
+            <option value={200}>Top 200</option>
+            <option value={500}>Top 500</option>
+            <option value={1000}>Top 1000</option>
+            <option value={0}>All (slow)</option>
+          </select>
         </label>
 
         {/* Legend */}

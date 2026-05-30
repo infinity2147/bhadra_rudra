@@ -331,7 +331,7 @@ def _train_neighbor_loader(model, X, edge_index, train_e, val_e, y, epochs, pati
 def train_gnn(
     graph: nx.DiGraph,
     data_dir: str,
-    variant: str = "synthetic",
+    variant: str = "ibm_aml",
     epochs: int = 200,
     hidden: int = 64,
     lr: float = 0.005,
@@ -429,7 +429,7 @@ def train_gnn(
     return metrics
 
 
-def load_gnn_metrics(data_dir: str, variant: str = "synthetic") -> Dict:
+def load_gnn_metrics(data_dir: str, variant: str = "ibm_aml") -> Dict:
     path = os.path.join(data_dir, "ml", variant, "gnn", "metrics.json")
     if not os.path.exists(path):
         return {}
@@ -437,7 +437,7 @@ def load_gnn_metrics(data_dir: str, variant: str = "synthetic") -> Dict:
         return json.load(f)
 
 
-def load_gnn_edge_scores(data_dir: str, variant: str = "synthetic") -> Dict[str, float]:
+def load_gnn_edge_scores(data_dir: str, variant: str = "ibm_aml") -> Dict[str, float]:
     path = os.path.join(data_dir, "ml", variant, "gnn", "edge_scores.json")
     if not os.path.exists(path):
         return {}

@@ -161,12 +161,16 @@ export default function Journey() {
       .finally(() => setExplainLoading(false));
   }, [mode, alertId]);
 
-  // Decide effective view mode: force graph for cycles, Sankey otherwise
+  // Decide effective view mode: force graph for cycles or dense traces,
+  // Sankey only for small linear/branching flows where columns are readable.
   const effectiveView = useMemo(() => {
     if (viewMode !== 'auto') return viewMode;
     if (!data) return 'force';
     const sides = new Set((data.nodes || []).map((n) => n.side));
-    // Multi-column? Sankey looks great. Single column? Force (better for cycles)
+    const nodeCount = (data.nodes || []).length;
+    // Sankey only stays readable up to ~25 nodes. Beyond that, columns get
+    // crushed into vertical strips — force-directed is the right call.
+    if (nodeCount > 25) return 'force';
     const hasMulti = sides.size > 1;
     return hasMulti ? 'sankey' : 'force';
   }, [data, viewMode]);

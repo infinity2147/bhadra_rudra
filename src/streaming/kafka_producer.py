@@ -123,8 +123,13 @@ async def _cli_main(args):
 
 def _build_argparser():
     p = argparse.ArgumentParser(description="Replay a transactions CSV onto Kafka.")
-    p.add_argument("--source", default="data/transactions.csv",
-                   help="CSV to replay (default: data/transactions.csv).")
+    # Default to the active variant's transactions.csv (e.g. data/ibm_aml/transactions.csv).
+    # Pre-sampled IBM AML CSV at data/real/ibm_aml/HI-Small_Trans_100k_sampled.csv also works.
+    p.add_argument(
+        "--source",
+        default=f"data/{os.getenv('RUDRA_DATASET', 'ibm_aml')}/transactions.csv",
+        help="CSV to replay (default: data/<RUDRA_DATASET>/transactions.csv).",
+    )
     p.add_argument("--bootstrap", default=os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:9092"),
                    help="Kafka bootstrap servers (default from KAFKA_BOOTSTRAP_SERVERS env).")
     p.add_argument("--topic", default=os.getenv("KAFKA_TOPIC", "rudra.transactions"),

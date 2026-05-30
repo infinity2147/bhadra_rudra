@@ -1,17 +1,17 @@
 """
-RUDRA — FastAPI Backend (v3)
+RUDRA — FastAPI Backend
 
-The investigator-facing API. Wires together:
-  - synthetic + real-data ML model variants
-  - 6 heuristic detectors + GraphSAGE GNN
+The investigator-facing API. Wires together (per active RUDRA_DATASET):
+  - 6 heuristic detectors + stacked ensemble (XGBoost + GraphSAGE + GAT)
   - SHAP local explanations per alert
   - Case workflow on SQLite with hash-chain audit log
   - Threshold-config layer + RBAC roles
   - Live-mode per-txn ML scoring + latency benchmark
   - Fund journey tracer + incident clustering
   - FIU evidence-package generator (zip with STR XML, SAR PDF, etc.)
-  - Account Aggregator + DiliSense KYC mocks
-  - LLM copilot
+  - Sahamati AA + DiliSense KYC adapters (real when creds set, mock otherwise)
+  - Kafka stream ingestor (real broker when reachable, in-process fallback)
+  - LLM copilot (Gemini when key set, quick-commands otherwise)
 """
 
 import os
@@ -33,7 +33,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 # Make sibling src/ importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
-from data_generator import TransactionGenerator, save_data
 from graph_engine import FundFlowGraph
 from fraud_detector import FraudDetector
 from advanced_detectors import DormantActivationDetector, ProfileMismatchDetector
@@ -58,6 +57,9 @@ from live_scoring import score_live_txn, benchmark_pipeline
 from integrations import AAClient, DilisenseClient
 from streaming import get_ingestor, StreamTxn
 from streaming.kafka_producer import replay_transactions
+from dataset_config import (
+    get_active_variant, variant_data_dir, required_artefacts, regenerate_command,
+)
 
 
 app = FastAPI(title="RUDRA API", version="3.0")
@@ -72,9 +74,16 @@ app.add_middleware(
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
 
+# Active dataset (RUDRA_DATASET env, default ibm_aml). VARIANT_DIR is where
+# all per-dataset operational artefacts live: transactions.csv, fraud_alerts.json,
+# risk_scores.json, fraud_cases.json, incidents.json, rudra.db, sar_reports/...
+ACTIVE_VARIANT = get_active_variant()
+VARIANT_DIR = variant_data_dir(DATA_DIR, ACTIVE_VARIANT)
+
 
 # ── State ──────────────────────────────────────────────────────────────────────
 state = {
+    "variant": ACTIVE_VARIANT,   # which dataset the backend is bound to
     "transactions": None,        # pd.DataFrame, timestamp parsed
     "alerts": None,              # list[dict]
     "incidents": None,           # list[dict] grouped alerts
@@ -87,7 +96,7 @@ state = {
     "sar_gen": None,
     "cases": None,               # CaseStore
     "config": None,              # ConfigStore
-    "ml_bundle": None,           # current synthetic model bundle (used for SHAP + live scoring)
+    "ml_bundle": None,           # active-variant model bundle (used for SHAP + live scoring)
     "ml_metrics": None,
     "edge_scores": None,
     "aa_client": None,           # Sahamati Account Aggregator client (real or mock-backed)
@@ -100,58 +109,29 @@ state = {
 # ── Pipeline integration ──────────────────────────────────────────────────────
 
 def run_pipeline():
-    """Trigger the full pipeline (used by /api/pipeline/run + on cold start)."""
-    generator = TransactionGenerator(seed=42)
-    df, fraud_cases = generator.generate_all_data()
-    save_data(df, fraud_cases, DATA_DIR, entities=generator.entities)
+    """Regenerate everything for the active dataset variant.
 
-    ffg = FundFlowGraph()
-    graph = ffg.build_graph(df)
+    Driven by `python src/run_pipeline.py --dataset <variant>`. We shell out
+    rather than reimplementing the orchestration here so this endpoint and
+    the CLI stay in lock-step. The variant comes from RUDRA_DATASET; the
+    pipeline writes to data/<variant>/ and data/ml/<variant>/.
+    """
+    import subprocess
 
-    detector = FraudDetector(graph, transactions=df)
-    results = detector.run_all_detections()
-    dormant_alerts = DormantActivationDetector(graph, df).detect()
-    risk_scores_data = []
-    for node_id, score in results["node_risk_scores"].items():
-        nd = dict(graph.nodes[node_id])
-        risk_scores_data.append({
-            "entity_id": node_id, "name": nd.get("name", ""),
-            "type": nd.get("type", ""), "risk_score": score,
-            "risk_level": ("CRITICAL" if score >= 0.7 else "HIGH" if score >= 0.5
-                            else "MEDIUM" if score >= 0.3 else "LOW"),
-        })
-    # Best-effort ML score lookup — at startup ml_bundle may not be trained
-    # yet, so edge_scores can be None. Detector falls back to rule-only mode.
-    edge_scores = ml_load_edge_scores(DATA_DIR, variant="synthetic") or {}
-    profile_alerts = ProfileMismatchDetector(graph, df, risk_scores_data, edge_scores=edge_scores).detect()
-    all_alerts = results["all_alerts"] + dormant_alerts + profile_alerts
-    results["all_alerts"] = all_alerts
-    results["dormant_activation"] = dormant_alerts
-    results["profile_mismatch"] = profile_alerts
-    results["summary"]["total_alerts"] = len(all_alerts)
-    results["summary"]["dormant_count"] = len(dormant_alerts)
-    results["summary"]["profile_count"] = len(profile_alerts)
-    results["summary"]["critical_alerts"] = sum(1 for a in all_alerts if a["severity"] == "CRITICAL")
-    results["summary"]["high_alerts"] = sum(1 for a in all_alerts if a["severity"] == "HIGH")
-    results["summary"]["medium_alerts"] = sum(1 for a in all_alerts if a["severity"] == "MEDIUM")
-    detector.save_results(results, DATA_DIR)
-
-    incidents = cluster_alerts(all_alerts, graph=graph)
-    with open(os.path.join(DATA_DIR, "incidents.json"), "w") as f:
-        json.dump(incidents, f, indent=2, default=str)
-
-    try:
-        ml_train_and_save(graph, df, DATA_DIR, variant="synthetic",
-                           dataset_name="RUDRA Synthetic Generator")
-    except Exception as e:
-        print(f"ML training failed: {e}")
-
-    sar_gen = SARGenerator(graph, df, all_alerts, fraud_cases)
-    sar_dir = os.path.join(DATA_DIR, "sar_reports")
-    os.makedirs(sar_dir, exist_ok=True)
-    for sar in sar_gen.generate_all_sars(min_severity="HIGH"):
-        sar_gen.export_sar_pdf(sar, sar_dir)
-
+    here = os.path.dirname(__file__)
+    pipeline = os.path.join(here, "..", "src", "run_pipeline.py")
+    env = dict(os.environ)
+    env["RUDRA_DATASET"] = ACTIVE_VARIANT
+    res = subprocess.run(
+        [sys.executable, pipeline, "--dataset", ACTIVE_VARIANT],
+        env=env,
+        cwd=os.path.join(here, ".."),
+    )
+    if res.returncode != 0:
+        raise RuntimeError(
+            f"Pipeline failed for variant={ACTIVE_VARIANT}. "
+            f"Run it manually to see the full error: {regenerate_command(ACTIVE_VARIANT)}"
+        )
     state["loaded"] = False
 
 
@@ -159,26 +139,35 @@ def load_or_generate():
     if state["loaded"]:
         return
 
-    alerts_path = os.path.join(DATA_DIR, "fraud_alerts.json")
-    txn_path = os.path.join(DATA_DIR, "transactions.csv")
-    if not os.path.exists(alerts_path) or not os.path.exists(txn_path):
-        print("[backend] Data not found — running full pipeline...")
-        run_pipeline()
+    os.makedirs(VARIANT_DIR, exist_ok=True)
 
+    # Fail loud if the configured variant's artefacts are missing. The user
+    # picked RUDRA_DATASET; they should see exactly which files are missing
+    # and the command to regenerate them.
+    missing = [p for p in required_artefacts(VARIANT_DIR) if not os.path.exists(p)]
+    if missing:
+        msg = (
+            f"\n[backend] Variant '{ACTIVE_VARIANT}' is missing required files under {VARIANT_DIR}:\n"
+            + "\n".join(f"    - {p}" for p in missing)
+            + f"\n\nRegenerate with:\n    {regenerate_command(ACTIVE_VARIANT)}\n"
+        )
+        raise RuntimeError(msg)
+
+    txn_path = os.path.join(VARIANT_DIR, "transactions.csv")
     df = pd.read_csv(txn_path)
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     state["transactions"] = df
 
-    with open(os.path.join(DATA_DIR, "fraud_alerts.json")) as f:
+    with open(os.path.join(VARIANT_DIR, "fraud_alerts.json")) as f:
         state["alerts"] = json.load(f)
-    with open(os.path.join(DATA_DIR, "risk_scores.json")) as f:
+    with open(os.path.join(VARIANT_DIR, "risk_scores.json")) as f:
         state["risk_scores"] = json.load(f)
-    with open(os.path.join(DATA_DIR, "detection_summary.json")) as f:
+    with open(os.path.join(VARIANT_DIR, "detection_summary.json")) as f:
         state["summary"] = json.load(f)
-    with open(os.path.join(DATA_DIR, "fraud_cases.json")) as f:
+    with open(os.path.join(VARIANT_DIR, "fraud_cases.json")) as f:
         state["fraud_cases"] = json.load(f)
 
-    incidents_path = os.path.join(DATA_DIR, "incidents.json")
+    incidents_path = os.path.join(VARIANT_DIR, "incidents.json")
     if os.path.exists(incidents_path):
         with open(incidents_path) as f:
             state["incidents"] = json.load(f)
@@ -190,15 +179,15 @@ def load_or_generate():
 
     # ML artefacts — load BEFORE constructing the copilot so it can wire
     # SHAP-driven explanations into the explain_alert tool.
-    state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
-    state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
-    state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
+    state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant=ACTIVE_VARIANT)
+    state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant=ACTIVE_VARIANT)
+    state["ml_bundle"] = ml_load_model(DATA_DIR, variant=ACTIVE_VARIANT)
     if state["ml_bundle"] is None:
         try:
-            ml_train_and_save(state["graph"], df, DATA_DIR, variant="synthetic")
-            state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
-            state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
-            state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
+            ml_train_and_save(state["graph"], df, DATA_DIR, variant=ACTIVE_VARIANT)
+            state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant=ACTIVE_VARIANT)
+            state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant=ACTIVE_VARIANT)
+            state["ml_bundle"] = ml_load_model(DATA_DIR, variant=ACTIVE_VARIANT)
         except Exception as e:
             print(f"[backend] inline ML training skipped: {e}")
 
@@ -210,8 +199,9 @@ def load_or_generate():
         state["graph"], df, state["alerts"], state["fraud_cases"],
     )
 
-    # Case store on SQLite (auto-migrates from old cases.json if present)
-    case_store = CaseStore(DATA_DIR)
+    # Case store on SQLite — per-variant so cases belong to the dataset they
+    # were opened against.
+    case_store = CaseStore(VARIANT_DIR)
     case_store.bulk_open_all(state["alerts"])
     # Backfill incident_id on cases
     a2i = alert_to_incident_map(state["incidents"])
@@ -220,7 +210,7 @@ def load_or_generate():
     state["cases"] = case_store
 
     # Config store (same SQLite file)
-    state["config"] = ConfigStore(os.path.join(DATA_DIR, "rudra.db"))
+    state["config"] = ConfigStore(os.path.join(VARIANT_DIR, "rudra.db"))
 
     # AA + DiliSense clients — pick up env-driven creds; fall back to mock when absent.
     state["aa_client"] = AAClient()
@@ -243,10 +233,10 @@ def load_or_generate():
     state["loaded"] = True
     aa_mode = "REAL" if state["aa_client"].is_real else "mock"
     kyc_mode = "REAL" if state["dilisense_client"].is_real else "mock"
-    print(f"[backend] ready: {len(df)} txns, {len(state['alerts'])} alerts, "
-          f"{len(state['incidents'])} incidents, "
-          f"{state['graph'].number_of_nodes()} entities, "
-          f"ML F1={state['ml_metrics'].get('f1', 0):.3f}, "
+    f1 = (state["ml_metrics"] or {}).get("f1", 0)
+    print(f"[backend] ready: variant={ACTIVE_VARIANT}, {len(df)} txns, "
+          f"{len(state['alerts'])} alerts, {len(state['incidents'])} incidents, "
+          f"{state['graph'].number_of_nodes()} entities, ML F1={f1:.3f}, "
           f"AA={aa_mode}, KYC={kyc_mode}")
 
 
@@ -342,6 +332,7 @@ def root():
     return {
         "name": "RUDRA API",
         "version": "3.0",
+        "variant": ACTIVE_VARIANT,
         "ml_trained": bool(state["ml_metrics"]),
         "alerts": len(state["alerts"] or []),
         "incidents": len(state["incidents"] or []),
@@ -455,15 +446,18 @@ def get_graph(
     fraud_only: bool = False,
     min_amount: float = 0,
     high_risk_only: bool = False,
+    limit: int = 200,
 ):
+    """Return a meaningful slice of the fund-flow graph.
+
+    For IBM AML (70k+ nodes / 87k+ edges) returning the whole graph is
+    useless — the browser turns it into a hairball. The default behavior
+    picks the top `limit` nodes by risk score, pulls in their 1-hop
+    neighborhood, and caps the result. `limit=0` disables the cap.
+    """
     graph = state["graph"]
     risk_map = {r["entity_id"]: r["risk_score"] for r in state["risk_scores"]}
     edge_scores = state["edge_scores"] or {}
-
-    if high_risk_only:
-        nodes_to_include = {r["entity_id"] for r in state["risk_scores"] if r["risk_score"] >= 0.3}
-    else:
-        nodes_to_include = set(graph.nodes())
 
     fraud_edges = {(u, v) for u, v, d in graph.edges(data=True) if d.get("fraud_count", 0) > 0}
     fraud_nodes = set()
@@ -471,20 +465,49 @@ def get_graph(
         fraud_nodes.add(u); fraud_nodes.add(v)
 
     if fraud_only:
-        nodes_to_include = nodes_to_include & fraud_nodes
-        expanded = set(nodes_to_include)
-        for n in nodes_to_include:
+        seed = set(fraud_nodes)
+    elif high_risk_only:
+        seed = {r["entity_id"] for r in state["risk_scores"] if r["risk_score"] >= 0.3}
+    else:
+        # Default: rank by risk, take top `limit` seeds — keeps the response
+        # bounded on large graphs like IBM AML.
+        sorted_by_risk = sorted(
+            state["risk_scores"], key=lambda r: r["risk_score"], reverse=True,
+        )
+        if limit and limit > 0:
+            seed = {r["entity_id"] for r in sorted_by_risk[:limit]}
+        else:
+            seed = set(graph.nodes())
+
+    # 1-hop expansion: pull in immediate predecessors/successors so the
+    # selected nodes aren't dangling.
+    expanded = set(seed)
+    for n in seed:
+        if n in graph:
             expanded.update(graph.predecessors(n))
             expanded.update(graph.successors(n))
-        nodes_to_include = expanded
 
-    sub = graph.subgraph(nodes_to_include).copy()
+    # Hard cap: still trim to `limit` total after expansion, keeping the
+    # highest-risk nodes. limit=0 means "no cap" (use with care).
+    if limit and limit > 0 and len(expanded) > limit:
+        ranked = sorted(expanded, key=lambda n: risk_map.get(n, 0), reverse=True)
+        expanded = set(ranked[:limit])
+
+    sub = graph.subgraph(expanded).copy()
     edges_to_remove = [(u, v) for u, v, d in sub.edges(data=True) if d["total_amount"] < min_amount]
     sub.remove_edges_from(edges_to_remove)
     sub.remove_nodes_from(list(nx.isolates(sub)))
 
+    total_nodes = graph.number_of_nodes()
+    total_edges = graph.number_of_edges()
+
     if sub.number_of_nodes() == 0:
-        return {"nodes": [], "links": []}
+        return {
+            "nodes": [], "links": [],
+            "total_nodes": total_nodes, "total_edges": total_edges,
+            "showing_nodes": 0, "showing_edges": 0,
+            "applied_limit": limit, "default_filter": not (fraud_only or high_risk_only),
+        }
 
     nodes = []
     for n in sub.nodes():
@@ -514,7 +537,12 @@ def get_graph(
             "mlScore": edge_scores.get(f"{u}->{v}"),
         })
 
-    return {"nodes": nodes, "links": links}
+    return {
+        "nodes": nodes, "links": links,
+        "total_nodes": total_nodes, "total_edges": total_edges,
+        "showing_nodes": len(nodes), "showing_edges": len(links),
+        "applied_limit": limit, "default_filter": not (fraud_only or high_risk_only),
+    }
 
 
 @app.get("/api/graph/{entity_id}")
@@ -676,13 +704,27 @@ def get_pattern(pattern_type: str):
 # ── Entities ───────────────────────────────────────────────────────────────
 
 @app.get("/api/entities")
-def get_entities(search: Optional[str] = None, risk_level: Optional[str] = None):
+def get_entities(
+    search: Optional[str] = None,
+    risk_level: Optional[str] = None,
+    limit: int = 500,
+):
+    """List entities, ranked by risk score (highest first).
+
+    `limit` caps the response — on real datasets (IBM AML has 70k+ accounts)
+    returning everything makes the frontend dropdown unusable. limit=0 means
+    no cap.
+    """
     entities = state["risk_scores"]
     if search:
         entities = [e for e in entities if search.lower() in e["name"].lower()]
     if risk_level:
         entities = [e for e in entities if e["risk_level"] == risk_level]
-    return {"entities": entities, "total": len(entities)}
+    total = len(entities)
+    entities_sorted = sorted(entities, key=lambda e: e["risk_score"], reverse=True)
+    if limit and limit > 0:
+        entities_sorted = entities_sorted[:limit]
+    return {"entities": entities_sorted, "total": total, "returned": len(entities_sorted)}
 
 
 @app.get("/api/entities/{entity_id}")
@@ -806,7 +848,9 @@ def list_variants():
 
 
 @app.get("/api/ml/metrics")
-def get_ml_metrics(variant: str = "synthetic"):
+def get_ml_metrics(variant: str = None):
+    if variant is None:
+        variant = ACTIVE_VARIANT
     m = ml_load_metrics(DATA_DIR, variant=variant)
     if not m:
         return {"trained": False, "variant": variant,
@@ -871,11 +915,11 @@ def get_tabular_baseline():
 def retrain_ml(role: str = Depends(get_role)):
     require("ml.retrain", role)
     m = ml_train_and_save(state["graph"], state["transactions"], DATA_DIR,
-                          variant="synthetic", dataset_name="RUDRA Synthetic Generator")
-    state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant="synthetic")
-    state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant="synthetic")
-    state["ml_bundle"] = ml_load_model(DATA_DIR, variant="synthetic")
-    return {"status": "ok", "metrics": m}
+                          variant=ACTIVE_VARIANT, dataset_name=ACTIVE_VARIANT)
+    state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant=ACTIVE_VARIANT)
+    state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant=ACTIVE_VARIANT)
+    state["ml_bundle"] = ml_load_model(DATA_DIR, variant=ACTIVE_VARIANT)
+    return {"status": "ok", "variant": ACTIVE_VARIANT, "metrics": m}
 
 
 # ── Journey Tracer ─────────────────────────────────────────────────────────
@@ -978,7 +1022,7 @@ def download_fiu_package(alert_id: str, role: str = Depends(get_role)):
     alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
     if not alert:
         raise HTTPException(404, "Alert not found")
-    sar_dir = os.path.join(DATA_DIR, "sar_reports")
+    sar_dir = os.path.join(VARIANT_DIR, "sar_reports")
     sar_pdf_path = None
     if os.path.isdir(sar_dir):
         sar = state["sar_gen"].generate_sar(alert)
@@ -1030,7 +1074,7 @@ def rerun_detection(role: str = Depends(get_role)):
     # cleanly to hand-tuned weights when the file isn't there.
     try:
         from risk_score_learner import load_risk_weights
-        rw_bundle = load_risk_weights(DATA_DIR, variant="synthetic")
+        rw_bundle = load_risk_weights(DATA_DIR, variant=ACTIVE_VARIANT)
     except Exception:
         rw_bundle = None
     det = FraudDetector(
@@ -1060,10 +1104,10 @@ def rerun_detection(role: str = Depends(get_role)):
     results["summary"]["critical_alerts"] = sum(1 for a in all_alerts if a["severity"] == "CRITICAL")
     results["summary"]["high_alerts"] = sum(1 for a in all_alerts if a["severity"] == "HIGH")
     results["summary"]["medium_alerts"] = sum(1 for a in all_alerts if a["severity"] == "MEDIUM")
-    det.save_results(results, DATA_DIR)
+    det.save_results(results, VARIANT_DIR)
 
     incidents = cluster_alerts(all_alerts, graph=state["graph"])
-    with open(os.path.join(DATA_DIR, "incidents.json"), "w") as f:
+    with open(os.path.join(VARIANT_DIR, "incidents.json"), "w") as f:
         json.dump(incidents, f, indent=2, default=str)
     state["alerts"] = all_alerts
     state["incidents"] = incidents

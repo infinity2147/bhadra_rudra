@@ -255,15 +255,14 @@ def train_and_save(
     graph: nx.DiGraph,
     transactions: pd.DataFrame,
     data_dir: str,
-    variant: str = "synthetic",
-    dataset_name: str = "RUDRA Synthetic",
+    variant: str = "ibm_aml",
+    dataset_name: str = "IBM AML",
 ) -> Dict:
     """Train fraud classifier and persist model + metrics under data/ml/{variant}/.
 
     A SHAP-ready background sample (100 rows of training features) is stashed
     inside the pickle so the explainer can be loaded later without re-running
-    the pipeline. The "synthetic" variant is also mirrored to data/ml/ for
-    backward compatibility with the original endpoints.
+    the pipeline.
     """
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import (
@@ -356,47 +355,30 @@ def train_and_save(
     with open(os.path.join(out_dir, "edge_scores.json"), "w") as f:
         json.dump(edge_scores, f, indent=2)
 
-    # Mirror to legacy data/ml/ for the original endpoints that load from there
-    if variant == "synthetic":
-        legacy_dir = os.path.join(data_dir, "ml")
-        os.makedirs(legacy_dir, exist_ok=True)
-        with open(os.path.join(legacy_dir, "model.pkl"), "wb") as f:
-            pickle.dump(bundle, f)
-        with open(os.path.join(legacy_dir, "metrics.json"), "w") as f:
-            json.dump(metrics, f, indent=2, default=str)
-        with open(os.path.join(legacy_dir, "edge_scores.json"), "w") as f:
-            json.dump(edge_scores, f, indent=2)
-
     return metrics
 
 
-def load_model(data_dir: str, variant: str = "synthetic"):
+def load_model(data_dir: str, variant: str = "ibm_aml"):
     """Load a previously trained model bundle."""
     path = os.path.join(data_dir, "ml", variant, "model.pkl")
     if not os.path.exists(path):
-        path = os.path.join(data_dir, "ml", "model.pkl")
-        if not os.path.exists(path):
-            return None
+        return None
     with open(path, "rb") as f:
         return pickle.load(f)
 
 
-def load_metrics(data_dir: str, variant: str = "synthetic") -> Dict:
+def load_metrics(data_dir: str, variant: str = "ibm_aml") -> Dict:
     path = os.path.join(data_dir, "ml", variant, "metrics.json")
     if not os.path.exists(path):
-        path = os.path.join(data_dir, "ml", "metrics.json")
-        if not os.path.exists(path):
-            return {}
+        return {}
     with open(path) as f:
         return json.load(f)
 
 
-def load_edge_scores(data_dir: str, variant: str = "synthetic") -> Dict[str, float]:
+def load_edge_scores(data_dir: str, variant: str = "ibm_aml") -> Dict[str, float]:
     path = os.path.join(data_dir, "ml", variant, "edge_scores.json")
     if not os.path.exists(path):
-        path = os.path.join(data_dir, "ml", "edge_scores.json")
-        if not os.path.exists(path):
-            return {}
+        return {}
     with open(path) as f:
         return json.load(f)
 

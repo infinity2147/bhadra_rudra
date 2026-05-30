@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import threading
 from typing import Any, Dict, Optional
 
 
@@ -23,6 +24,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "circular_min_total_flow": 100_000,
     "circular_max_cycle_length": 8,
     "circular_max_alerts": 50,
+    # Scale guards — AML rings are tight clusters of 3-20 shell accounts,
+    # not whole interbank SCCs. Skip giant SCCs and time-box per-SCC enumeration
+    # so dense graphs (IBM AML, real bank networks) stay tractable.
+    "circular_scc_size_cap": 200,
+    "circular_scc_time_budget_s": 8.0,
+    # Risk scoring — exact betweenness is O(VE); Monte Carlo approximation
+    # over k pivots stays usable on 100k+ node graphs (IBM AML).
+    "centrality_sample_k": 500,
     # Layering
     "layering_min_chain_length": 3,
     "layering_max_chains": 200,
@@ -88,38 +97,47 @@ class ConfigStore:
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.row_factory = sqlite3.Row
+        # FastAPI's threadpool can dispatch two requests to the same store
+        # concurrently. sqlite3 with `check_same_thread=False` allows shared
+        # access but the caller must serialize — concurrent cursors on one
+        # connection scramble each other's row descriptions (we saw
+        # `IndexError: tuple index out of range` on `row["value_json"]`).
+        self._lock = threading.RLock()
         self._init_schema()
         self._seed_defaults()
 
     def _init_schema(self) -> None:
-        c = self.conn.cursor()
-        c.execute("""
-            CREATE TABLE IF NOT EXISTS config (
-                key        TEXT PRIMARY KEY,
-                value_json TEXT,
-                updated_at TEXT
-            )
-        """)
-        self.conn.commit()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute("""
+                CREATE TABLE IF NOT EXISTS config (
+                    key        TEXT PRIMARY KEY,
+                    value_json TEXT,
+                    updated_at TEXT
+                )
+            """)
+            self.conn.commit()
 
     def _seed_defaults(self) -> None:
-        c = self.conn.cursor()
-        c.execute("SELECT COUNT(*) FROM config")
-        if c.fetchone()[0] > 0:
-            return
-        from datetime import datetime
-        now = datetime.now().isoformat()
-        for k, v in DEFAULT_CONFIG.items():
-            c.execute(
-                "INSERT OR IGNORE INTO config (key, value_json, updated_at) VALUES (?, ?, ?)",
-                (k, json.dumps(v), now),
-            )
-        self.conn.commit()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute("SELECT COUNT(*) FROM config")
+            if c.fetchone()[0] > 0:
+                return
+            from datetime import datetime
+            now = datetime.now().isoformat()
+            for k, v in DEFAULT_CONFIG.items():
+                c.execute(
+                    "INSERT OR IGNORE INTO config (key, value_json, updated_at) VALUES (?, ?, ?)",
+                    (k, json.dumps(v), now),
+                )
+            self.conn.commit()
 
     def get(self, key: str, default: Any = None) -> Any:
-        c = self.conn.cursor()
-        c.execute("SELECT value_json FROM config WHERE key = ?", (key,))
-        row = c.fetchone()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute("SELECT value_json FROM config WHERE key = ?", (key,))
+            row = c.fetchone()
         if row is None:
             return default if default is not None else DEFAULT_CONFIG.get(key)
         try:
@@ -128,10 +146,12 @@ class ConfigStore:
             return default
 
     def get_all(self) -> Dict[str, Any]:
-        c = self.conn.cursor()
-        c.execute("SELECT key, value_json FROM config")
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute("SELECT key, value_json FROM config")
+            rows = c.fetchall()
         out = dict(DEFAULT_CONFIG)
-        for row in c.fetchall():
+        for row in rows:
             try:
                 out[row["key"]] = json.loads(row["value_json"])
             except json.JSONDecodeError:
@@ -140,16 +160,17 @@ class ConfigStore:
 
     def set(self, key: str, value: Any) -> None:
         from datetime import datetime
-        c = self.conn.cursor()
-        c.execute(
-            """
-            INSERT INTO config (key, value_json, updated_at) VALUES (?, ?, ?)
-            ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
-                                            updated_at = excluded.updated_at
-            """,
-            (key, json.dumps(value), datetime.now().isoformat()),
-        )
-        self.conn.commit()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute(
+                """
+                INSERT INTO config (key, value_json, updated_at) VALUES (?, ?, ?)
+                ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+                                                updated_at = excluded.updated_at
+                """,
+                (key, json.dumps(value), datetime.now().isoformat()),
+            )
+            self.conn.commit()
 
     def set_many(self, values: Dict[str, Any]) -> Dict[str, Any]:
         for k, v in values.items():
@@ -160,8 +181,9 @@ class ConfigStore:
         return self.get_all()
 
     def reset(self) -> Dict[str, Any]:
-        c = self.conn.cursor()
-        c.execute("DELETE FROM config")
-        self.conn.commit()
+        with self._lock:
+            c = self.conn.cursor()
+            c.execute("DELETE FROM config")
+            self.conn.commit()
         self._seed_defaults()
         return self.get_all()

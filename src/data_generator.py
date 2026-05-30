@@ -1,13 +1,16 @@
 """
-Synthetic Banking Transaction Data Generator
-Generates realistic fund flow data with embedded fraud patterns:
+Synthetic transaction generator — test fixtures only.
+
+The production RUDRA stack runs against real public AML datasets
+(IBM AML 100k, optionally PaySim) loaded by `src/real_data_loader.py`.
+This generator is kept so unit tests have small, fully-labelled inputs
+with known fraud patterns embedded — it is NOT a runtime data source.
+
+Patterns embedded for test coverage:
 - Circular transactions (round-tripping)
 - Rapid layering (money moving through multiple accounts quickly)
 - Smurfing (structuring large amounts into small transactions)
 - Shell company funnels
-
-Now includes channel, product, and account_type — matching what banks actually
-track for fraud monitoring across accounts, products, branches, and channels.
 """
 
 import random

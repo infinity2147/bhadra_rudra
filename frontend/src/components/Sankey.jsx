@@ -53,14 +53,26 @@ export default function Sankey({
 
     const maxColLen = Math.max(...colKeys.map((c) => groups[c].length));
     const nodeWidth = 18;
-    const nodeHeight = 28;
-    const nodeGap = 12;
+    // Adapt node height when a column is dense, so we don't end up with a
+    // single 2000px-tall strip the user has to scroll through (the failure
+    // mode visible in the original bug screenshot).
+    const targetHeight = 460;
+    const nodeGap = maxColLen > 12 ? 4 : 12;
+    const nodeHeight = Math.max(
+      10,
+      Math.min(28, Math.floor((targetHeight - 64) / maxColLen) - nodeGap),
+    );
     const padX = 32;
-    const padY = 32;
-    const labelPad = 120;
+    const padY = 24;
+    const labelPad = 140;
 
-    const contentWidth = Math.max(720, containerWidth, colKeys.length * 240 + padX * 2 + labelPad);
-    const contentHeight = Math.max(320, maxColLen * (nodeHeight + nodeGap) + padY * 2);
+    // Take the full available container width so the columns actually spread
+    // out instead of clustering on the left.
+    const contentWidth = Math.max(720, containerWidth);
+    const contentHeight = Math.max(
+      320,
+      Math.min(targetHeight, maxColLen * (nodeHeight + nodeGap) + padY * 2),
+    );
     const plotWidth = contentWidth - 2 * padX - labelPad;
     const colWidth = plotWidth / Math.max(colKeys.length - 1, 1);
 
@@ -284,6 +296,9 @@ export default function Sankey({
               const fill = NODE_FILL[n.type] || '#6b7280';
               const isFocus = n.side === 'focus' || n.side === 'alert';
               const flagged = (n.flags || []).length > 0;
+              // Scale label font with row height — keeps text legible when
+              // nodes are tall and stops it overlapping when they're tight.
+              const labelFont = Math.max(9, Math.min(12, n.h - 4));
               return (
                 <g key={n.id} onClick={() => onNodeClick?.(n)} style={{ cursor: 'pointer' }}>
                   <rect
@@ -298,8 +313,8 @@ export default function Sankey({
                   />
                   <text
                     x={n.x + n.w + 6}
-                    y={n.y + n.h / 2 + 4}
-                    fontSize="12"
+                    y={n.y + n.h / 2 + labelFont / 3}
+                    fontSize={labelFont}
                     fill="#111827"
                     fontWeight={isFocus ? 600 : 400}
                   >

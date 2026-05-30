@@ -26,7 +26,7 @@ export default function ModelMetrics() {
   const [retraining, setRetraining] = useState(false);
   const [error, setError] = useState(null);
   const [variants, setVariants] = useState([]);
-  const [variant, setVariant] = useState('synthetic');
+  const [variant, setVariant] = useState('ibm_aml');
 
   function load(v = variant) {
     setLoading(true);
@@ -76,6 +76,12 @@ export default function ModelMetrics() {
   const cm = data.confusion_matrix || [[0, 0], [0, 0]];
   const [tn, fp] = cm[0]; const [fn, tp] = cm[1];
 
+  const variantLabel = data.variant === 'ibm_aml'
+    ? 'IBM AML (public benchmark, 100k stratified sample)'
+    : data.variant === 'paysim'
+    ? 'PaySim mobile-money (public Kaggle dataset)'
+    : data.variant;
+
   return (
     <div className="p-6 space-y-6 max-w-[1400px] mx-auto">
       <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -84,6 +90,9 @@ export default function ModelMetrics() {
           <p className="text-sm text-gray-500 mt-1">
             {data.model_kind === 'xgboost' ? 'XGBoost' : 'Gradient Boosting'} trained on {data.n_features} engineered features
             from the fund-flow graph. Evaluated on a stratified 20% held-out split.
+          </p>
+          <p className="text-xs text-indigo-700 mt-1 font-medium">
+            Active dataset: {variantLabel}
           </p>
           {data.dataset_name && (
             <p className="text-xs text-gray-400 mt-0.5">Dataset: {data.dataset_name}</p>
@@ -257,14 +266,19 @@ export default function ModelMetrics() {
 
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-900">
         <p className="font-semibold">A note on these numbers</p>
-        <p className="mt-1">
-          The metrics above are computed on the synthetic dataset we generate locally. The fraud patterns
-          we embed are clean by construction — circular rings have low amount variance, layering chains
-          have monotonic flow, smurfing transactions cluster below ₹2L — so the model achieves very high
-          scores. On the IBM AML-HI-Large public benchmark (2.1M nodes, 180M transactions), our planned
-          FraudGT + BDH ensemble targets F1 = 0.72, vs the XGBoost baseline at ~0.42. This page is the
-          internal-data baseline; the real comparison is against that public benchmark.
-        </p>
+        {data.variant === 'ibm_aml' ? (
+          <p className="mt-1">
+            Metrics are on a stratified 100k sample of the IBM AML HI-Small public benchmark
+            ({data.n_edges?.toLocaleString()} edges, {(data.fraud_rate * 100).toFixed(1)}% fraud rate).
+            The ensemble adds GraphSAGE + GAT on top of XGBoost via a 3-fold OOF logistic-regression
+            meta-learner — see the Ensemble tab for the per-base-model breakdown.
+          </p>
+        ) : (
+          <p className="mt-1">
+            Variant: {data.variant}. {data.n_edges?.toLocaleString()} edges,
+            {' '}{(data.fraud_rate * 100).toFixed(2)}% fraud rate.
+          </p>
+        )}
       </div>
     </div>
   );

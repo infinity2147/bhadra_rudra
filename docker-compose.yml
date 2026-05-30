@@ -8,12 +8,14 @@ version: '3.9'
 # Frontend → http://localhost:5173
 # Kafka    → kafka:9092 (inside the network) / localhost:29092 (from the host)
 #
-# To regenerate data inside the running backend container:
-#   docker compose exec backend python src/run_pipeline.py
+# Active dataset is RUDRA_DATASET (default: ibm_aml). PaySim is supported
+# as a secondary benchmark when its CSV is dropped under data/real/paysim/.
 #
-# To stream IBM AML over Kafka from your terminal:
-#   docker compose exec backend python -m streaming.kafka_producer \
-#       --source data/real/ibm_aml/HI-Small_Trans_100k.csv --rate 10 --total 500
+# To regenerate data inside the running backend container:
+#   docker compose exec backend python src/run_pipeline.py --dataset ibm_aml
+#
+# To stream over Kafka from inside the container (uses active variant by default):
+#   docker compose exec backend python -m streaming.kafka_producer --rate 10 --total 500
 
 services:
   backend:
@@ -27,6 +29,8 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      # Active dataset — controls which data dir + ML variant the backend binds to
+      - RUDRA_DATASET=${RUDRA_DATASET:-ibm_aml}
       # Streaming — kafka by default inside the compose network
       - STREAM_BACKEND=${STREAM_BACKEND:-auto}
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}

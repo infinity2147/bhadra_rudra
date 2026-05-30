@@ -31,10 +31,28 @@ class DormantActivationDetector:
         txns = self.transactions.copy()
         txns["timestamp"] = pd.to_datetime(txns["timestamp"])
 
+        # Pre-index by sender and receiver so per-entity lookup is O(1) instead
+        # of an O(n) DataFrame filter inside a per-node loop. On a 100k-txn /
+        # 100k-entity graph (IBM AML) this turns ~30 minutes into seconds.
+        by_sender = {
+            sid: idxs for sid, idxs in txns.groupby("sender_id").indices.items()
+        }
+        by_receiver = {
+            rid: idxs for rid, idxs in txns.groupby("receiver_id").indices.items()
+        }
+
         for node in self.graph.nodes():
-            node_txns = txns[(txns["sender_id"] == node) | (txns["receiver_id"] == node)]
-            if len(node_txns) < 3:
+            send_idx = by_sender.get(node)
+            recv_idx = by_receiver.get(node)
+            if send_idx is None and recv_idx is None:
                 continue
+            if send_idx is not None and recv_idx is not None:
+                idxs = np.unique(np.concatenate([send_idx, recv_idx]))
+            else:
+                idxs = send_idx if send_idx is not None else recv_idx
+            if len(idxs) < 3:
+                continue
+            node_txns = txns.iloc[idxs]
 
             node_txns = node_txns.sort_values("timestamp")
 
@@ -184,14 +202,31 @@ class ProfileMismatchDetector:
         critical_threshold     = self._cfg("profile_critical_score_threshold", 0.6)
         high_threshold         = self._cfg("profile_high_score_threshold", 0.4)
 
+        # Pre-index by sender + receiver so each per-node lookup is O(1)
+        # instead of an O(n) DataFrame scan.
+        by_sender = {
+            sid: idxs for sid, idxs in txns.groupby("sender_id").indices.items()
+        }
+        by_receiver = {
+            rid: idxs for rid, idxs in txns.groupby("receiver_id").indices.items()
+        }
+
         for node in self.graph.nodes():
             node_data = self.graph.nodes[node]
             entity_type = node_data.get("type", "individual")
             node_name = node_data.get("name", node)
 
-            node_txns = txns[(txns["sender_id"] == node) | (txns["receiver_id"] == node)]
-            if len(node_txns) < 3:
+            send_idx = by_sender.get(node)
+            recv_idx = by_receiver.get(node)
+            if send_idx is None and recv_idx is None:
                 continue
+            if send_idx is not None and recv_idx is not None:
+                idxs = np.unique(np.concatenate([send_idx, recv_idx]))
+            else:
+                idxs = send_idx if send_idx is not None else recv_idx
+            if len(idxs) < 3:
+                continue
+            node_txns = txns.iloc[idxs]
 
             mismatches = []
             sent = node_txns[node_txns["sender_id"] == node]

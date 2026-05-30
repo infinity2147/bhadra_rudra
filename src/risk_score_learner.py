@@ -78,15 +78,28 @@ def _extract_node_features(graph: nx.DiGraph) -> Tuple[np.ndarray, np.ndarray, L
     """
     nodes = list(graph.nodes())
 
-    # Cache the two centrality measures (both O(VE) → don't recompute per node)
-    try:
-        betweenness = nx.betweenness_centrality(graph, weight="total_amount")
-    except Exception:
-        betweenness = {n: 0.0 for n in nodes}
-    try:
-        degree_c = nx.degree_centrality(graph)
-    except Exception:
-        degree_c = {n: 0.0 for n in nodes}
+    # Cache centrality on the graph object so train + score don't recompute.
+    # Without this, score_nodes() after train_risk_weights() re-runs the
+    # 60s sampled betweenness for no benefit.
+    cached = graph.graph.get("_risk_centrality_cache")
+    if cached is not None:
+        betweenness, degree_c = cached
+    else:
+        try:
+            n_nodes = len(nodes)
+            if n_nodes > 2_000:
+                # Unweighted BFS sampling — structural centrality, 10x faster
+                # than the weighted Dijkstra variant at this scale.
+                betweenness = nx.betweenness_centrality(graph, k=500, seed=42)
+            else:
+                betweenness = nx.betweenness_centrality(graph, weight="total_amount")
+        except Exception:
+            betweenness = {n: 0.0 for n in nodes}
+        try:
+            degree_c = nx.degree_centrality(graph)
+        except Exception:
+            degree_c = {n: 0.0 for n in nodes}
+        graph.graph["_risk_centrality_cache"] = (betweenness, degree_c)
 
     X_rows = []
     y_rows = []
@@ -142,7 +155,7 @@ def _extract_node_features(graph: nx.DiGraph) -> Tuple[np.ndarray, np.ndarray, L
     return np.array(X_rows, dtype=np.float32), np.array(y_rows, dtype=np.int64), nodes
 
 
-def train_risk_weights(graph: nx.DiGraph, data_dir: str, variant: str = "synthetic") -> Dict:
+def train_risk_weights(graph: nx.DiGraph, data_dir: str, variant: str = "ibm_aml") -> Dict:
     """Train + persist the per-node risk-score model.
 
     Returns a metrics dict. Skips silently with `{trained: False}` if the
@@ -213,7 +226,7 @@ def train_risk_weights(graph: nx.DiGraph, data_dir: str, variant: str = "synthet
     return metrics
 
 
-def load_risk_weights(data_dir: str, variant: str = "synthetic") -> Dict:
+def load_risk_weights(data_dir: str, variant: str = "ibm_aml") -> Dict:
     path = os.path.join(data_dir, "ml", variant, "risk_weights.pkl")
     if not os.path.exists(path):
         return {}
