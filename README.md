@@ -5,7 +5,7 @@
 
 [![Tests](https://img.shields.io/badge/tests-43%20passing-brightgreen)](#how-to-run-locally) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#libraries-and-dependencies) [![Node](https://img.shields.io/badge/node-20%2B-blue)](#libraries-and-dependencies) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
-For the formal submission documents, see [`docs/brief.tex`](docs/brief.tex) (two-page problem and solution brief), [`docs/ARCHITECTURE_BRIEF.tex`](docs/ARCHITECTURE_BRIEF.tex) (two-page technical architecture), and [`docs/architecture.mmd`](docs/architecture.mmd) (architecture diagram source).
+The long-form technical architecture, including the labelled component diagram, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The two-page problem/solution brief and architecture brief are submitted separately as PDFs (see the submission dashboard).
 
 ---
 
@@ -15,7 +15,7 @@ Indian public sector banks detect financial-crime patterns the day after they ha
 
 **RUDRA replaces this with a real-time fund-flow intelligence platform that an investigator opens like email.** It scores every transaction in well under a millisecond, automatically clusters related alerts into a single investigable case, explains every decision with feature attributions, and generates the complete Financial Intelligence Unit filing package in one click. Every action is recorded in a cryptographically-chained audit log that Reserve Bank inspection can verify on demand.
 
-The full problem-and-solution narrative is in [`docs/brief.tex`](docs/brief.tex). The technical architecture is in [`docs/ARCHITECTURE_BRIEF.tex`](docs/ARCHITECTURE_BRIEF.tex) with the diagram in [`docs/architecture.mmd`](docs/architecture.mmd).
+The full technical architecture, with the labelled component diagram and per-subsystem rationale, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ---
 
@@ -196,7 +196,7 @@ save_data(df, fraud_cases, 'data/ibm_aml', entities=gen.entities)
 python src/run_pipeline.py --dataset ibm_aml
 ```
 
-The synthetic dataset produces an artificially high F1 of approximately 0.99 because the embedded fraud patterns are clean by construction. The IBM AML benchmark produces the honest production number of F1 = 0.625, which is what the platform is actually built to deliver.
+The synthetic dataset produces an artificially high F1 of approximately 0.99 because the embedded fraud patterns are clean by construction. The IBM AML benchmark produces the honest production number of F1 = 0.617 (AUC 0.927, precision 0.851, recall 0.484), which is what the platform is actually built to deliver.
 
 ---
 
@@ -209,7 +209,7 @@ The synthetic dataset produces an artificially high F1 of approximately 0.99 bec
 - **The Claude copilot requires an Anthropic API key.** Without `ANTHROPIC_API_KEY`, the copilot falls back to a deterministic intent-routing regex matcher that still dispatches the correct backend tool but writes terser, rule-based responses rather than multi-round natural-language synthesis. The fallback never crashes the page.
 - **Browser compatibility.** Tested on Chrome 122 or newer, Edge 122 or newer, and Firefox 124 or newer. Older browsers may not render the Network Graph page's matrix view at the full grid resolution.
 - **Single-user demonstration mode.** The role switcher in the sidebar is a clearly-marked demonstration gate using the `X-User-Role` header. A production deployment would replace it with the bank's existing identity provider (for example Okta, Keycloak, or Active Directory).
-- **F1 = 0.625 is honest, not state-of-the-art.** The published industry leader on this benchmark (FraudGT plus BDH ensemble) reports F1 = 0.72 and needs multi-GPU training over several days. Our XGBoost result is what the same benchmark records as the strong-baseline number with single-CPU training, which is the most operationally realistic baseline a public sector bank can deploy on its own hardware.
+- **F1 = 0.617 is honest, not state-of-the-art.** The published industry leader on this benchmark (FraudGT plus BDH ensemble) reports F1 = 0.72 and needs multi-GPU training over several days. Our XGBoost result is what the same benchmark records as the strong-baseline number with single-CPU training, which is the most operationally realistic baseline a public sector bank can deploy on its own hardware.
 - **Suspicious Activity Report PDFs are generated on demand.** Earlier versions pre-rendered all PDFs at pipeline time, which slowed setup considerably. The current pipeline writes a PDF only when an investigator clicks the Download FIU Package button, keeping startup fast and storage low.
 
 ---
@@ -252,10 +252,7 @@ bhadra_rudra/
 │   └── streaming/               Kafka producer, consumer, and ingestor
 ├── tests/                   Pytest suite, 43 tests
 ├── docs/
-│   ├── ARCHITECTURE.md           Long-form technical architecture
-│   ├── ARCHITECTURE_BRIEF.tex    Two-page technical brief
-│   ├── architecture.mmd          Mermaid diagram source
-│   └── brief.tex                 Two-page problem and solution brief
+│   └── ARCHITECTURE.md           Long-form technical architecture + diagram
 ├── data/                    Generated artefacts (gitignored, regenerated by the pipeline)
 ├── docker-compose.yml
 ├── Dockerfile.backend

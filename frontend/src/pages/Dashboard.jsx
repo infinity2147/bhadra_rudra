@@ -72,7 +72,7 @@ export default function Dashboard() {
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <MetricCard label="Total Transactions" value={kpis.total_transactions.toLocaleString('en-IN')} color="indigo" />
         <MetricCard label="Total Volume" value={formatCr(kpis.total_volume)} color="blue" />
-        <MetricCard label="Fraud Volume" value={formatCr(kpis.fraud_volume)} delta={`${kpis.fraud_rate}% of total`} color="amber" />
+        <MetricCard label="Fraud Volume" value={formatCr(kpis.fraud_volume)} delta={`${kpis.fraud_rate}% of txns flagged`} color="amber" />
         <MetricCard
           label="Incidents"
           value={(kpis.incidents || 0).toLocaleString('en-IN')}

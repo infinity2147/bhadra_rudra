@@ -124,18 +124,23 @@ class ProfileMismatchDetector:
     Score composition (T2.9):
       * Rule mismatches (e.g. "individual averaging > ₹10L") generate a
         `rule_score = count(mismatches) × profile_score_per_mismatch`.
+      * An alert is emitted only when `rule_score >= profile_min_rule_score`
+        (default 0.4 = two independent profile violations). A "Profile
+        Mismatch" must mean an *actual* profile mismatch.
       * The XGBoost edge classifier scores every edge involving this entity;
-        we take the *max* score across those edges as an `ml_score` —
-        this lifts the alert when the model independently flags any of the
-        entity's relationships as suspicious.
-      * Final confidence = max(rule_score, ml_score) capped at profile_max_score.
+        we take the *max* score across those edges as an `ml_score`. For the
+        corroborated entities above, `combined = max(rule_score, ml_score)`
+        ESCALATES severity — but a high ML score on its own is NOT relabelled
+        as a profile mismatch. That signal already lives in the ML edge
+        scores, the graph view, and live scoring; surfacing it a second time
+        here floods the alert stream on real datasets that carry no declared
+        KYC profile (IBM AML, PaySim). Keeping the two signals in their own
+        lanes is what makes the alert count credible and the label honest.
 
-    The reason for `max` instead of a learned mix: the rules and the ML model
-    catch *different* failure modes — a rule-based "high night-time ratio"
-    won't be in the ML feature set; conversely, the ML model can flag
-    profile-consistent behaviour that violates learned patterns the rules
-    don't encode. Either signal triggering should raise the alert. (A linear
-    mix is the wrong inductive bias here — we'd just dilute strong signals.)
+    The reason for `max` instead of a learned mix on the kept alerts: the
+    rules and the ML model catch *different* failure modes — a rule-based
+    "high night-time ratio" isn't in the ML feature set — so the stronger
+    signal should set the severity rather than be diluted by an average.
 
     Every threshold below reads from the ConfigStore-backed `config` dict
     (see src/config_store.py DEFAULT_CONFIG, keys prefixed `profile_`).
@@ -201,6 +206,7 @@ class ProfileMismatchDetector:
         max_score              = self._cfg("profile_max_score", 0.95)
         critical_threshold     = self._cfg("profile_critical_score_threshold", 0.6)
         high_threshold         = self._cfg("profile_high_score_threshold", 0.4)
+        min_rule_score         = self._cfg("profile_min_rule_score", 0.4)
 
         # Pre-index by sender + receiver so each per-node lookup is O(1)
         # instead of an O(n) DataFrame scan.
@@ -278,22 +284,20 @@ class ProfileMismatchDetector:
                 if night_ratio > max_night_ratio:
                     mismatches.append(f"{night_ratio:.0%} transactions during nighttime (10PM-6AM)")
 
-            # Compose the confidence: rule signal AND ML signal, take the max.
-            # An alert fires if *either* signal is strong enough — different
-            # failure modes (see class docstring).
+            # Compose the confidence: behavioural-rule signal, escalated by ML.
             ml_score = self._ml_score_for_entity(node)
             rule_score = min(len(mismatches) * score_per_mismatch, max_score) if mismatches else 0.0
 
-            # Combine. `max` not `mean` — strong signal on either side wins.
+            # Combine. `max` not `mean` — the stronger signal sets the score.
             combined_score = max(rule_score, ml_score or 0.0)
 
-            # Alert if either side is meaningful. The original "needs mismatches
-            # to alert" rule is preserved when no ML bundle is loaded; with ML,
-            # high ml_score alone is enough to flag.
-            should_alert = (
-                (mismatches and rule_score > 0)
-                or (ml_score is not None and ml_score >= high_threshold)
-            )
+            # A "Profile Mismatch" must mean an actual profile mismatch: require
+            # the entity to violate its declared profile on enough independent
+            # dimensions to clear `profile_min_rule_score` (default 0.4 = two
+            # mismatches). A high ML score alone does NOT manufacture a profile
+            # alert — it escalates severity for these corroborated cases and
+            # otherwise stays in the ML / graph views. See the class docstring.
+            should_alert = rule_score >= min_rule_score
 
             if should_alert:
                 risk_info = self.risk_scores.get(node, {})
@@ -306,23 +310,18 @@ class ProfileMismatchDetector:
                 else:
                     severity = "MEDIUM"
 
-                # Generate a description that names which signal(s) fired.
-                if mismatches and ml_score is not None:
+                # Every emitted alert has >= 2 behavioural mismatches; the
+                # description names them and notes the corroborating ML score.
+                if ml_score is not None:
                     desc = (
                         f"Entity '{node_name}' ({entity_type}) — {len(mismatches)} behavioural "
                         f"mismatches AND ML score {ml_score:.2f} on related edges. "
                         f"Mismatches: {'; '.join(mismatches[:3])}"
                     )
-                elif mismatches:
+                else:
                     desc = (
                         f"Entity '{node_name}' ({entity_type}) shows {len(mismatches)} behavioural "
                         f"mismatches: {'; '.join(mismatches[:3])}"
-                    )
-                else:
-                    desc = (
-                        f"Entity '{node_name}' ({entity_type}) has no rule-based mismatches but "
-                        f"the ML model flagged its edges (max score {ml_score:.2f}). "
-                        f"Profile may be consistent with type but transaction-level patterns are suspicious."
                     )
 
                 alert = {
@@ -332,11 +331,7 @@ class ProfileMismatchDetector:
                     "confidence": round(combined_score * 100, 1),
                     "rule_score": round(rule_score, 4),
                     "ml_score": round(ml_score, 4) if ml_score is not None else None,
-                    "scoring_mode": (
-                        "rule+ml" if (mismatches and ml_score is not None)
-                        else "rule_only" if mismatches
-                        else "ml_only"
-                    ),
+                    "scoring_mode": "rule+ml" if ml_score is not None else "rule_only",
                     "entities": [node],
                     "entity_names": [node_name],
                     "entity_type": entity_type,
