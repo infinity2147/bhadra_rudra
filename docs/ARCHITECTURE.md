@@ -80,8 +80,8 @@
 
 ### 2.2 Backend (FastAPI)
 
-- Single ASGI app (`backend/main.py`) with 30+ endpoints.
-- State loaded once at startup: synthetic data + graph + alerts + case store + config store + ML bundle.
+- Single ASGI app (`backend/main.py`) with 51 endpoints.
+- State loaded once at startup for the active dataset (`RUDRA_DATASET`, default `ibm_aml`): transactions + graph + alerts + incidents + case store + config store + ML bundle. The backend refuses to start if the variant's artefacts are missing, printing the exact regenerate command — it never silently serves stale or fake data.
 - `Depends(get_role)` extracts the role header; `require(action, role)` raises HTTP 403 on disallowed actions.
 - CORS open in dev; production would tighten to the bank's domain.
 
@@ -108,7 +108,7 @@ Every detector reads its thresholds from `ConfigStore`; nothing is hardcoded exc
 
 - **SQLite** (`data/rudra.db`) holds cases, audit log, and config. Single file — no Postgres dependency.
 - **Hash-chain audit log**: each audit entry stores `prev_hash` (previous entry's hash) and `this_hash = SHA-256(prev_hash || canonical_entry_json)`. Verification walks the chain and recomputes — any insert/edit/delete is detectable. Test `test_hash_chain_detects_tampering` proves this.
-- **Incident clustering** (union-find on entity overlap) collapses ~290 raw alerts into ~6 actionable incidents.
+- **Incident clustering** (union-find on entity overlap) collapses related alerts into actionable incidents. On the IBM AML 100k benchmark this turns **562 raw alerts into 344 incidents**, and — the point that matters — merges the dangerous rings: the largest critical incident bundles **76 alerts spanning all five pattern types (circular, layering, smurfing, shell-funnel, profile) across 50 entities into a single case**.
 
 ### 2.6 RBAC
 
@@ -153,8 +153,8 @@ One zip download contains everything a compliance team needs to file a Suspiciou
 ## 3. Data flow
 
 ### Cold start
-1. Backend boots → checks `data/transactions.csv` → if absent, runs `src/run_pipeline.py`.
-2. Pipeline: generate synthetic txns → build graph → run detectors → cluster incidents → train XGBoost + GraphSAGE → persist. (SAR PDFs are generated on-request by the backend, not in the pipeline.)
+1. Run `python src/run_pipeline.py --dataset ibm_aml` once. Pipeline: load the dataset (stratified 100k IBM AML sample, cached) → build graph → run all six detectors → cluster incidents → train XGBoost (+ GraphSAGE + stacked ensemble when PyTorch is installed) → persist artefacts under `data/<variant>/` and `data/ml/<variant>/`. (SAR PDFs are generated on-request by the backend, not in the pipeline.)
+2. Backend boots bound to `RUDRA_DATASET` (default `ibm_aml`); if the variant's required artefacts are missing it raises with the exact regenerate command rather than starting on empty/fake state.
 3. Backend loads everything into memory; opens a case row in SQLite for every alert that doesn't have one yet.
 
 ### Investigator workflow (real session)
@@ -174,24 +174,23 @@ One zip download contains everything a compliance team needs to file a Suspiciou
 
 ## 4. Performance
 
-Measured on a 2024 M1 MacBook Air (Python 3.12, no GPU):
+Two numbers matter, and they are different things:
+
+**Per-transaction streaming latency** — the real-time claim. Every transaction is scored against the *current* graph state on the CPU, no GPU:
 
 | Operation | Time |
 |---|---|
-| Full graph rebuild (80 nodes, 1,800 edges) | ~290 ms |
-| 6 detectors (all in parallel) | ~250 ms |
-| ML scoring (every edge in the graph) | ~400 ms |
-| Risk scoring (betweenness + degree centrality) | ~35 ms |
-| **End-to-end pipeline** | **~1.1 s** |
-| Per-transaction ML score | mean 0.56 ms · p95 0.64 ms · p99 0.83 ms |
+| Per-transaction ML score | sub-millisecond (mean ~0.56 ms · p95 ~0.64 ms · p99 ~0.83 ms) |
 
-`/api/benchmark/latency` exposes this live. The Dashboard surfaces "78,081× faster than T+1" — that's `86,400,000 ms / 1,106 ms`.
+`GET /api/benchmark/latency` exposes this live, and the Dashboard contrasts it with the 24-hour T+1 batch cycle the RBI 2023 FRM framework rules out. This is the number that lets an investigator freeze funds before they leave the bank.
+
+**One-time batch pipeline** — building the world from cold. Scale depends on the dataset: the synthetic set is ~80 nodes / ~1,800 edges (end-to-end in ~1 s); the IBM AML 100k benchmark is **~119k nodes / 87,772 edges**, where the full rebuild + all six detectors + XGBoost training takes a few minutes. The streaming path then keeps the in-memory graph current with incremental `add_transaction` updates, so the batch cost is paid once at startup, not per transaction.
 
 ---
 
 ## 5. Honest limitations
 
-- F1 = 0.994 on synthetic is artificially high because the embedded patterns are clean by construction. Real-world AML F1 is ~0.72 on IBM AML-HI-Large (SOTA FraudGT) and ~0.42 with an XGBoost baseline.
+- The honest production number is **F1 = 0.617, AUC = 0.927** (precision 0.851, recall 0.484) on the IBM AML 100k benchmark with single-CPU XGBoost. The synthetic F1 of ~0.99 is artificially high because the embedded patterns are clean by construction — it is not the number we stand behind. The published SOTA on this benchmark (FraudGT + BDH) is ~0.72 and needs multi-GPU training over days; 0.617 is the strong-baseline number a public sector bank can actually deploy on its own hardware.
 - IBM AML / PaySim / IEEE-CIS variants are *trainable* but not bundled (datasets are 100s of MB). Place the CSVs under `data/real/<dataset>/` and re-run the pipeline.
 - Streaming replays the loaded dataset onto the ingest bus (Kafka when a broker is reachable, in-process `asyncio.Queue` otherwise) — there is no live bank feed in the demo, but the transport, scoring, and ring buffer are the real production path. A production deployment swaps the replay source for the bank's live transaction bus + Pathway as outlined in the PoA.
 - Account Aggregator + DiliSense are mocks with realistic shapes. Production calls Sahamati-licensed AAs and the DiliSense API directly.

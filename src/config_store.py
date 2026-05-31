@@ -75,6 +75,15 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "profile_max_score": 0.95,                             # cap on combined score
     "profile_critical_score_threshold": 0.6,
     "profile_high_score_threshold": 0.4,
+    # Minimum rule_score required to emit a Profile-Mismatch alert. At
+    # 0.4 (= 2 × profile_score_per_mismatch) the entity must violate its
+    # declared profile on at least TWO independent behavioural dimensions.
+    # This stops the detector from mirroring the ML edge classifier and
+    # flooding the alert stream on real datasets with no declared KYC profile
+    # (e.g. IBM AML). The ML edge score still ESCALATES severity here, but a
+    # high ML score alone surfaces in the ML / graph views, not as a
+    # mislabelled "profile mismatch".
+    "profile_min_rule_score": 0.4,
     # ML
     "ml_alert_threshold": 0.6,
     # Fund tracer annotation thresholds (kept in sync with detectors)

@@ -149,11 +149,19 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
     try:
         from risk_score_learner import train_risk_weights, load_risk_weights
         rw_metrics = train_risk_weights(graph, data_dir, variant=dataset)
-        if rw_metrics.get("trained"):
-            print(f"  Risk-weight LR: F1 {rw_metrics['f1']:.3f}  AUC {rw_metrics['auc']:.3f}")
+        # Only ADOPT the learned weights if they clear a sane quality floor.
+        # A node-risk LR below this is worse than the structural hand-tuned
+        # heuristic and, when poorly calibrated, assigns a moderate risk to
+        # almost every node (e.g. IBM AML: F1 0.17 -> ~36k nodes over 0.5,
+        # which is meaningless). Below the floor we keep the hand-tuned scores.
+        MIN_RW_F1 = 0.40
+        if rw_metrics.get("trained") and rw_metrics.get("f1", 0.0) >= MIN_RW_F1:
+            print(f"  Risk-weight LR adopted: F1 {rw_metrics['f1']:.3f}  AUC {rw_metrics['auc']:.3f}")
             bundle = load_risk_weights(data_dir, variant=dataset)
             new_scores = detector.compute_node_risk_scores(risk_weights_bundle=bundle)
             results["node_risk_scores"] = new_scores
+        elif rw_metrics.get("trained"):
+            print(f"  Risk-weight LR rejected (F1 {rw_metrics['f1']:.3f} < {MIN_RW_F1}); keeping hand-tuned risk scores.")
         else:
             print(f"  Risk-weight training skipped: {rw_metrics.get('reason')}")
     except Exception as e:
