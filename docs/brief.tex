@@ -1,0 +1,154 @@
+% =============================================================================
+% RUDRA — 2-page Problem & Solution Brief
+% Team Bhadra · PSBs Hackathon Series 2026 · PS3 Fund Flow Tracking
+% =============================================================================
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[scaled=0.92]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[margin=1.5cm,top=1.4cm,bottom=1.4cm]{geometry}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{hyperref}
+
+% Brand colours
+\definecolor{ink}{HTML}{1e1b4b}      % deep indigo
+\definecolor{accent}{HTML}{4338ca}   % bright indigo
+\definecolor{rule}{HTML}{000000}     % rule colour
+\definecolor{muted}{HTML}{000000}    % muted text
+
+% Tight section headings
+\titleformat{\section}
+  {\normalfont\large\bfseries\color{ink}}{}{0pt}
+  {}[\vspace{-2pt}\color{rule}\hrule height 0.4pt\vspace{2pt}]
+\titleformat{\subsection}
+  {\normalfont\normalsize\bfseries\color{accent}}{}{0pt}{}
+\titlespacing*{\section}{0pt}{0.7em}{0.25em}
+\titlespacing*{\subsection}{0pt}{0.5em}{0.15em}
+
+\setlist[itemize]{topsep=2pt,itemsep=1pt,parsep=0pt,leftmargin=1.2em,label={\color{accent}\textbullet}}
+\setlist[enumerate]{topsep=2pt,itemsep=1pt,parsep=0pt,leftmargin=1.4em}
+
+\renewcommand{\arraystretch}{1.15}
+
+\hypersetup{colorlinks=true,urlcolor=accent,linkcolor=accent}
+\pagestyle{empty}
+
+\begin{document}
+
+% ---------- Title block ------------------------------------------------------
+\noindent
+{\LARGE\bfseries\color{ink} RUDRA: Shield Against Deception}\\[2pt]
+{\color{muted}\small Real-time fund-flow intelligence for Indian public sector banks}\\[1pt]
+{\color{accent}\small\bfseries Team Bhadra} \hspace{0.4em}\textbar\hspace{0.4em}
+{\color{muted}\small PSBs Hackathon Series 2026 \hspace{0.4em}\textbar\hspace{0.4em}
+Problem Statement 3, Fund Flow Tracking}
+\vspace{-2pt}
+\noindent\color{rule}\hrule height 1pt
+\vspace{2pt}
+
+% ==============================  THE PROBLEM  ================================
+\section*{The Problem}
+
+\subsection*{Who is affected}
+Every public sector bank in India, and through them every depositor whose savings sit in those balance sheets. Union Bank of India alone processes millions of transactions every day across more than 8,000 branches. The Reserve Bank of India's 2024 to 2025 Annual Report flagged that bank fraud incidents \textbf{rose 27 percent year on year}, with public sector banks absorbing the bulk of large-value cases. The operational cost lands on three specific groups inside the bank:
+\begin{itemize}
+  \item \textbf{Anti-money-laundering officers in head office}, who must file Suspicious Transaction Reports to the Financial Intelligence Unit of India under the Prevention of Money Laundering Act, often inside tight statutory windows of seven working days.
+  \item \textbf{Branch and zonal investigators}, who receive overnight alert lists every morning after the suspect funds have already left their counterparty accounts.
+  \item \textbf{The regulator and the Financial Intelligence Unit}, which receive tens of thousands of low-quality reports every year with no underlying network context to act on.
+\end{itemize}
+
+\subsection*{A day in the life of a Union Bank compliance officer}
+At nine in the morning the officer opens a queue of two to three hundred fresh alerts produced by the previous night's batch job. Each alert is a single row in a spreadsheet that names one suspect counterparty. There is no map of how the money actually moved between accounts. The officer spends the first two hours of the day just identifying which alerts are about the same underlying fraud ring, because the rule engine fires once per detector per entity and produces massive duplication. By midday only a handful of alerts have been triaged. Each one that reaches the suspicious-report stage requires the officer to manually copy entity names from Excel into Microsoft Word, draft a narrative, attach screenshots, escalate to a senior compliance head, and rebuild the report in the strict format required by the Financial Intelligence Unit of India. The whole process for one report takes around six hours. By the time the report is filed, the original transactions are five to seven days old and the funds have typically moved across three to four downstream accounts, often into foreign jurisdictions where recovery is effectively impossible.
+
+\subsection*{What is structurally broken today}
+\begin{tabularx}{\columnwidth}{@{}>{\bfseries\color{ink}}p{3.6cm}X@{}}
+\toprule
+Next-day detection only & Most public sector banks run their entire fraud monitoring as a nightly batch job. The Reserve Bank's 2023 Framework for Real-time Fraud Risk Monitoring already requires sub-second detection. Alerts that arrive the next morning are useless because layering has already moved the funds three to four counterparties downstream. \\
+Alert fatigue & A single laundering ring throws two hundred or more overlapping alerts, because each detector fires once per entity. Roughly ninety-five percent of analyst time goes into deduplication and not into investigation. \\
+No explanation of decisions & Vendor systems output a score such as zero point nine two with no reason attached. A senior compliance officer cannot defend a suspicious-transaction report before the Financial Intelligence Unit by saying that the model decided so. The Prevention of Money Laundering Act Rules require the reasoning to be on record. \\
+Manual report drafting & The current workflow is fully manual. Copy entity names from Excel, paste into Microsoft Word, screenshot the relationship network, email the compliance head, who then manually constructs the format required by the Financial Intelligence Unit. Each report takes about six hours. \\
+No network visibility & Analysts work in tabular tools and cannot actually see how two crore rupees entered Entity A, split into eighteen sub-payments through shell companies, and consolidated again at Entity F. The fraud story exists only in spreadsheets and tribal knowledge. \\
+Compliance deadline pressure & The Reserve Bank's December 2024 Master Direction on Fraud Risk Management requires near-real-time monitoring, tamper-proof audit logs, and Digital Personal Data Protection Act minimisation by \textbf{March 2026}. Most public sector banks have none of these in place today. \\
+\bottomrule
+\end{tabularx}
+
+\subsection*{Why existing approaches do not work}
+\begin{itemize}
+  \item \textbf{Legacy international vendors} such as Oracle Mantas, SAS and NICE Actimize license their products at three to fifteen crore rupees per public sector bank per year. They were built for American and European fraud patterns and do not natively understand Indian payment systems such as NEFT, RTGS and UPI. Their cycle detection still runs on hourly scheduled jobs, not on live streams.
+  \item \textbf{In-house spreadsheet and rule-engine setups} scale to roughly five rules at best and cannot do any form of network analysis on the underlying transactions, so layering chains and shell-company funnels go undetected.
+  \item \textbf{Black-box machine-learning services} are unusable in regulated reporting because the Prevention of Money Laundering Act Rules require the bank to put the reasoning on record. A score with no explanation cannot be filed as evidence.
+  \item \textbf{No native integration with India's digital public infrastructure}, which means the Account Aggregator framework licensed under Sahamati and Know-Your-Customer enrichment from providers like DiliSense are not wired in, even though regulators are increasingly mandating them.
+\end{itemize}
+
+\noindent\textit{The bottom line on the problem side:} public sector banks today file thousands of suspicious-transaction reports that they cannot fully justify, their investigators burn out on deduplication work that should not exist, and the actual fraud detection rate hovers in single-digit percentages of real losses.
+
+\newpage
+
+% ==============================  THE SOLUTION  ================================
+\section*{Our Solution}
+
+RUDRA is a real-time fund-flow intelligence platform that an investigator opens like a regular work application. It ingests every banking transaction the moment it happens, scores it in well under a millisecond, automatically \textbf{groups related alerts into one investigable case}, explains every decision in plain language with the actual features that drove the score, and \textbf{produces the complete Financial Intelligence Unit filing package in a single click}. Everything an investigator sees on screen is backed by a real model decision and a tamper-proof audit trail.
+
+\subsection*{Validated on the IBM Anti-Money-Laundering 100K public benchmark}
+\begin{tabularx}{\columnwidth}{@{}Xr@{}}
+\toprule
+Transactions monitored end to end & 100{,}000 \\
+Raw alerts surfaced by the six detectors & 4{,}661 \\
+Clustered into actionable case files & 4{,}283 \\
+Critical-severity alerts requiring senior review & 662 \\
+Total suspicious volume flagged & \textbf{Rs.~18{,}707 crore} \\
+F1 score on the public benchmark (machine-learning classifier) & \textbf{0.625} \textit{\textcolor{muted}{(industry leader is 0.72 and requires multi-GPU hardware)}} \\
+Area-under-curve score (ranking quality) & \textbf{0.925} \\
+End-to-end detection latency & \textbf{Approximately 1 second} \\
+Per-transaction machine-learning scoring & \textbf{Sub-millisecond} \\
+Velocity-burst accounts flagged automatically & 310 \\
+Transit-node mule accounts flagged automatically & 25 \\
+\bottomrule
+\end{tabularx}
+
+\subsection*{How the system works, end to end}
+\begin{itemize}
+  \item \textbf{Ingest.} Every incoming transaction arrives either through a real streaming bus (Apache Kafka) or in batch mode and enters a live in-memory network map where each node represents a customer account and each connection represents money flowing between two accounts.
+  \item \textbf{Detect.} Six specialised network-based detectors run in parallel. They look for circular money movements, rapid layering chains, small structured deposits that sit just below reporting thresholds, shell-company funnels, sudden reactivation of dormant accounts, and behavioural mismatches against the declared customer profile. A trained machine-learning model and a combined model that votes across multiple techniques score every connection in real time.
+  \item \textbf{Cluster.} Related alerts are automatically grouped using a set-merging technique on the entities they share, so that a fraud ring throwing two hundred individual alerts becomes one single case file rather than two hundred rows in a queue.
+  \item \textbf{Investigate.} The Case Workbench surfaces the flagged accounts with simple badges for transit behaviour, burst activity and dormant reactivation, an inline preview of where the money actually moved, and a plain-language explanation of every model decision showing the top contributing features ranked by importance.
+  \item \textbf{File.} One button produces a downloadable evidence package containing the format Suspicious Transaction Report required by the Financial Intelligence Unit, the formal Suspicious Activity Report as a PDF, the relevant network subgraph, the chronological transaction chain, the relevant legal citations from the Prevention of Money Laundering Act, and the full audit trail.
+\end{itemize}
+
+\subsection*{Why RUDRA is materially better than current systems}
+\begin{enumerate}
+  \item \textbf{Sub-second monitoring instead of next-day.} By the time funds reach the second account downstream, RUDRA has already flagged the corridor and surfaced an alert, so investigators can act while there is still money in the account to freeze.
+  \item \textbf{Automatic alert clustering ends fatigue.} A ring that fires two hundred individual alerts becomes one case, and the investigator works the case rather than the noise.
+  \item \textbf{Every model score is defensible.} The system shows the top six contributing features for every decision, satisfying the on-record reasoning requirement of the Prevention of Money Laundering Act Rules.
+  \item \textbf{Filing collapses from six hours to one click.} Output is fully compliant with the Digital Personal Data Protection Act, with every piece of personal information explicitly marked as redacted with a stated legal reason.
+  \item \textbf{Tamper-proof audit log.} Every case state change is recorded with a cryptographic seal linked to the previous entry, so any inspection by the Reserve Bank can verify on demand that no record was altered or deleted after the fact.
+  \item \textbf{Native to India's digital public infrastructure.} Account Aggregator (Sahamati) and Know-Your-Customer enrichment (DiliSense) are first-class integrations, with mock fallbacks for testing and live adapters that switch on when real credentials are present.
+  \item \textbf{Natural-language investigation assistant.} A built-in copilot powered by the Anthropic Claude model lets an investigator ask questions in plain English and triggers real backend tools such as cycle finding, alert explanation, and fund-flow tracing across the live data.
+  \item \textbf{Honest economics.} The full stack is open source and MIT licensed, with \textbf{no per-seat licensing} at all, in contrast to the three to fifteen crore rupees per year that legacy vendors charge each public sector bank.
+\end{enumerate}
+
+\subsection*{Regulatory alignment, built into the platform rather than bolted on}
+Reserve Bank Framework for Real-time Fraud Risk Monitoring 2023, Reserve Bank Master Direction on Fraud Risk Management December 2024, Prevention of Money Laundering Act 2002 Sections 3 and 12 together with Rule 3 of the 2005 Rules, Reserve Bank Master Direction on Know Your Customer 2016 Chapter 7, Digital Personal Data Protection Act 2023 Section 11, and the Account Aggregator Framework 2021.
+
+\subsection*{Bottom line}
+\noindent
+\colorbox{ink!7}{
+\parbox{0.985\columnwidth}{\color{ink}
+\small
+Indian public sector banks cannot afford next-day fraud detection in 2026. RUDRA shows, on a real public benchmark dataset, with production-grade accuracy, sub-millisecond scoring, and one-click compliance filing, that the entire anti-money-laundering stack can be rebuilt on open infrastructure in a way that is \textbf{faster, cheaper, more explainable, and ready for the regulator}. It is exactly what the Reserve Bank's December 2024 Master Direction will require every public sector bank to deploy by March 2026, and nobody else is shipping it today.
+}}
+
+\vspace{4pt}
+\hrule height 0.4pt
+\vspace{2pt}
+\noindent{\footnotesize\color{muted}Team Bhadra \textbullet\ MIT licensed \textbullet\ \href{https://github.com/infinity2147/bhadra_rudra}{github.com/infinity2147/bhadra\_rudra}}
+
+\end{document}

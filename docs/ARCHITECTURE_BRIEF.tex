@@ -1,0 +1,119 @@
+% =============================================================================
+% RUDRA — 2-page Technical Architecture Brief
+% Team Bhadra · PSBs Hackathon Series 2026 · PS3 Fund Flow Tracking
+%
+% Build:
+%   1. Render architecture.mmd to PNG (Mermaid Live Editor or `mmdc -i architecture.mmd -o architecture.png -w 1800 -H 1100`)
+%   2. Place architecture.png in the same directory as this file
+%   3. pdflatex ARCHITECTURE_BRIEF.tex
+% =============================================================================
+\documentclass[10pt,a4paper]{article}
+
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[scaled=0.92]{helvet}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage[margin=1.3cm,top=1.2cm,bottom=1.2cm]{geometry}
+\usepackage{parskip}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{titlesec}
+\usepackage{graphicx}
+\usepackage{hyperref}
+
+% Brand colours (match brief.tex)
+\definecolor{ink}{HTML}{1e1b4b}
+\definecolor{accent}{HTML}{4338ca}
+\definecolor{rule}{HTML}{000000}
+\definecolor{muted}{HTML}{000000}
+
+\titleformat{\section}
+  {\normalfont\large\bfseries\color{ink}}{}{0pt}
+  {}[\vspace{-2pt}\color{rule}\hrule height 0.4pt\vspace{2pt}]
+\titleformat{\subsection}
+  {\normalfont\normalsize\bfseries\color{accent}}{}{0pt}{}
+\titlespacing*{\section}{0pt}{0.6em}{0.2em}
+\titlespacing*{\subsection}{0pt}{0.4em}{0.1em}
+
+\setlist[itemize]{topsep=2pt,itemsep=1pt,parsep=0pt,leftmargin=1.2em,label={\color{accent}\textbullet}}
+\setlist[enumerate]{topsep=2pt,itemsep=1pt,parsep=0pt,leftmargin=1.4em}
+\renewcommand{\arraystretch}{1.12}
+
+\hypersetup{colorlinks=true,urlcolor=accent,linkcolor=accent}
+\pagestyle{empty}
+
+\begin{document}
+
+% ---------- Title block ------------------------------------------------------
+\noindent
+{\LARGE\bfseries\color{ink} RUDRA: Technical Architecture Brief}\\[2pt]
+{\color{muted}\small Real-time fund-flow intelligence platform for Indian public sector banks}\\[1pt]
+{\color{accent}\small\bfseries Team Bhadra} \hspace{0.4em}\textbar\hspace{0.4em}
+{\color{muted}\small PSBs Hackathon Series 2026, PS3 Fund Flow Tracking}
+\vspace{-2pt}
+\noindent\color{rule}\hrule height 1pt
+\vspace{2pt}
+
+% ==============================  OVERVIEW + DIAGRAM ==========================
+\section*{System Overview}
+RUDRA is a Python and React platform that consumes either a live Kafka transaction stream or a batch CSV, builds an in-memory directed money-flow graph, runs six specialised graph detectors plus a trained machine-learning stack in parallel, clusters the resulting alerts into actionable cases, generates a tamper-evident audit log, and serves the whole thing through a FastAPI backend to a React 19 frontend. A Claude-powered investigation copilot sits on top with multi-round tool calling against the live backend state.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.96\linewidth]{architecture.png}
+\vspace{-4pt}
+\caption*{\small\color{muted}Figure 1. End-to-end architecture. Source: \texttt{architecture.mmd}. Numbered subsystems correspond to sections below.}
+\vspace{-6pt}
+\end{figure}
+
+% ==============================  COMPONENT DETAIL ============================
+\section*{Subsystems and Why Each Choice Was Made}
+
+\subsection*{1. Data sources and streaming}
+\begin{itemize}
+  \item \textbf{Apache Kafka} (via \texttt{aiokafka}, single-broker KRaft mode in \texttt{docker-compose}) carries the live transaction stream. Kafka was chosen because it is the only message bus that combines durable replay, exactly-once semantics, and an asynchronous Python client mature enough for production. The producer replays the loaded dataset onto the topic at a configurable rate; the consumer pushes each event into a 500-event ring buffer that the frontend polls.
+  \item \textbf{IBM Anti-Money-Laundering 100K} (Kaggle, stratified 100k sample of HI-Small) is the primary benchmark; \textbf{PaySim} is supported as a secondary dataset. Both load through \texttt{real\_data\_loader.py} which normalises the columns to RUDRA's internal schema.
+  \item \textbf{Sahamati Account Aggregator} and \textbf{DiliSense KYC} integrations call the real REST APIs through \texttt{httpx} when credentials are present (env-driven), and fall back to schema-accurate mocks otherwise. The switch is transparent at \texttt{/api/integrations/status}.
+\end{itemize}
+
+\subsection*{2. Fund-flow graph and the six detectors (algorithmic depth)}
+The graph is a \textbf{NetworkX DiGraph} held entirely in memory. Edges aggregate every transaction between a sender-receiver pair into per-edge statistics (sum, mean, std, first-seen, last-seen, rail mix, channel mix, fraud count). The graph supports incremental updates (\texttt{add\_transaction}) so streaming ingest does not require a full rebuild. NetworkX was chosen over Neo4j because at the working size of 80--120 thousand edges, pure Python with cached strongly-connected-component decomposition produces sub-millisecond queries with zero daemon overhead; the schema is portable to Neo4j or TigerGraph for production.
+\begin{itemize}
+  \item \textbf{Cycle detection.} Decompose the graph into strongly connected components; only components of size $\geq 3$ can contain a non-trivial cycle. Inside each component, group edges into logarithmic-amount buckets (a round-trip carries similar amounts on every hop, so cross-bucket cycles are noise). Run Johnson's algorithm (\texttt{nx.simple\_cycles}) on each bucket with a length bound. Validate every cycle against the actual edge amounts using a coefficient-of-variation filter.
+  \item \textbf{Rapid layering.} Breadth-first walk capped at the configured chain length, accepting an outgoing edge only if its amount is at least the configured fraction of the prior hop (typically 0.85). The monotonically decreasing flow is the textbook layering signature.
+  \item \textbf{Smurfing.} Sliding window over edges whose average amount sits below the reporting threshold (default Rs.~2 lakh). Cluster amounts whose coefficient of variation is under tolerance, and additionally fire on transaction-burst patterns (N or more transactions inside an M-minute window from one sender, regardless of receiver).
+  \item \textbf{Shell-company funnel.} Combination of (a) flow-imbalance ratio $|\text{in} - \text{out}| / \max(\text{in}, \text{out})$ above a threshold, and (b) pass-through detection where inflow approximately equals outflow but average holding time is below an hour. Together these catch both classic shell collectors and balanced mule accounts.
+  \item \textbf{Dormant reactivation.} Per-account daily aggregate, find gaps of at least the configured threshold of days, then compute a Z-score on post-gap activity against the pre-gap mean.
+  \item \textbf{Profile mismatch.} Behavioural-rule engine that compares declared KYC profile against actual activity. Thresholds per entity type are config-driven (for example, an \emph{individual} averaging above Rs.~10 lakh per transaction is flagged).
+\end{itemize}
+All six detectors read their thresholds from a single SQLite-backed \texttt{ConfigStore}; the Detector Settings page in the frontend writes to the same store, and the Re-run button rebuilds detection over the live graph.
+
+\newpage
+
+\subsection*{3. Machine-learning stack}
+\begin{itemize}
+  \item \textbf{XGBoost edge classifier (primary).} Gradient-boosted decision trees over 30 engineered features per edge: amount statistics, channel and rail diversity, near-threshold proximity, night and weekend share, sender and receiver degrees and strengths, time span, fraud-rate-at-counterparty avoiding leakage. Stratified 80/20 split with \texttt{scale\_pos\_weight} for class imbalance. Chosen because XGBoost is the empirical state of the art for tabular fraud detection at this scale, has sub-millisecond CPU inference, and supports exact SHAP attributions through TreeExplainer.
+  \item \textbf{GraphSAGE GNN (structural baseline, optional).} Two SAGEConv layers compute 64-dimensional node embeddings by sample-and-aggregate from the local neighbourhood; an MLP head concatenates the sender and receiver embeddings to predict the edge label. Trains in seconds on CPU. Chosen over FraudGT or BDH because those need multi-GPU training; GraphSAGE is the lightest credible GNN baseline that gives a model the ability to ``see its neighbours.''
+  \item \textbf{Stacked ensemble.} Three-fold out-of-fold predictions from XGBoost, GraphSAGE, and a Graph Attention Network are fed to a logistic-regression meta-learner. The meta-learner produces the final score. Stacking was chosen because each base model captures a different signal (tabular features, neighbourhood structure, attention-weighted relationships); linear stacking is the most defensible combiner because the coefficients are interpretable.
+  \item \textbf{Risk-weights logistic regression.} Replaces the hand-tuned weighted sum for node risk scoring with a learned model trained on labelled risk signals (branch diversity, singleton-out signature, total transaction count). Loaded automatically at startup; the detector falls back to hand weights when the bundle is missing.
+  \item \textbf{SHAP TreeExplainer.} Computes exact Shapley values for the XGBoost classifier, decomposing every score as \texttt{base\_value + sum(feature contributions)}. The background sample is stored inside the model pickle so the explainer instantiates in milliseconds per request. Used everywhere the UI says ``why this score.''
+\end{itemize}
+
+\subsection*{4. Backend, APIs, and storage}
+\textbf{FastAPI} exposes 51+ endpoints. Chosen over Flask for native async (the Kafka consumer is an asyncio task on the same loop), automatic OpenAPI docs at \texttt{/docs}, and dependency injection used to enforce RBAC: every request carries an \texttt{X-User-Role} header, and \texttt{Depends(get\_role)} feeds \texttt{require(action, role)} which raises HTTP 403 on disallowed actions. State is loaded once at startup into a single dictionary (transactions DataFrame, NetworkX graph, ML bundles, pre-computed tracer caches), and incremental ingest only mutates the affected sub-structures. \textbf{SQLite} (single file at \texttt{data/<variant>/rudra.db}) holds the case rows, the SHA-256 hash-chained audit log, and the configurable thresholds. SQLite was chosen because it is single-file, zero-config, atomic per statement, and the schema migrates trivially to PostgreSQL in production. The audit log stores \texttt{prev\_hash} and \texttt{this\_hash = SHA-256(prev\_hash + canonical\_entry\_json)} per row; \texttt{GET /api/cases/\{id\}/verify} walks the chain and detects any inserted, edited or deleted row.
+
+\subsection*{5. Frontend}
+\textbf{React 19 + Vite + Tailwind 4.} React for the component model, Vite for sub-second hot module reload during development, Tailwind for utility-first styling without a component-library bundle. Fourteen pages: Dashboard, Incidents, Cases, Journey (Flow Story plus Timeline), Network Graph (Matrix, Arc, Force), Analytics, Patterns, Entities, ML Models, Live Stream, Copilot, SAR Reports, Settings, Account Aggregator. The Journey page replaced the original Sankey and force-directed layouts with custom-built views that hard-cap node and edge counts so the diagram is bounded by the layout rather than by the data.
+
+\subsection*{6. GenAI investigation copilot and prompting strategy}
+The copilot uses \textbf{Anthropic Claude Haiku 4.5} (\texttt{claude-haiku-4-5-20251001}) called through the official \texttt{anthropic} Python SDK. Haiku was chosen over Sonnet or Opus because investigation queries are dispatch-heavy rather than reasoning-heavy: the model selects the right tool, the backend does the actual computation, the model synthesises the result into plain English. Haiku gives sub-second responses at a fraction of the cost. The prompting strategy is \textbf{multi-round structured tool calling}, up to three rounds. The system prompt frames Claude as a fraud-investigation assistant for RUDRA and lists four tools with explicit JSON schemas: \texttt{trace\_funds}, \texttt{find\_cycles}, \texttt{explain\_alert}, \texttt{get\_profile\_delta}. Each tool executes a real backend function against the live in-memory state. Multi-round lets Claude compose tool calls (for example, \texttt{find\_cycles} returns the worst alert, then \texttt{explain\_alert} retrieves its SHAP attribution, then the model writes a paragraph). When \texttt{ANTHROPIC\_API\_KEY} is not set the system falls back to a regex intent router that maps queries to single-tool dispatch, so the page never crashes silently.
+
+\vspace{2pt}
+\hrule height 0.4pt
+\vspace{2pt}
+\noindent{\footnotesize\color{muted}Team Bhadra \textbullet\ MIT licensed \textbullet\ Source: \href{https://github.com/infinity2147/bhadra_rudra}{github.com/infinity2147/bhadra\_rudra} \textbullet\ Diagram source: \texttt{docs/architecture.mmd}}
+
+\end{document}
