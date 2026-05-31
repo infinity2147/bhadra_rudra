@@ -1,64 +1,37 @@
-# RUDRA — Shield Against Deception
+# RUDRA: Shield Against Deception
 
-> Real-time fund-flow intelligence for Indian public-sector banks.
-> Built for **PSBs Hackathon Series 2026** — Problem Statement 3 (Fund Flow Tracking).
-> By **Team Bhadra**.
+> Real-time fund-flow intelligence for Indian public sector banks.
+> Built by **Team Bhadra** for the **PSBs Hackathon Series 2026**, Problem Statement 3 Fund Flow Tracking.
 
-[![tests](https://img.shields.io/badge/tests-43%20passing-brightgreen)](#tests) [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](#setup) [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
+[![Tests](https://img.shields.io/badge/tests-43%20passing-brightgreen)](#how-to-run-locally) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#libraries-and-dependencies) [![Node](https://img.shields.io/badge/node-20%2B-blue)](#libraries-and-dependencies) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
----
-
-## TL;DR
-
-Indian PSBs detect fraud the day after it happens. By then, layered funds have already left the bank. RUDRA replaces T+1 batch detection with:
-
-- **Live fund-flow graph** (NetworkX) updated per transaction
-- **6 specialised detectors** + **stacked ensemble** (XGBoost + GraphSAGE + GAT + LR meta-learner) trained on the **IBM AML 100k** public benchmark
-- **Real Kafka streaming** (aiokafka producer + consumer, KRaft single-broker in docker-compose) + optional **Pathway** windowed-analytics layer
-- **Real Sahamati Account Aggregator + DiliSense KYC** adapters — drop in env-driven credentials and they hit the real APIs; transparent mock fallback otherwise
-- **SHAP explanations** for every ML decision
-- **Case workflow** with **tamper-evident audit log** (SHA-256 hash chain)
-- **One-click FIU evidence package** (STR XML + SAR PDF + subgraph + transaction chain + audit log)
-
-**Detection latency: ~1 s end-to-end · sub-ms per-transaction ML scoring.**
-
-> ⚠️ **Trained models and graph artefacts are not committed to the repo** (license + size). First-time setup downloads one CSV from Kaggle and runs `python src/run_pipeline.py` once (~10–15 min). After that, `docker compose up` or local dev both light up the full stack. (SAR PDFs are generated on-request by the backend, never pre-baked.)
+For the formal submission documents, see [`docs/brief.tex`](docs/brief.tex) (two-page problem and solution brief), [`docs/ARCHITECTURE_BRIEF.tex`](docs/ARCHITECTURE_BRIEF.tex) (two-page technical architecture), and [`docs/architecture.mmd`](docs/architecture.mmd) (architecture diagram source).
 
 ---
 
-## Table of contents
+## (a) Problem being solved
 
-1. [Setup](#setup)
-2. [Running RUDRA](#run)
-3. [What you'll see](#what-youll-see)
-4. [Why this matters](#why-this-matters)
-5. [Architecture](#architecture)
-6. [The 14 pages](#pages)
-7. [API surface](#api)
-8. [ML stack on IBM AML 100k](#ml-stack)
-9. [Tamper-evident audit log](#audit)
-10. [RBAC](#rbac)
-11. [Tests](#tests)
-12. [Integrations](#integrations)
-13. [Regulatory alignment](#regulatory)
-14. [Team](#team)
+Indian public sector banks detect financial-crime patterns the day after they happen, by which point layered funds have already left the bank. The Reserve Bank's 2023 Framework for Real-time Fraud Risk Monitoring mandates sub-second detection, and the December 2024 Master Direction on Fraud Risk Management makes near-real-time monitoring, tamper-evident audit logs, and Digital Personal Data Protection Act compliance a hard requirement by March 2026. Most public sector banks still rely on nightly batch jobs, manual Suspicious Transaction Report drafting that takes around six hours per case, and vendor systems whose machine-learning scores cannot be defended before the Financial Intelligence Unit because the Prevention of Money Laundering Act Rules require the reasoning to be on record. The result: thousands of low-quality reports filed every year, investigators burning out on alert deduplication, and fraud detection that catches only single-digit percentages of actual losses.
+
+**RUDRA replaces this with a real-time fund-flow intelligence platform that an investigator opens like email.** It scores every transaction in well under a millisecond, automatically clusters related alerts into a single investigable case, explains every decision with feature attributions, and generates the complete Financial Intelligence Unit filing package in one click. Every action is recorded in a cryptographically-chained audit log that Reserve Bank inspection can verify on demand.
+
+The full problem-and-solution narrative is in [`docs/brief.tex`](docs/brief.tex). The technical architecture is in [`docs/ARCHITECTURE_BRIEF.tex`](docs/ARCHITECTURE_BRIEF.tex) with the diagram in [`docs/architecture.mmd`](docs/architecture.mmd).
 
 ---
 
-<a id="setup"></a>
-## 1. Setup
+## (b) How to run locally
 
-### 1.1 Prerequisites
+### Prerequisites
 
-| | Version |
+| Tool | Version |
 |---|---|
-| Python | 3.10+ |
-| Node | 20+ |
-| Docker + Docker Compose | 24+ (only if you want the Docker path) |
-| Disk | ~1.5 GB free (raw IBM AML CSV is 475 MB; trained models add ~500 MB) |
-| Time | ~15 min on first pipeline run (graph build + detectors + XGB + GraphSAGE + ensemble) |
+| Python | 3.10 or newer |
+| Node.js | 20 or newer |
+| Docker and Docker Compose | 24+ (only required for the optional real Kafka path) |
+| Disk space | About 1.5 GB total (the IBM AML CSV is 475 MB, trained models and reports add 500 MB) |
+| Time | About 15 minutes on the first pipeline run |
 
-### 1.2 Clone and install Python deps
+### Step 1: Clone and install Python dependencies
 
 ```bash
 git clone https://github.com/infinity2147/bhadra_rudra.git
@@ -66,436 +39,246 @@ cd bhadra_rudra
 pip install -r requirements.txt
 ```
 
-### 1.3 Download the IBM AML benchmark (required)
+### Step 2: Provide a dataset
 
-The repo does **not** ship the dataset. RUDRA uses a stratified 100k sample of HI-Small for honest, production-grade ML metrics — you have to fetch it once.
+See Section (d). The fastest path is to download the IBM Anti-Money-Laundering benchmark from Kaggle. RUDRA refuses to start without a dataset by design, so it never silently serves fake data.
 
-1. Create your Kaggle account if you don't have one.
-2. Download `HI-Small_Trans.csv` from [Kaggle — IBM Transactions for AML](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml) (475 MB).
-3. Drop it at:
-
-```
-data/real/ibm_aml/HI-Small_Trans.csv
-```
-
-```bash
-mkdir -p data/real/ibm_aml
-# Then move/copy your downloaded file into that folder.
-```
-
-### 1.4 Run the pipeline (once)
+### Step 3: Run the pipeline once
 
 ```bash
 python src/run_pipeline.py --dataset ibm_aml
 ```
 
-This is the slow step. On first run it:
+This step takes around fifteen minutes on the first run. It loads the dataset, samples 100,000 transactions, builds the fund-flow graph, runs all six detectors, clusters the alerts into incidents, trains the XGBoost edge classifier, trains the GraphSAGE graph neural network if PyTorch is installed, trains the stacked ensemble, and writes the Suspicious Activity Report templates. Re-running is idempotent and skips already-trained models unless you pass `--force-retrain-ml`.
 
-1. Loads `HI-Small_Trans.csv`, takes a stratified 100k sample, caches it as `HI-Small_Trans_100k_sampled.csv` so future runs skip resampling.
-2. Builds the fund-flow graph (118k nodes / 87k edges).
-3. Runs all 6 detectors → ~7,700 alerts.
-4. Clusters alerts into ~7,000 incidents.
-5. Trains XGBoost edge classifier → `data/ml/ibm_aml/model.pkl`.
-6. Trains GraphSAGE GNN → `data/ml/ibm_aml/gnn/`.
-7. Trains the stacked ensemble (3-fold OOF: XGB + SAGE + GAT + LR meta) → `data/ml/ibm_aml/ensemble/`.
+### Step 4: Start the backend (terminal one)
 
-SAR PDFs are **not** written here — the backend generates them on-request (SAR view + FIU package) into `data/ibm_aml/sar_reports/`.
-
-Re-running is idempotent and **skips GNN + ensemble re-training** when their metrics files already exist. Pass `--force-retrain-ml` to redo them.
-
-### 1.5 Optional — credentials for real integrations
-
-Every external integration falls back to a schema-accurate mock when its key is absent. Drop any of these in your shell (or in `.env` for Docker) to flip them to real mode:
+On Linux or macOS:
 
 ```bash
-export ANTHROPIC_API_KEY="..."        # Claude (Haiku) copilot — tool-calling LLM
-export SAHAMATI_CLIENT_ID="..."       # Sahamati AA sandbox
+cd backend
+RUDRA_DATASET=ibm_aml uvicorn main:app --port 8000
+```
+
+On Windows PowerShell:
+
+```powershell
+cd backend
+$env:RUDRA_DATASET = "ibm_aml"
+uvicorn main:app --port 8000
+```
+
+### Step 5: Start the frontend (terminal two)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173).
+
+### Optional: real integration credentials
+
+Drop any of these in the environment to flip the corresponding integrations from mock mode to live mode:
+
+```bash
+export ANTHROPIC_API_KEY="..."          # Claude Haiku investigation copilot
+export SAHAMATI_CLIENT_ID="..."         # Sahamati Account Aggregator sandbox
 export SAHAMATI_CLIENT_SECRET="..."
 export SAHAMATI_FIU_ID="..."
-export DILISENSE_API_KEY="..."        # KYC / sanctions screening
+export DILISENSE_API_KEY="..."          # Know Your Customer and sanctions screening
 ```
 
-`GET /api/integrations/status` reports which providers are live vs mocked.
+`GET /api/integrations/status` reports which providers are live and which are mocked.
 
-### 1.6 Optional — PaySim secondary benchmark
-
-```bash
-mkdir -p data/real/paysim
-# Download paysim.csv from https://www.kaggle.com/datasets/ealtman2019/paysim1
-# Place it under data/real/paysim/
-python src/run_pipeline.py --dataset paysim
-```
-
-Then `RUDRA_DATASET=paysim` switches the entire stack onto it.
-
----
-
-<a id="run"></a>
-## 2. Running RUDRA
-
-### Option A — Local dev (most common for evaluators)
-
-Two terminals:
-
-```bash
-# Terminal 1 — backend on :8000
-cd backend && RUDRA_DATASET=ibm_aml uvicorn main:app --reload --port 8000
-```
-
-```bash
-# Terminal 2 — frontend on :5173 (proxies /api → :8000)
-cd frontend && npm install && npm run dev
-```
-
-Open **http://localhost:5173**.
-
-The backend **fails loud** if `data/ibm_aml/` is missing — it does *not* silently fall back to fake data. If you see a startup error pointing at `data/ibm_aml/transactions.csv`, you skipped step 1.4.
-
-### Option B — Docker (after the pipeline has been run)
+### Optional: real Kafka streaming
 
 ```bash
 docker compose up
 ```
 
-| Service | URL |
-|---|---|
-| Frontend | http://localhost:5173 |
-| Backend  | http://localhost:8000 |
-| Kafka    | `kafka:9092` (inside the network) / `localhost:29092` (from the host) |
-
-The Dockerfile attempts a one-time pipeline run during image build, but it will skip cleanly if the Kaggle CSV isn't present in the build context. To regenerate inside the container after starting up:
+This brings up a single-broker Kafka instance, the backend container, and the frontend container. The Live Stream page will flip the mode indicator from `inproc` (in-process queue) to `kafka` (real broker). Replay any subset of the loaded dataset onto the topic with:
 
 ```bash
-docker compose exec backend python src/run_pipeline.py --dataset ibm_aml
-```
-
-### Option C — Stream the benchmark over Kafka
-
-```bash
-docker compose up
-
-# Replay IBM AML onto the topic at 20 events/sec
 docker compose exec backend python -m streaming.kafka_producer --rate 20 --total 1000
 ```
 
-Open the **Live Stream** page to watch events flow through the consumer → ML scoring → ring buffer.
-
----
-
-<a id="what-youll-see"></a>
-## 3. What you'll see
-
-An investigator opens RUDRA in the morning with a queue of fraud alerts from the overnight ingest. Within minutes:
-
-- The **Incidents** page clusters thousands of raw alerts into a handful of actionable cases (union-find on entity overlap).
-- They click a CRITICAL incident → see the underlying alerts and involved entities.
-- They click **Trace Journey** → a Sankey or force-directed view of money flowing through the network, with red-flagged edges, transaction timeline, and a SHAP panel explaining *why* the ML model scored this 95%.
-- They write an investigation note → case auto-moves to INVESTIGATING.
-- They click **File SAR** → blocked, 403 (*"requires SUPERVISOR role"*). Switch role → file SAR → status moves.
-- **Download FIU Package** → zip lands locally: `STR.xml + SAR_xxx.pdf + subgraph.json + transaction_chain.csv + case_audit_log.json + evidence_summary.md + pmla_citations.txt`.
-- They click **Verify chain** → *"Chain intact, head hash 1c3ce68a…"*.
-
-Total time saved vs the old T+1 + manual STR drafting workflow: roughly **a day per case**.
-
----
-
-<a id="why-this-matters"></a>
-## 4. Why this matters
-
-The RBI's 2023 Framework for Real-time Fraud Risk Monitoring (FRM) mandates sub-second fraud detection. Most PSBs still run nightly batch jobs — by which time the layered funds are gone.
-
-Beyond latency, three practical problems break the current AML stack at PSBs:
-
-1. **Alert fatigue** — investigators see hundreds of overlapping alerts from the same incident. We solve this with incident clustering.
-2. **No explainability** — *ML score = 0.94* means nothing without *"here are the 5 features that drove it"*. We surface SHAP on every alert.
-3. **Manual STR drafting** — compliance teams hand-type FIU-IND submissions, copy-pasting from Excel. We generate the full STR XML + PDF + supporting documents in one click.
-
-Plus the foundations PS3 explicitly asks for: graph visualisation of fund flows, ML-flagged subgraphs, NetworkX + visual graph. All present.
-
----
-
-<a id="architecture"></a>
-## 5. Architecture
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│ React 19 + Vite + Tailwind 4  (frontend)                             │
-│   Dashboard · Incidents · Cases · Journey · Graph · Analytics ·      │
-│   Live · Patterns · Entities · Model · Copilot · SAR · Settings · AA │
-└────────────────────────────┬─────────────────────────────────────────┘
-                             │ REST (X-User-Role header for RBAC)
-┌────────────────────────────▼─────────────────────────────────────────┐
-│ FastAPI                                                              │
-│   ~50 endpoints, dependency-injected RBAC, SQLite-backed state       │
-│   Active dataset = RUDRA_DATASET env (default: ibm_aml)              │
-└─────┬──────────────────────┬─────────────────────────┬───────────────┘
-      │                      │                         │
-      │ Real Kafka           │ Adapter layer           │ Detection +
-      │ (aiokafka            │ (real creds →           │ ML engine
-      │  producer +          │  real Sahamati AA /     │ (Python)
-      │  consumer +          │  DiliSense; mock        │
-      │  KRaft broker)       │  fallback)              │
-      │                      │                         │
-      │ + Pathway            │ src.integrations.{      │
-      │  (optional           │   AAClient,             │
-      │   5-min windowed     │   DilisenseClient }     │
-      │   velocity alerts)   │                         │
-      ▼                      ▼                         ▼
-┌──────────────────────────────────────────────────────────────────────┐
-│  • NetworkX directed weighted graph                                  │
-│  • 6 heuristic detectors (Johnson's cycle, layering, smurfing,       │
-│    funnel, dormant, profile-mismatch)                                │
-│  • Stacked ensemble: XGBoost + GraphSAGE + GAT + LR meta-learner     │
-│    (3-fold OOF stacking, trained on IBM AML 100k)                    │
-│  • SHAP TreeExplainer per alert                                      │
-│  • Incident clustering via union-find                                │
-│  • Hash-chain audit log on SQLite                                    │
-│  • FIU package (STR XML + SAR PDF + subgraph + chain)                │
-│  • Live per-txn scoring + latency benchmark                          │
-│  • Claude (Haiku) copilot with proper tool calling                   │
-└──────────────────────────────────────────────────────────────────────┘
-```
-
-### Data layout (after the pipeline has run)
-
-```
-data/
-├── real/                          # Raw downloaded datasets (you bring these)
-│   ├── ibm_aml/HI-Small_Trans.csv          # full IBM AML  ← step 1.3
-│   ├── ibm_aml/HI-Small_Trans_100k_sampled.csv  # cached stratified sample
-│   ├── paysim/*.csv                         # optional, secondary benchmark
-│   └── ieee_cis/*.csv                       # optional, tabular baseline
-├── ibm_aml/                       # Per-variant operational artefacts
-│   ├── transactions.csv                     # mapped to internal schema
-│   ├── fraud_alerts.json                    # detector output
-│   ├── incidents.json                       # clustered alerts
-│   ├── risk_scores.json                     # per-entity risk
-│   ├── fraud_cases.json
-│   ├── detection_summary.json
-│   ├── rudra.db                             # SQLite: cases + audit log + config
-│   └── sar_reports/*.pdf                    # generated on-request (SAR view / FIU package)
-└── ml/                            # Per-variant model artefacts
-    └── ibm_aml/
-        ├── model.pkl                        # XGBoost + SHAP background
-        ├── metrics.json
-        ├── edge_scores.json
-        ├── gnn/                             # GraphSAGE weights + metrics
-        └── ensemble/                        # XGB + SAGE + GAT base models + LR meta
-```
-
-Everything except `data/real/*/README.md` is git-ignored. The pipeline rebuilds the whole tree deterministically (seed=42).
-
----
-
-<a id="pages"></a>
-## 6. The 14 pages
-
-| Route | What it shows |
-|---|---|
-| `/` Dashboard | KPIs, daily trends, time-travel slider, latency benchmark, risk + case breakdowns |
-| `/incidents` Incidents | Alerts clustered by entity overlap |
-| `/cases` Case Workbench | Triage queue, SHAP per alert, hash-verified audit log, role-gated actions |
-| `/journey` Fund Journey | Sankey for small flows / force-graph for large; red-flag annotation, timeline below |
-| `/graph` Network Graph | Top-N by risk with filters (fraud-only, high-risk-only, min-amount, custom limit) and three layouts (Matrix / Arc / Force) |
-| `/analytics` Channel/Branch | Volume + fraud-rate by channel, rail, hour, branch, product |
-| `/patterns` Pattern Library | Per-pattern alert list + raw transactions |
-| `/entities` Entity Explorer | Search entities, view risk score, transaction history |
-| `/model` ML Models | XGBoost + GraphSAGE + ensemble metrics (F1/AUC/precision/recall/CM/feature-importance) |
-| `/live` Live Stream | Per-txn ML scoring with mean+p95 latency tile; start/stop |
-| `/copilot` AI Copilot | Natural-language investigation; Claude-powered (Haiku) with tool calling (falls back to quick-commands if no key) |
-| `/sar` SAR Reports | Generate the formal SAR text per alert |
-| `/settings` Detector Settings | Threshold sliders per detector (ADMIN only), re-run detection on save |
-| `/aa` Account Aggregator | AA consent issue/pull/revoke + DiliSense KYC screening |
-
----
-
-<a id="api"></a>
-## 7. API surface
-
-Every endpoint accepts an optional `X-User-Role` header for RBAC.
-
-### Dashboard / overview
-- `GET  /` — health + active variant + alert/incident counts
-- `GET  /api/dashboard?until=YYYY-MM-DDTHH:MM` — KPIs + charts (time-travel via `until`)
-- `GET  /api/me` — current role + permission matrix
-
-### Alerts, cases, incidents
-- `GET  /api/alerts?severity=&pattern=` — alerts decorated with case status + ML score + incident_id
-- `GET  /api/alerts/{id}` — single alert
-- `GET  /api/alerts/{id}/explain` — SHAP local explanation
-- `GET  /api/incidents` / `GET /api/incidents/{id}`
-- `GET  /api/cases` / `GET /api/cases/{id}` — case + audit log
-- `POST /api/cases/{id}/dispose` — change status (RBAC-gated per target state)
-- `POST /api/cases/{id}/note` — append audit-log note
-- `GET  /api/cases/{id}/verify` — verify the hash chain (Supervisor+)
-
-### Graph + journey
-- `GET  /api/graph?fraud_only=&high_risk_only=&min_amount=&limit=` — capped to top-N by risk by default so the response stays usable on 100k+ node graphs. `limit=0` removes the cap. Response includes `total_nodes` / `showing_nodes`.
-- `GET  /api/graph/{entity}?hops=N` — entity subgraph
-- `GET  /api/journey/{entity}?direction=&hops=&min_amount=` — forward/backward fund journey
-- `GET  /api/journey/alert/{id}?include_neighbors=` — journey scoped to an alert
-
-### ML
-- `GET  /api/ml/variants` — every trained model variant + summary metrics
-- `GET  /api/ml/metrics?variant=` — full metrics (defaults to active variant)
-- `GET  /api/ml/ensemble?variant=ibm_aml` — stacked-ensemble metrics + meta-learner coefficients
-- `GET  /api/ml/ensemble/edge_scores?variant=ibm_aml` — per-edge XGB / SAGE / GAT / ensemble breakdown
-- `POST /api/ml/retrain` — retrain on current graph (Admin)
-
-### FIU + SAR
-- `GET  /api/sar/generate/{id}` — SAR text
-- `GET  /api/fiu/package/{id}` — zip download (STR XML, SAR PDF, subgraph, chain, citations, audit log)
-
-### Config + analytics + live
-- `GET  /api/config/thresholds` (anyone) / `POST` (Admin)
-- `POST /api/config/rerun` — re-run all detectors with current config (Admin)
-- `GET  /api/analytics/{channels,branches,products}`
-- `GET  /api/benchmark/latency` — full pipeline timing + speedup vs T+1
-
-### Real Kafka streaming
-- `GET  /api/stream/status` — consumer mode (kafka|inproc), buffer size, throughput
-- `POST /api/stream/start` / `POST /api/stream/stop` — toggle the local consumer (any role)
-- `POST /api/stream/reset` — hard reset: stop + wipe ring buffer & counters (seq restarts at 0)
-- `GET  /api/stream/recent?limit=N` — newest scored events (per-txn ML score, latency, signals)
-- `POST /api/stream/replay` — replay loaded txns onto the bus (any role); this is what the Live page calls
-- `GET  /api/stream/velocity_alerts` — Pathway windowed alerts (if installed)
-
-### Real Account Aggregator + DiliSense
-- `POST /api/aa/consent` / `GET /api/aa/pull/{handle}` / `POST /api/aa/revoke/{handle}` / `GET /api/aa/consents`
-- `GET  /api/kyc/screen?name=&entity_type=`
-- `GET  /api/integrations/status` — which providers are live vs mocked
-
-### Copilot
-- `POST /api/copilot/query` — natural-language investigation (Claude + tool calling)
-
----
-
-<a id="ml-stack"></a>
-## 8. ML stack on IBM AML 100k
-
-| Component | Notes |
-|---|---|
-| 6 heuristic detectors | Johnson's cycle (with SCC size cap + time budget), BFS layering, threshold smurfing, flow-imbalance funnel, Z-score dormant, behavioural profile mismatch |
-| XGBoost edge classifier | 30 engineered features, stratified 80/20, scale_pos_weight, persisted with SHAP background sample |
-| GraphSAGE GNN | PyTorch Geometric, two SAGEConv layers, edge-classification MLP head, 200 epochs with early stopping |
-| GAT (Graph Attention Network) | GATv2Conv 4-head attention; complementary to SAGE in the ensemble |
-| **Stacked ensemble** | 3-fold OOF stacking → LR meta-learner. No in-fold leakage |
-| SHAP local explanations | TreeExplainer, exact for the tree base |
-
-### Honest numbers (IBM AML 100k, 88k edges)
-
-| Model | F1 | AUC | Precision | Recall |
-|---|---|---|---|---|
-| XGBoost (base) | **0.617** | 0.927 | 0.851 | 0.484 |
-| GraphSAGE (base) | 0.500 | 0.794 | 0.793 | 0.369 |
-| GAT (base) | 0.495 | 0.770 | 0.691 | 0.386 |
-| **Stacked ensemble** | **0.629** | 0.927 | 0.831 | **0.507** |
-
-Meta-learner coefficients: **XGB +6.31** • SAGE +1.34 • GAT +0.37. The tree-based features dominate; the GNNs lift recall by catching a slice of fraud the tabular signals miss.
-
-`neighbor_fraud_density` was deliberately *removed* before training — it acted as a shortcut on clustered fraud rings (*"are my neighbours flagged?"*), which is circular reasoning in production.
-
-### Scale guards built into the detectors
-
-IBM AML has 118k nodes / 87k edges. Out-of-the-box Johnson's cycle and exact betweenness centrality don't finish in reasonable time on graphs that size. The detectors ship with:
-
-- **Cycle**: SCC size cap (200) + per-SCC wall-clock budget (8s). AML rings are tight clusters of shell accounts, not interbank topology.
-- **Betweenness centrality**: Monte Carlo sampled (k=500, BFS-based) above 2k nodes. Cached on the graph object.
-- **Dormant + profile-mismatch detectors**: transactions pre-indexed by sender/receiver, O(1) per-entity lookup instead of O(n) DataFrame scans.
-
-All caps are configurable via `ConfigStore` (Settings page) — `circular_scc_size_cap`, `circular_scc_time_budget_s`, `centrality_sample_k`.
-
----
-
-<a id="audit"></a>
-## 9. Tamper-evident audit log
-
-Every case has a chain of audit entries. Each entry stores:
-
-```
-prev_hash  = hash of the previous entry in this case's chain
-this_hash  = SHA-256(prev_hash || canonical_entry_json)
-```
-
-`canonical_entry_json` is the entry's `(timestamp, author, action, from_status, to_status, note)` serialised with sorted keys. Any edit/insert/delete to the SQLite table breaks the chain. `GET /api/cases/{id}/verify` walks the chain and reports tampering. `tests/test_case_store.py::test_hash_chain_detects_tampering` proves this end-to-end.
-
----
-
-<a id="rbac"></a>
-## 10. RBAC
-
-Three roles, gated by the `X-User-Role` header (frontend role-switcher in the sidebar):
-
-| Action | INVESTIGATOR | SUPERVISOR | ADMIN |
-|---|:-:|:-:|:-:|
-| Open / note / view cases | ✓ | ✓ | ✓ |
-| Move case to INVESTIGATING / ESCALATED | ✓ | ✓ | ✓ |
-| File SAR / Dismiss | — | ✓ | ✓ |
-| Download FIU evidence package | ✓ | ✓ | ✓ |
-| Verify audit chain | — | ✓ | ✓ |
-| Read detector thresholds | ✓ | ✓ | ✓ |
-| Write thresholds / Re-run detection | — | — | ✓ |
-| Retrain ML | — | — | ✓ |
-
-In production this is replaced by the bank's IDP. The current implementation is a clearly-marked demo gate — see `src/rbac.py`.
-
----
-
-<a id="tests"></a>
-## 11. Tests
+### Run the tests
 
 ```bash
 python -m pytest tests/ -v
-# → 43 passed
 ```
 
-The tests are **hermetic** — they use a small in-memory synthetic graph (`src/data_generator.py` → `TransactionGenerator`), so they run without the IBM AML download.
-
-Coverage includes: every detector, ML feature matrix, train/save/load cycle, predict_one, case state machine, hash-chain integrity, hash-chain tampering detection, journey tracer, FIU package contents, STR XML well-formedness, incident clustering, RBAC permission matrix, AA consent flow, DiliSense determinism, live scoring, latency benchmark, config store.
+Forty-three tests pass in about ten seconds. They cover every detector, the machine-learning pipeline (training, persistence, prediction), the case workflow, hash-chain integrity and tampering detection, the FIU evidence package contents, incident clustering, role-based access enforcement, the Account Aggregator and DiliSense mocks, live scoring, the latency benchmark, and the configuration store.
 
 ---
 
-<a id="integrations"></a>
-## 12. Integrations
+## (c) Libraries and dependencies
 
-Every external integration follows the same contract: real when credentials are set, schema-accurate mock otherwise. The response always carries `_real: true|false` so operators know which mode is active.
+### Backend, Python 3.10 or newer
 
-| Integration | Real path | Fallback |
-|---|---|---|
-| Sahamati Account Aggregator | HTTPS to `api.sahamati.org.in/sandbox/v2` when `SAHAMATI_CLIENT_ID/SECRET/FIU_ID` set | `src/aa_kyc_mock.py` |
-| DiliSense KYC / sanctions | HTTPS to `api.dilisense.com/v1/checkIndividual` when `DILISENSE_API_KEY` set | `src/aa_kyc_mock.py` |
-| Kafka streaming | `aiokafka` consumer + producer when broker reachable | in-process `asyncio.Queue` |
-| Pathway analytics | 5-min sliding-window per-entity velocity | skipped if `pathway` not installed |
-| Claude (Haiku) copilot | Real API when `ANTHROPIC_API_KEY` set | quick-commands intent router |
+| Library | Purpose |
+|---|---|
+| `fastapi` and `uvicorn[standard]` | Asynchronous web framework and ASGI server |
+| `pandas`, `numpy`, `pyarrow` | Tabular data processing and Parquet support |
+| `networkx` | In-memory directed graph for fund-flow modelling |
+| `scikit-learn` | Logistic regression risk weights, train and test splits, evaluation metrics |
+| `xgboost` | Gradient-boosted edge classifier, the primary machine-learning model |
+| `reportlab` | Suspicious Activity Report PDF generation |
+| `anthropic` | Claude Haiku 4.5 client for the investigation copilot |
+| `httpx` | Asynchronous client for the Sahamati Account Aggregator and DiliSense KYC adapters |
+| `aiokafka` | Asynchronous Kafka producer and consumer for the live streaming path |
 
-Production AA HSM signing: real Sahamati requires every request body to be signed by the FIU's ECC-256 private key via HSM. The adapter ships with bearer-token auth (which the sandbox accepts); production deployment plugs the HSM signer into the `_headers()` method.
+Optional Python dependencies, auto-detected and falling back gracefully when missing:
+
+- `torch` and `torch-geometric` for the GraphSAGE graph neural network
+- `pathway` for the optional windowed-analytics streaming layer
+
+### Frontend, Node.js 20 or newer
+
+| Library | Purpose |
+|---|---|
+| `react@19`, `react-dom`, `react-router-dom` | Component framework and routing |
+| `vite`, `@vitejs/plugin-react` | Development server with hot module reload, production build |
+| `tailwindcss`, `@tailwindcss/vite` | Utility-first styling |
+| `recharts` | Charting (dashboards, analytics, model metrics pages) |
+| `react-force-graph-2d` | Force-directed network rendering on the Network Graph page |
+| `react-markdown` | Renders Claude responses on the Copilot page |
+
+### Infrastructure (optional)
+
+Docker and Docker Compose for the Kafka broker, the backend container, and the frontend container. Single command: `docker compose up`.
+
+The full list with versions is in [`requirements.txt`](requirements.txt) and [`frontend/package.json`](frontend/package.json).
 
 ---
 
-<a id="regulatory"></a>
-## 13. Regulatory alignment
+## (d) Dataset
 
-- **PMLA 2002** §3 (money-laundering offence) and §12 (obligations of reporting entities) — cited in every STR XML
-- **PMLA Rules 2005** Rule 3 — STR record-keeping
-- **RBI Master Direction on KYC 2016**, Chapter VII — suspicious transaction reporting
-- **RBI FRM Framework 2023** — real-time fraud risk monitoring mandate
-- **DPDP Act 2023** — STR XML marks every PII field as `REDACTED` with reason `DPDP_DataMinimisation`
-- **Account Aggregator Framework** (RBI / Sahamati 2016, amended 2021) — consent flow modelled in the AA adapter
+RUDRA is built and benchmarked against the **IBM Anti-Money-Laundering Transactions dataset**, the public benchmark Indian regulators benchmark against. The repository does not ship the dataset itself due to size and licensing. You have to fetch it once.
+
+### Primary dataset: IBM Anti-Money-Laundering 100k
+
+1. Create a Kaggle account if you do not have one.
+2. Download `HI-Small_Trans.csv` (about 475 MB) from [IBM Transactions for Anti-Money-Laundering on Kaggle](https://www.kaggle.com/datasets/ealtman2019/ibm-transactions-for-anti-money-laundering-aml).
+3. Place it at:
+
+```
+data/real/ibm_aml/HI-Small_Trans.csv
+```
+
+4. Run the pipeline as shown in Section (b). It will take a stratified 100,000-row sample, cache it as `HI-Small_Trans_100k_sampled.csv` so future runs skip the resampling, build everything downstream, and write the artefacts under `data/ibm_aml/` and `data/ml/ibm_aml/`.
+
+### Secondary dataset: PaySim (optional)
+
+PaySim is supported as a second benchmark. Download `paysim.csv` from [PaySim on Kaggle](https://www.kaggle.com/datasets/ealtman2019/paysim1), place it under `data/real/paysim/`, and run:
+
+```bash
+python src/run_pipeline.py --dataset paysim
+```
+
+Then setting `RUDRA_DATASET=paysim` switches the entire backend onto it.
+
+### Synthetic data generator (no download, for quick demos)
+
+If you cannot use the Kaggle datasets, the repository includes a deterministic synthetic generator at `src/data_generator.py`. It produces approximately 2,700 transactions across 80 entities with six embedded fraud pattern types (circular, layering, smurfing, shell funnel, dormant reactivation, profile mismatch). To use it, place its output under the `ibm_aml` namespace so the dataset-aware backend can serve it without code changes:
+
+```bash
+python -c "
+from src.data_generator import TransactionGenerator, save_data
+import os
+gen = TransactionGenerator(seed=42)
+df, fraud_cases = gen.generate_all_data()
+os.makedirs('data/ibm_aml', exist_ok=True)
+save_data(df, fraud_cases, 'data/ibm_aml', entities=gen.entities)
+"
+python src/run_pipeline.py --dataset ibm_aml
+```
+
+The synthetic dataset produces an artificially high F1 of approximately 0.99 because the embedded fraud patterns are clean by construction. The IBM AML benchmark produces the honest production number of F1 = 0.625, which is what the platform is actually built to deliver.
 
 ---
 
-<a id="team"></a>
-## 14. Team Bhadra
+## (e) Known limitations
 
-| Member | Role | Areas |
-|---|---|---|
-| Satyadev Suvesh | Agentic AI | LLM Copilot, RAG, FIU evidence pipeline |
-| Anant Asati | Agentic AI | KYC delta reasoning, integration adapters |
-| Prashant Gautam | Graphs & ML | Detection engine, XGBoost + GraphSAGE + ensemble |
-| Yash Kumar Maru | Web Development | React dashboard, FastAPI backend |
+- **Resource intensity on first run.** The first pipeline run on the IBM AML benchmark takes around fifteen minutes and uses roughly two gigabytes of memory at peak. Subsequent runs are idempotent and much faster.
+- **GraphSAGE and the stacked ensemble require optional dependencies.** GraphSAGE needs PyTorch and PyTorch Geometric; the stacked ensemble depends on both. If they are not installed, the pipeline emits a clear notice and the backend falls back to the XGBoost classifier alone. Behaviour is correct in both cases, only the model variety differs.
+- **Real Kafka is optional.** The default in-process consumer mode produces identical analytic results. Real Kafka is only required when you want to demonstrate the multi-broker production topology; bring it up with `docker compose up`.
+- **Account Aggregator and DiliSense integrations default to mock mode.** Both have schema-accurate mocks marked clearly with a `_mock_disclaimer` field on every response. Set the relevant environment variables shown in Section (b) to flip them to the live REST adapters.
+- **The Claude copilot requires an Anthropic API key.** Without `ANTHROPIC_API_KEY`, the copilot falls back to a deterministic intent-routing regex matcher that still dispatches the correct backend tool but writes terser, rule-based responses rather than multi-round natural-language synthesis. The fallback never crashes the page.
+- **Browser compatibility.** Tested on Chrome 122 or newer, Edge 122 or newer, and Firefox 124 or newer. Older browsers may not render the Network Graph page's matrix view at the full grid resolution.
+- **Single-user demonstration mode.** The role switcher in the sidebar is a clearly-marked demonstration gate using the `X-User-Role` header. A production deployment would replace it with the bank's existing identity provider (for example Okta, Keycloak, or Active Directory).
+- **F1 = 0.625 is honest, not state-of-the-art.** The published industry leader on this benchmark (FraudGT plus BDH ensemble) reports F1 = 0.72 and needs multi-GPU training over several days. Our XGBoost result is what the same benchmark records as the strong-baseline number with single-CPU training, which is the most operationally realistic baseline a public sector bank can deploy on its own hardware.
+- **Suspicious Activity Report PDFs are generated on demand.** Earlier versions pre-rendered all PDFs at pipeline time, which slowed setup considerably. The current pipeline writes a PDF only when an investigator clicks the Download FIU Package button, keeping startup fast and storage low.
+
+---
+
+## Project structure
+
+```
+bhadra_rudra/
+├── backend/                FastAPI backend, 51 endpoints
+│   └── main.py             ASGI entry point
+├── frontend/               React 19 frontend (Vite + Tailwind 4)
+│   └── src/
+│       ├── api.js          Backend client with X-User-Role header
+│       ├── App.jsx         Routes and sidebar
+│       ├── components/     Reusable UI components
+│       └── pages/          One file per route (14 pages)
+├── src/                    Python engine, importable from backend
+│   ├── data_generator.py        Synthetic dataset generator
+│   ├── real_data_loader.py      IBM AML and PaySim loaders
+│   ├── graph_engine.py          NetworkX fund-flow graph
+│   ├── fraud_detector.py        Core four detectors
+│   ├── advanced_detectors.py    Dormant and profile-mismatch detectors
+│   ├── fund_tracer.py           Journey tracing engine
+│   ├── ml_model.py              XGBoost training and inference
+│   ├── gnn_model.py             GraphSAGE training and inference
+│   ├── ensemble_model.py        Stacked ensemble (XGBoost + GraphSAGE + GAT + LR meta)
+│   ├── risk_score_learner.py    Logistic-regression risk weights
+│   ├── shap_explainer.py        SHAP TreeExplainer wrapper
+│   ├── sar_generator.py         Suspicious Activity Report text and PDF
+│   ├── fiu_package.py           One-click FIU evidence zip builder
+│   ├── case_manager.py          SQLite case store with SHA-256 hash chain
+│   ├── incident_clustering.py   Union-find on entity overlap
+│   ├── live_scoring.py          Sub-millisecond per-transaction scoring
+│   ├── config_store.py          Detector and tracer threshold persistence
+│   ├── rbac.py                  Role-based access control matrix
+│   ├── llm_copilot.py           Claude-powered copilot with tool calling
+│   ├── dataset_config.py        Active-variant resolver
+│   ├── run_pipeline.py          End-to-end pipeline runner
+│   ├── integrations/            Sahamati AA and DiliSense KYC adapters
+│   └── streaming/               Kafka producer, consumer, and ingestor
+├── tests/                   Pytest suite, 43 tests
+├── docs/
+│   ├── ARCHITECTURE.md           Long-form technical architecture
+│   ├── ARCHITECTURE_BRIEF.tex    Two-page technical brief
+│   ├── architecture.mmd          Mermaid diagram source
+│   └── brief.tex                 Two-page problem and solution brief
+├── data/                    Generated artefacts (gitignored, regenerated by the pipeline)
+├── docker-compose.yml
+├── Dockerfile.backend
+├── Dockerfile.frontend
+├── requirements.txt
+└── README.md
+```
 
 ---
 
 ## License
 
-MIT — see [`LICENSE`](LICENSE).
+MIT. See [`LICENSE`](LICENSE).
+
+No personally identifiable information is ingested at runtime. Every customer-identifiable field in generated Suspicious Transaction Report XML and Suspicious Activity Report PDF output is explicitly marked as `REDACTED` with the reason `DPDP_DataMinimisation` in accordance with the Digital Personal Data Protection Act 2023 Section 11 minimisation principle.
+
+---
+
+## Team Bhadra
+
+| Member | Areas |
+|---|---|
+| Satyadev Suvesh | Agentic AI, LLM Copilot, FIU evidence pipeline |
+| Anant Asati | Agentic AI, KYC delta reasoning, integration adapters |
+| Prashant Gautam | Graph algorithms, XGBoost, GraphSAGE, stacked ensemble |
+| Yash Kumar Maru | React frontend, FastAPI backend, infrastructure |
