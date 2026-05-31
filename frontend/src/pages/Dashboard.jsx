@@ -1,13 +1,11 @@
 import { useState, useEffect, useMemo } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  PieChart, Pie, Cell, ComposedChart, Line,
+  Cell, ComposedChart, Line,
 } from 'recharts';
 import { useNavigate } from 'react-router-dom';
 import MetricCard from '../components/MetricCard';
 import { fetchAPI } from '../api';
-
-const PIE_COLORS = ['#6366f1', '#ef4444', '#f59e0b', '#22c55e', '#3b82f6', '#8b5cf6'];
 
 const RISK_COLOR = {
   CRITICAL: '#dc2626', HIGH: '#f97316', MEDIUM: '#f59e0b', LOW: '#22c55e',
@@ -56,13 +54,9 @@ export default function Dashboard() {
   if (error) return <div className="flex items-center justify-center h-full text-red-600">Error: {error}</div>;
   if (!data) return null;
 
-  const { kpis, pattern_breakdown, risk_distribution, case_status_counts, amount_distribution } = data;
+  const { kpis, risk_distribution, case_status_counts, amount_distribution } = data;
   const risk_data = Object.entries(risk_distribution || {}).map(([level, count]) => ({ level, count }));
   const case_data = Object.entries(case_status_counts || {}).map(([status, count]) => ({ status, count }));
-  const pattern_data = (pattern_breakdown || []).map(p => ({
-    ...p,
-    pattern: (p.fraud_pattern || '').replace(/_/g, ' '),
-  }));
 
   return (
     <div className="p-6 space-y-6 max-w-[1600px] mx-auto">
@@ -206,28 +200,6 @@ export default function Dashboard() {
               <Bar dataKey="normal_count" fill="#3b82f6" radius={[3, 3, 0, 0]} name="Normal" />
               <Bar dataKey="fraud_count" fill="#ef4444" radius={[3, 3, 0, 0]} name="Fraud" />
             </BarChart>
-          </ResponsiveContainer>
-        </div>
-
-        <div className="bg-white rounded-xl border border-gray-200 p-4">
-          <h3 className="text-sm font-semibold text-gray-700 mb-3">Fraud Pattern Breakdown</h3>
-          <ResponsiveContainer width="100%" height={280}>
-            <PieChart>
-              <Pie
-                data={pattern_data}
-                dataKey="count"
-                nameKey="pattern"
-                cx="50%" cy="50%" outerRadius={90}
-                label={({ pattern, percent }) => `${pattern} (${(percent * 100).toFixed(0)}%)`}
-                labelLine={{ stroke: '#9ca3af' }}
-              >
-                {pattern_data.map((_, index) => (
-                  <Cell key={index} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                ))}
-              </Pie>
-              <Tooltip />
-              <Legend wrapperStyle={{ fontSize: 12 }} />
-            </PieChart>
           </ResponsiveContainer>
         </div>
 
