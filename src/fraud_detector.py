@@ -845,6 +845,96 @@ class FraudDetector:
         self.alerts.extend(alerts)
         return alerts
 
+    def detect_recruiters(self,
+                          min_fanout: Optional[int] = None,
+                          pass_through_ratio: Optional[float] = None,
+                          min_seed_amount: Optional[float] = None) -> List[Dict]:
+        """Detect the **recruiter / coordinator** upstream of a mule fleet.
+
+        Mule detection asks "is this account a pass-through?". This asks the more
+        actionable question: *who is funding the pass-throughs?* A coordinator is
+        a node that seeds money into many accounts which then forward it on. We
+        flag the orchestrator — the highest-value target — not just the
+        disposable mules.
+
+        An account U is a coordinator when at least ``min_fanout`` of its direct
+        recipients are "mule-like": they both receive and send, and forward most
+        of what they receive (``min(in,out)/max(in,out) >= pass_through_ratio``).
+        Only seed transfers of at least ``min_seed_amount`` count, so ordinary
+        disbursement (salary, refunds) to consumers — who don't forward — is not
+        mistaken for recruitment.
+        """
+        min_fanout = int(min_fanout if min_fanout is not None else self._cfg("recruiter_min_fanout", 5))
+        pt = float(pass_through_ratio if pass_through_ratio is not None else self._cfg("recruiter_pass_through_ratio", 0.6))
+        min_seed = float(min_seed_amount if min_seed_amount is not None else self._cfg("recruiter_min_seed_amount", 10_000))
+        min_funding_share = float(self._cfg("recruiter_min_funding_share", 0.3))
+        alerts: List[Dict] = []
+
+        in_str: Dict[str, float] = {}
+        out_str: Dict[str, float] = {}
+        for n in self.graph.nodes():
+            in_str[n] = sum(self.graph[u][n]["total_amount"] for u in self.graph.predecessors(n))
+            out_str[n] = sum(self.graph[n][v]["total_amount"] for v in self.graph.successors(n))
+
+        def _is_mule_like(r: str) -> bool:
+            i, o = in_str.get(r, 0.0), out_str.get(r, 0.0)
+            if i <= 0 or o <= 0:
+                return False
+            return min(i, o) / max(i, o) >= pt
+
+        for u in self.graph.nodes():
+            recruited = []
+            seeded_total = 0.0
+            for v in self.graph.successors(u):
+                edge_amt = self.graph[u][v]["total_amount"]
+                if edge_amt < min_seed:
+                    continue
+                # U must be a DOMINANT funder of v — supplying a real share of v's
+                # inflow. This is what separates a coordinator funding its fleet
+                # from a node that merely sends a little to a busy account.
+                if edge_amt < min_funding_share * in_str.get(v, edge_amt):
+                    continue
+                if _is_mule_like(v):
+                    recruited.append(v)
+                    seeded_total += edge_amt
+            if len(recruited) < min_fanout:
+                continue
+
+            downstream_outflow = float(sum(out_str.get(v, 0.0) for v in recruited))
+            score = min(0.95, 0.5 + min(len(recruited), 20) * 0.03)
+            u_name = self.graph.nodes[u].get("name", u)
+            recruited_names = [self.graph.nodes[v].get("name", v) for v in recruited[:15]]
+            severity = "CRITICAL" if (len(recruited) >= min_fanout * 2 or downstream_outflow > 10_000_000) else "HIGH"
+
+            alert = {
+                "alert_id": f"ALERT_RECRUIT_{len(alerts) + 1:04d}",
+                "pattern_type": "Recruiter / Coordinator",
+                "severity": severity,
+                "confidence": round(score * 100, 1),
+                "entities": [u] + recruited,
+                "entity_names": [u_name] + recruited_names,
+                "coordinator": u,
+                "coordinator_name": u_name,
+                "n_recruited": len(recruited),
+                "total_flow": round(seeded_total, 2),
+                "seeded_amount": round(seeded_total, 2),
+                "downstream_outflow": round(downstream_outflow, 2),
+                "description": (
+                    f"'{u_name}' seeded ₹{seeded_total:,.0f} into {len(recruited)} accounts "
+                    f"that forward funds onward — coordinator/recruiter signature. "
+                    f"Downstream relay volume ₹{downstream_outflow:,.0f}."
+                ),
+                "recommendation": (
+                    "Investigate the coordinator as the principal, not just the mules. "
+                    "Freeze the fleet together; map shared KYC / device / funding signals."
+                ),
+            }
+            alerts.append(alert)
+            self.detected_patterns["recruiter"].append(alert)
+
+        self.alerts.extend(alerts)
+        return alerts
+
     def _avg_holding_time(self, node: str) -> Optional[float]:
         """Amount-weighted average time funds stay at `node`, in seconds.
 
@@ -1066,6 +1156,9 @@ class FraudDetector:
         print("Running Shell Company Funnel Detection...")
         funnels = self.detect_shell_funnels()
 
+        print("Running Recruiter / Coordinator Detection...")
+        recruiters = self.detect_recruiters()
+
         print("Computing Node Risk Scores...")
         risk_scores = self.compute_node_risk_scores(risk_weights_bundle=self.risk_weights_bundle)
 
@@ -1074,6 +1167,7 @@ class FraudDetector:
             "rapid_layering": layering,
             "smurfing": smurfing,
             "shell_funnels": funnels,
+            "recruiters": recruiters,
             "all_alerts": self.alerts,
             "node_risk_scores": risk_scores,
             "summary": {
@@ -1082,6 +1176,7 @@ class FraudDetector:
                 "layering_count": len(layering),
                 "smurfing_count": len(smurfing),
                 "funnel_count": len(funnels),
+                "recruiter_count": len(recruiters),
                 "high_risk_nodes": sum(1 for s in risk_scores.values() if s >= 0.5),
                 "critical_alerts": sum(1 for a in self.alerts if a["severity"] == "CRITICAL"),
                 "high_alerts": sum(1 for a in self.alerts if a["severity"] == "HIGH"),
@@ -1095,6 +1190,7 @@ class FraudDetector:
         print(f"  Rapid Layering: {results['summary']['layering_count']}")
         print(f"  Smurfing: {results['summary']['smurfing_count']}")
         print(f"  Shell Funnels: {results['summary']['funnel_count']}")
+        print(f"  Recruiters/Coordinators: {results['summary']['recruiter_count']}")
         print(f"  High-Risk Nodes: {results['summary']['high_risk_nodes']}")
 
         return results

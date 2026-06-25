@@ -72,6 +72,13 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # within the sender's sub-threshold activity (so background noise mixed in
     # doesn't hide them). Amounts within this relative spread count as one band.
     "smurfing_fanout_band_tolerance": 0.15,
+    # Recruiter / coordinator — one source funding a fleet of pass-through mules.
+    # Names the orchestrator upstream of the mules (distinct from smurfing).
+    "recruiter_min_fanout": 5,                 # min mule-like recipients to flag a coordinator
+    "recruiter_pass_through_ratio": 0.6,       # recipient min(in,out)/max(in,out) above this = forwards funds
+    "recruiter_min_seed_amount": 10_000,       # ignore dust seed transfers
+    "recruiter_min_funding_share": 0.3,        # U must supply >= this share of each mule's inflow
+                                               # (a coordinator FUNDS its fleet; not just one of many payers)
     # Shell funnel
     "funnel_imbalance_threshold": 0.7,
     "funnel_min_in_degree": 3,
