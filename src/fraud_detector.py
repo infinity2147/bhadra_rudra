@@ -199,119 +199,216 @@ class FraudDetector:
         return alerts
 
     def detect_rapid_layering(self,
-                               time_window_hours: int = 48,
+                               time_window_hours: Optional[int] = None,
                                min_chain_length: Optional[int] = None) -> List[Dict]:
-        """Detect rapid layering by finding chains of sequential transactions."""
-        min_chain_length = min_chain_length if min_chain_length is not None else self._cfg("layering_min_chain_length", 3)
-        decrease_ratio = self._cfg("layering_decrease_ratio", 0.85)
-        max_chains_cfg = self._cfg("layering_max_chains", 200)
-        # BFS branching factor — config-driven (was hardcoded to 5, missing many
-        # chains on real graphs with high out-degree). Default raised to 10 so
-        # production-scale graphs surface the same chains the demo does.
-        max_branching = self._cfg("layering_max_branching_per_node", 10)
-        alerts = []
+        """Detect rapid layering: a single tranche of funds relayed through a
+        chain of intermediary accounts quickly enough — and with the amount
+        preserved closely enough — that the chain reads as one laundering route
+        rather than unrelated transfers that merely share endpoints.
 
-        # Build adjacency with temporal info
-        node_transactions = defaultdict(list)
+        A path A→B→C→… qualifies only when EVERY consecutive hop satisfies all
+        three foundational constraints:
 
-        for u, v, data in self.graph.edges(data=True):
+          1. **Temporal causality + rapidity.** Money cannot leave an account
+             before it arrives, and a layering relay forwards it *fast*. Each
+             aggregated edge carries a [first_seen, last_seen] range, so we test
+             interval feasibility — there must exist an arrival time on the
+             incoming edge and a departure on the outgoing edge with
+             ``arrival <= departure <= arrival + window``::
+
+                 outgoing.last_seen  >= incoming.first_seen           (causal)
+                 outgoing.first_seen <= incoming.last_seen + window    (rapid)
+
+             A hop dated before its predecessor, or a month after it, fails.
+             This is the gate that makes the detector about *layering* and not
+             "any path of length ≥ 3". The previous implementation threaded a
+             ``prev_time`` through the search and then never compared it, so the
+             temporal signal — the whole point of *rapid* layering — was
+             silently discarded.
+
+          2. **Amount preservation.** A relay passes (nearly) the whole tranche
+             on; it neither accumulates nor mixes in unrelated money. Each hop
+             must land in ``[decrease_ratio, 1 + grow_tolerance] × prev_amount``.
+
+          3. **Materiality.** Every hop must move at least ``min_hop_amount`` so
+             dust can't form a chain.
+
+        Search strategy (the two flaws the team reported):
+
+          * Start nodes are processed **largest-outflow-first**, not in
+            graph-insertion order, so the ``max_chains`` budget is spent on the
+            biggest money movements rather than whichever nodes were inserted
+            first.
+          * At each node we follow outgoing edges **by amount, descending**, and
+            keep the first ``max_branching`` that pass the gates. The old code
+            sliced the adjacency list in insertion order, so a launderer could
+            bury the real transfer behind a few tiny decoys and evade detection.
+            Following the money by size — with the materiality and
+            amount-preservation gates — defeats that: decoys sort to the bottom
+            and fail the gates anyway.
+
+        Discovery collects every **maximal** causal walk; emission then drops
+        any chain whose entity set is contained in a longer one, so the alert
+        stream isn't flooded with every prefix/suffix of one route (and the
+        result is independent of the order chains were discovered in).
+
+        Operates purely on the aggregated graph (edge amount + first/last_seen),
+        so behaviour is identical whether or not raw ``transactions`` were
+        supplied to the detector.
+        """
+        window_hours = time_window_hours if time_window_hours is not None else self._cfg("layering_time_window_hours", 48)
+        window = timedelta(hours=float(window_hours))
+        max_span = timedelta(hours=float(self._cfg("layering_max_chain_span_hours", 72)))
+        min_chain_length = min_chain_length if min_chain_length is not None else self._cfg("layering_min_chain_length", 4)
+        decrease_ratio = float(self._cfg("layering_decrease_ratio", 0.85))
+        grow_tolerance = float(self._cfg("layering_amount_grow_tolerance", 0.15))
+        max_chains = int(self._cfg("layering_max_chains", 200))
+        max_branching = int(self._cfg("layering_max_branching_per_node", 10))
+        max_depth = int(self._cfg("layering_max_depth", 8))
+        min_hop_amount = float(self._cfg("layering_min_hop_amount", 50_000))
+        max_start_nodes = int(self._cfg("layering_max_start_nodes", 5_000))
+        # How far down a node's amount-ranked edge list to scan for valid
+        # continuations before giving up — bounds work at high-degree hubs.
+        scan_cap = max(max_branching * 8, 64)
+
+        def _parse(ts):
             try:
-                first_seen = datetime.strptime(data["first_seen"], "%Y-%m-%d %H:%M:%S")
-                last_seen = datetime.strptime(data["last_seen"], "%Y-%m-%d %H:%M:%S")
+                t = pd.to_datetime(ts)
+                return None if pd.isna(t) else t
             except (ValueError, TypeError):
+                return None
+
+        # Build amount-ranked, time-stamped adjacency once. Edges below the dust
+        # floor, or with unparseable timestamps, are dropped (we can't reason
+        # about causality without time).
+        adj: Dict[str, List[Tuple]] = defaultdict(list)
+        for u, v, data in self.graph.edges(data=True):
+            amt = float(data.get("total_amount", 0.0) or 0.0)
+            if amt < min_hop_amount:
                 continue
+            tf = _parse(data.get("first_seen"))
+            tl = _parse(data.get("last_seen"))
+            if tf is None or tl is None:
+                continue
+            adj[u].append((v, amt, tf, tl))
+        for u in adj:
+            adj[u].sort(key=lambda e: e[1], reverse=True)
 
-            node_transactions[u].append({
-                "target": v,
-                "amount": data["total_amount"],
-                "count": data["transaction_count"],
-                "first_seen": first_seen,
-                "last_seen": last_seen,
-            })
+        # Seed largest-outflow-first; cap the seed set on very large graphs.
+        start_nodes = sorted(adj.keys(), key=lambda n: adj[n][0][1], reverse=True)[:max_start_nodes]
 
-        # Find chains where money moves rapidly through multiple accounts
-        visited_chains = set()
-        max_chains = max_chains_cfg
+        def _hop_ok(prev_first, prev_amt, nxt_first, nxt_amt) -> bool:
+            # Gate on each relationship's FIRST activity, not its [first,last]
+            # range. Range-feasibility (next.first <= prev.last + window) is
+            # silently disabled for any pair that transacts repeatedly: their
+            # last_seen sits months out, so almost any next hop "fits the
+            # window" and chains end up spanning weeks — the opposite of rapid.
+            # Requiring consecutive first-activity times to be monotonic and
+            # within `window` keeps the relay actually rapid.
+            if not (prev_first <= nxt_first <= prev_first + window):
+                return False
+            return (prev_amt * decrease_ratio) <= nxt_amt <= (prev_amt * (1.0 + grow_tolerance))
 
-        for start_node in self.graph.nodes():
-            if len(visited_chains) >= max_chains:
+        # ── Discovery: collect maximal causal walks ───────────────────────────
+        candidates: List[Tuple] = []          # (chain, amounts, firsts, lasts)
+        seen_paths = set()
+        cand_cap = max(max_chains * 5, 1_000)
+        for start in start_nodes:
+            if len(candidates) >= cand_cap:
                 break
-            out_degree = self.graph.out_degree(start_node)
+            stack = [(start, [start], [], [], [])]   # node, chain, amounts, firsts, lasts
+            while stack:
+                node, chain, amounts, firsts, lasts = stack.pop()
+                extended = False
+                if len(chain) < max_depth:
+                    prev_amt = amounts[-1] if amounts else None
+                    prev_first = firsts[-1] if firsts else None
+                    prev_last = lasts[-1] if lasts else None
+                    chain_start = firsts[0] if firsts else None
+                    pushed = 0
+                    for (v, amt, tf, tl) in adj.get(node, [])[:scan_cap]:
+                        if v in chain:
+                            continue
+                        if prev_amt is not None and not _hop_ok(prev_first, prev_amt, tf, amt):
+                            continue
+                        # Whole-chain span cap: a rapid relay completes fast; a
+                        # chain that dribbles across many windows isn't "rapid".
+                        if chain_start is not None and (tf - chain_start) > max_span:
+                            continue
+                        stack.append((v, chain + [v], amounts + [amt], firsts + [tf], lasts + [tl]))
+                        extended = True
+                        pushed += 1
+                        if pushed >= max_branching:
+                            break
+                if not extended and len(chain) >= min_chain_length:
+                    key = tuple(chain)
+                    if key not in seen_paths:
+                        seen_paths.add(key)
+                        candidates.append((chain, amounts, firsts, lasts))
+                        if len(candidates) >= cand_cap:
+                            break
 
-            # BFS to find chains, limit search to avoid explosion
-            queue = [(start_node, [start_node], 0, None)]
-            while queue and len(visited_chains) < max_chains:
-                current, chain, depth, prev_time = queue.pop(0)
+        # ── Dedup: drop chains contained in a longer one (longest-first) ──────
+        candidates.sort(key=lambda c: len(c[0]), reverse=True)
+        kept: List[Tuple] = []
+        kept_sets: List[frozenset] = []
+        for cand in candidates:
+            ns = frozenset(cand[0])
+            if any(ns <= ks for ks in kept_sets):
+                continue
+            kept.append(cand)
+            kept_sets.append(ns)
 
-                if depth >= min_chain_length and len(chain) >= min_chain_length:
-                    chain_key = tuple(chain)
-                    if chain_key not in visited_chains:
-                        visited_chains.add(chain_key)
+        # Emit biggest-bottleneck-first so the budget keeps the largest schemes.
+        kept.sort(key=lambda c: min(c[1]), reverse=True)
 
-                        # Calculate chain metrics
-                        total_amount = 0
-                        for i in range(len(chain) - 1):
-                            if self.graph.has_edge(chain[i], chain[i + 1]):
-                                total_amount += self.graph[chain[i]][chain[i + 1]]["total_amount"]
+        alerts: List[Dict] = []
+        window_minutes = window.total_seconds() / 60.0
+        for chain, amounts, firsts, lasts in kept[:max_chains]:
+            bottleneck = float(min(amounts))      # the tranche that traversed the whole chain
+            gross = float(sum(amounts))            # sum of legs — same money counted once per hop
+            gaps = [max(0.0, (firsts[i] - firsts[i - 1]).total_seconds()) / 60.0
+                    for i in range(1, len(firsts))]
+            mean_gap = sum(gaps) / len(gaps) if gaps else 0.0
+            span_minutes = max(0.0, (firsts[-1] - firsts[0]).total_seconds()) / 60.0
+            is_decreasing = all(amounts[i] <= amounts[i - 1] for i in range(1, len(amounts)))
+            preservation = (sum(min(amounts[i] / amounts[i - 1], 1.0) for i in range(1, len(amounts)))
+                            / max(len(amounts) - 1, 1))
+            tightness = (1.0 - min(mean_gap / window_minutes, 1.0)) if window_minutes else 0.0
+            has_shell = any(self.graph.nodes[n].get("type") == "shell_company" for n in chain)
 
-                        # Check for decreasing amounts (layering signature)
-                        amounts = []
-                        for i in range(len(chain) - 1):
-                            if self.graph.has_edge(chain[i], chain[i + 1]):
-                                amounts.append(self.graph[chain[i]][chain[i + 1]]["total_amount"])
+            score = 0.55
+            score += 0.18 * tightness          # the faster the relay, the more suspicious
+            score += 0.12 * preservation       # the cleaner the pass-through, the more suspicious
+            score += min(len(chain) - min_chain_length, 3) * 0.03
+            score += 0.06 if has_shell else 0.0
+            score = min(max(score, 0.5), 0.98)
 
-                        is_decreasing = len(amounts) >= 2 and all(
-                            amounts[i] >= amounts[i + 1] * decrease_ratio
-                            for i in range(len(amounts) - 1)
-                        )
-
-                        # Check for shell companies in chain
-                        has_shell = any(
-                            self.graph.nodes[n].get("type") == "shell_company"
-                            for n in chain
-                        )
-
-                        score = 0.7
-                        if is_decreasing:
-                            score += 0.15
-                        if has_shell:
-                            score += 0.1
-                        if len(chain) >= 5:
-                            score += 0.05
-
-                        score = min(score, 1.0)
-
-                        node_names = [
-                            self.graph.nodes[n].get("name", n) for n in chain
-                        ]
-
-                        alert = {
-                            "alert_id": f"ALERT_LAYER_{len(alerts) + 1:04d}",
-                            "pattern_type": "Rapid Layering",
-                            "severity": "CRITICAL" if total_amount > 10000000 else "HIGH",
-                            "confidence": round(score * 100, 1),
-                            "entities": chain,
-                            "entity_names": node_names,
-                            "chain_length": len(chain),
-                            "total_flow": round(total_amount, 2),
-                            "has_shell_company": has_shell,
-                            "amounts_decreasing": is_decreasing,
-                            "description": (
-                                f"Layering chain of ₹{total_amount:,.0f} through "
-                                f"{len(chain)} entities: {' → '.join(node_names)}"
-                            ),
-                            "recommendation": "Investigate source of funds. Verify legitimacy of intermediary entities. Check for shell company involvement.",
-                        }
-                        alerts.append(alert)
-                        self.detected_patterns["layering"].append(alert)
-
-                if depth >= 7:  # Max depth
-                    continue
-
-                for txn in node_transactions.get(current, [])[:max_branching]:
-                    next_node = txn["target"]
-                    if next_node not in chain:
-                        queue.append((next_node, chain + [next_node], depth + 1, txn["last_seen"]))
+            node_names = [self.graph.nodes[n].get("name", n) for n in chain]
+            alert = {
+                "alert_id": f"ALERT_LAYER_{len(alerts) + 1:04d}",
+                "pattern_type": "Rapid Layering",
+                "severity": "CRITICAL" if bottleneck > 10_000_000 else "HIGH",
+                "confidence": round(score * 100, 1),
+                "entities": list(chain),
+                "entity_names": node_names,
+                "chain_length": len(chain),
+                "total_flow": round(bottleneck, 2),        # the laundered tranche (bottleneck)
+                "gross_chain_flow": round(gross, 2),       # sum of every hop (secondary)
+                "bottleneck_amount": round(bottleneck, 2),
+                "has_shell_company": has_shell,
+                "amounts_decreasing": is_decreasing,
+                "span_minutes": round(span_minutes, 1),
+                "avg_hop_gap_minutes": round(mean_gap, 1),
+                "algorithm": "temporal_causal_walk",
+                "description": (
+                    f"₹{bottleneck:,.0f} relayed through {len(chain)} entities in "
+                    f"{span_minutes / 60:.1f}h: {' → '.join(node_names)}"
+                ),
+                "recommendation": "Investigate source of funds. Verify legitimacy of intermediary entities. Check for shell company involvement.",
+            }
+            alerts.append(alert)
+            self.detected_patterns["layering"].append(alert)
 
         self.alerts.extend(alerts)
         return alerts
@@ -337,19 +434,23 @@ class FraudDetector:
         """
         threshold = threshold if threshold is not None else self._cfg("smurfing_threshold", 200_000)
         cluster_tolerance = cluster_tolerance if cluster_tolerance is not None else self._cfg("smurfing_cluster_tolerance", 0.10)
+        cluster_min_ratio = self._cfg("smurfing_cluster_min_ratio", 0.5)
+        cluster_max_ratio = self._cfg("smurfing_cluster_max_ratio", 1.0)
         burst_min_txns = self._cfg("smurfing_burst_min_txns", 5)
         burst_window_min = self._cfg("smurfing_burst_window_minutes", 60)
         alerts = []
 
         # ── Pattern 1: edge-level clustering (original) ──────────────────
-        # Find edges with amounts just below reporting threshold
+        # Find edges with amounts below reporting threshold. The proximity band
+        # is config-driven (was hardcoded 0.7-1.0): structuring well below the
+        # threshold is still structuring, and low size-variance is what actually
+        # marks it as deliberate.
         suspicious_edges = []
         for u, v, data in self.graph.edges(data=True):
             avg = data["avg_amount"]
             if data["min_amount"] < threshold and data["transaction_count"] >= 2:
-                # Check if amounts are clustered near threshold
                 ratio = avg / threshold
-                if 0.7 <= ratio <= 1.0:
+                if cluster_min_ratio <= ratio <= cluster_max_ratio:
                     variability = data["std_amount"] / max(data["avg_amount"], 1)
                     if variability < 0.15:  # Low variability = structured
                         suspicious_edges.append((u, v, data, variability))
@@ -405,6 +506,11 @@ class FraudDetector:
                 threshold=threshold,
                 burst_min_txns=burst_min_txns,
                 burst_window_min=burst_window_min,
+                starting_seq=len(alerts),
+            ))
+            # ── Pattern 3: window-independent fan-out structuring ──────────
+            alerts.extend(self._detect_smurfing_fanout(
+                threshold=threshold,
                 starting_seq=len(alerts),
             ))
 
@@ -498,6 +604,111 @@ class FraudDetector:
 
         return burst_alerts
 
+    def _detect_smurfing_fanout(self, threshold: float, starting_seq: int) -> List[Dict]:
+        """Window-INDEPENDENT fan-out structuring.
+
+        Catches the "single-shot fan-out" the other two modes miss: one sender
+        spraying sub-threshold transfers *once each* to many distinct mules.
+        Mode 1 needs ≥ 2 transfers to the *same* receiver; Mode 2 needs them
+        inside one short window. A launderer who sends ₹1.9L once to each of 50
+        fresh accounts, spaced over days, evades both — but the signature
+        (many distinct receivers, each hit ~once, all sub-threshold, all
+        similarly sized) is unmistakable and timing-agnostic.
+
+        Deliberately uses no time window: spacing transfers out is exactly the
+        evasion, so the detector must not depend on how they're spaced.
+        """
+        fanout_alerts: List[Dict] = []
+        min_txns = int(self._cfg("smurfing_fanout_min_txns", 8))
+        min_receivers = int(self._cfg("smurfing_fanout_min_receivers", 5))
+        max_per_receiver = float(self._cfg("smurfing_fanout_max_txns_per_receiver", 1.5))
+        band_tol = float(self._cfg("smurfing_fanout_band_tolerance", 0.15))
+
+        txns = self.transactions
+        below = txns[txns["amount"] < threshold]
+        if below.empty:
+            return fanout_alerts
+
+        from collections import Counter as _Counter
+        for sender, group in below.groupby("sender_id"):
+            if len(group) < min_txns:
+                continue
+            # Isolate the structured subset as the tightest amount-band cluster
+            # of this sender's sub-threshold transfers — a launderer mixes
+            # structuring into normal activity, so requiring the WHOLE set to be
+            # uniform misses it. Sort by amount and slide a relative-width band;
+            # the widest cluster (most distinct receivers) is the candidate.
+            g2 = group.sort_values("amount").reset_index(drop=True)
+            amts = g2["amount"].to_numpy(dtype=float)
+            recv_arr = g2["receiver_id"].to_numpy()
+            recv_counts: "_Counter" = _Counter()
+            best = None        # (n_distinct, l, r, count)
+            l = 0
+            for r in range(len(amts)):
+                recv_counts[recv_arr[r]] += 1
+                while l < r and (amts[r] - amts[l]) > band_tol * max(amts[l], 1.0):
+                    recv_counts[recv_arr[l]] -= 1
+                    if recv_counts[recv_arr[l]] == 0:
+                        del recv_counts[recv_arr[l]]
+                    l += 1
+                count = r - l + 1
+                distinct = len(recv_counts)
+                if count >= min_txns and distinct >= min_receivers and count / distinct <= max_per_receiver:
+                    if best is None or distinct > best[0]:
+                        best = (distinct, l, r, count)
+            if best is None:
+                continue
+            _, bl, br, _ = best
+            window = g2.iloc[bl:br + 1]
+            receivers = window["receiver_id"].unique()
+            n_recv = len(receivers)
+            amounts = window["amount"].to_numpy(dtype=float)
+            mean_amt = float(amounts.mean())
+            total = float(amounts.sum())
+            n = len(window)
+            sender_name = self.graph.nodes[sender].get("name", sender) if self.graph.has_node(sender) else sender
+            receiver_names = [
+                self.graph.nodes[r].get("name", r) if self.graph.has_node(r) else r
+                for r in receivers[:10]
+            ]
+            # Closer to the threshold + more mules + tighter sizing → higher confidence.
+            cluster_cv = float(amounts.std() / mean_amt) if mean_amt > 0 else 1.0
+            proximity = min(mean_amt / threshold, 1.0)
+            confidence = min(
+                0.95,
+                0.45 + min(n_recv, 30) * 0.015 + proximity * 0.2 + max(0.0, band_tol - cluster_cv),
+            )
+
+            alert = {
+                "alert_id": f"ALERT_SMURF_{starting_seq + len(fanout_alerts) + 1:04d}",
+                "pattern_type": "Smurfing / Structuring",
+                "detection_mode": "fan_out",
+                "severity": "HIGH" if total > 1_000_000 or n_recv >= min_receivers * 2 else "MEDIUM",
+                "confidence": round(confidence * 100, 1),
+                "entities": [sender] + list(receivers),
+                "entity_names": [sender_name] + receiver_names,
+                "n_txns": int(n),
+                "n_distinct_receivers": int(n_recv),
+                "txns_per_receiver": round(n / n_recv, 2),
+                "total_flow": round(total, 2),
+                "avg_amount": round(mean_amt, 2),
+                "amount_cv": round(cluster_cv, 4),
+                "description": (
+                    f"Sender '{sender_name}' sprayed {n} sub-threshold txns "
+                    f"(<{threshold:,.0f}, ~₹{mean_amt:,.0f} each) once each to "
+                    f"{n_recv} distinct receivers. Fan-out structuring "
+                    f"(timing-agnostic)."
+                ),
+                "recommendation": (
+                    "File STR. Verify KYC of all receivers. One-shot fan-out to "
+                    "many fresh accounts is a classic mule-recruitment signature."
+                ),
+            }
+            fanout_alerts.append(alert)
+            self.detected_patterns["smurfing"].append(alert)
+
+        return fanout_alerts
+
     def detect_shell_funnels(self,
                               flow_imbalance_threshold: Optional[float] = None,
                               min_in_degree: Optional[int] = None) -> List[Dict]:
@@ -523,8 +734,12 @@ class FraudDetector:
 
         for node in self.graph.nodes():
             node_type = self.graph.nodes[node].get("type", "")
-            if node_type not in ("shell_company", "business"):
-                continue
+            # Account *type* is a scoring signal, not a gate. Compromised
+            # individual retail accounts are the most common pass-through mules
+            # globally; gating on shell_company/business blinded the detector to
+            # them. The behavioural gates below (in-degree, flow imbalance,
+            # pass-through holding time + min flow) are what separate a mule
+            # from a normal account — and they apply to every account type.
 
             in_degree = self.graph.in_degree(node)
             out_degree = self.graph.out_degree(node)
@@ -577,6 +792,10 @@ class FraudDetector:
                 # The shorter the holding time, the higher the score.
                 score += 0.2 + (1.0 - min(avg_holding_seconds / pt_max_holding, 1.0)) * 0.15
             score += len(branches) * 0.05
+            # Entity type is a signal, not a gate: a shell behaving like a funnel
+            # is more suspicious than an individual doing the same, but both are
+            # flagged on the behaviour above.
+            score += {"shell_company": 0.1, "business": 0.05}.get(node_type, 0.0)
             score = min(score, 0.95)
 
             node_name = self.graph.nodes[node].get("name", node)
@@ -627,41 +846,70 @@ class FraudDetector:
         return alerts
 
     def _avg_holding_time(self, node: str) -> Optional[float]:
-        """Average time funds stay at `node` between arrival and departure, in seconds.
+        """Amount-weighted average time funds stay at `node`, in seconds.
 
-        Approximated via edge first_seen/last_seen on incoming and outgoing
-        edges (we don't track per-txn matching). Returns None when either
-        side has no temporal information.
+        Funds are matched FIFO **by amount**: each outflow consumes the oldest
+        still-available inflows that arrived before it, and each matched rupee
+        contributes ``(departure - arrival)`` to an amount-weighted average.
+
+        This replaces the previous "subtract the single most-recent inflow"
+        rule, which a launderer could game (or which would mis-fire on an
+        innocent long-hold account): a ₹10 decoy deposited five minutes before a
+        ₹10M exit made holding time look like five minutes even though the ₹10M
+        had been sitting for months. With FIFO-by-amount the ₹10M exit is
+        matched to the ₹10M deposit and the true (long) holding time dominates;
+        the ₹10 decoy is just a negligible-weight tranche.
+
+        Times are approximated from edge first_seen (we don't track per-txn
+        matching on aggregated edges). Returns None when either side is empty
+        or nothing can be matched.
         """
-        in_times = []
-        out_times = []
+        deposits = []     # (arrival_time, amount)
         for u in self.graph.predecessors(node):
-            t = self.graph[u][node].get("last_seen")
+            ed = self.graph[u][node]
+            t = ed.get("first_seen")
             if t:
                 try:
-                    in_times.append(pd.to_datetime(t))
+                    deposits.append((pd.to_datetime(t), float(ed.get("total_amount", 0.0) or 0.0)))
                 except Exception:
                     pass
+        withdrawals = []  # (departure_time, amount)
         for v in self.graph.successors(node):
-            t = self.graph[node][v].get("first_seen")
+            ed = self.graph[node][v]
+            t = ed.get("first_seen")
             if t:
                 try:
-                    out_times.append(pd.to_datetime(t))
+                    withdrawals.append((pd.to_datetime(t), float(ed.get("total_amount", 0.0) or 0.0)))
                 except Exception:
                     pass
-        if not in_times or not out_times:
+        if not deposits or not withdrawals:
             return None
-        # Pair each outgoing txn with the most-recent prior incoming.
-        in_sorted = sorted(in_times)
-        deltas = []
-        for ot in out_times:
-            prior = [t for t in in_sorted if t <= ot]
-            if not prior:
-                continue
-            deltas.append((ot - prior[-1]).total_seconds())
-        if not deltas:
+
+        from collections import deque
+        deposits.sort(key=lambda d: d[0])         # oldest first (FIFO)
+        withdrawals.sort(key=lambda w: w[0])
+        queue = deque([t, a] for t, a in deposits)  # mutable remaining balances
+
+        weighted_holding = 0.0
+        matched_amount = 0.0
+        for wt, wa in withdrawals:
+            remaining = wa
+            while remaining > 1e-9 and queue:
+                dt, da = queue[0]
+                if dt > wt:                       # oldest deposit is after this exit → unfunded
+                    break
+                take = min(remaining, da)
+                weighted_holding += max(0.0, (wt - dt).total_seconds()) * take
+                matched_amount += take
+                remaining -= take
+                da -= take
+                if da <= 1e-9:
+                    queue.popleft()
+                else:
+                    queue[0][1] = da
+        if matched_amount <= 0:
             return None
-        return float(sum(deltas) / len(deltas))
+        return float(weighted_holding / matched_amount)
 
     def compute_node_risk_scores(
         self,
@@ -733,7 +981,11 @@ class FraudDetector:
             sample_k = self._cfg("centrality_sample_k", 500)
             try:
                 if n_nodes > 2_000 and sample_k and sample_k < n_nodes:
-                    betweenness = nx.betweenness_centrality(target, k=sample_k, seed=42)
+                    # Scale pivots with graph size (config value is the floor,
+                    # capped at 2000) — error ∝ 1/sqrt(k), so a flat 500 on a
+                    # 70k-node graph was needlessly noisy. Seeded → deterministic.
+                    k_eff = min(max(int(sample_k), int(0.05 * n_nodes)), 2000, n_nodes)
+                    betweenness = nx.betweenness_centrality(target, k=k_eff, seed=42)
                 else:
                     betweenness = nx.betweenness_centrality(target, weight="total_amount")
             except Exception:

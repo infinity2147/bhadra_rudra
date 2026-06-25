@@ -117,14 +117,35 @@ def _edge_index_and_label(graph: nx.DiGraph, idx: Dict[str, int]):
 
 # ── Model definition ──────────────────────────────────────────────────────────
 
-def _build_model(in_dim: int, hidden: int = 64):
+def _build_model(in_dim: int, hidden: int = 64, num_layers: int = 3, aggr: str = "max"):
+    """Build the GraphSAGE edge classifier.
+
+    Two knobs the team flagged:
+
+      * ``num_layers`` (default 3) sets the receptive field. Two layers see only
+        a 2-hop neighbourhood, so a node at the end of a 4–5 hop layering chain
+        was invisible to the model. Each extra SAGE layer widens vision by one
+        hop. We default to 3 (covering most layering chains) rather than going
+        deeper, because stacking too many layers oversmooths node embeddings —
+        a real tradeoff, not a free win.
+
+      * ``aggr`` (default ``"max"``) sets neighbour aggregation. Mean
+        aggregation lets a fraudulent account *dilute* its signal by transacting
+        with hundreds of legitimate counterparties (the "camouflage" evasion);
+        max-pooling keeps the strongest neighbour signal, so a few suspicious
+        neighbours aren't averaged into the noise.
+    """
     torch, nn, F, SAGEConv = _torch_imports()
+    num_layers = max(int(num_layers), 1)
 
     class EdgeClassifier(nn.Module):
         def __init__(self):
             super().__init__()
-            self.conv1 = SAGEConv(in_dim, hidden)
-            self.conv2 = SAGEConv(hidden, hidden)
+            self.convs = nn.ModuleList()
+            prev = in_dim
+            for _ in range(num_layers):
+                self.convs.append(SAGEConv(prev, hidden, aggr=aggr))
+                prev = hidden
             self.edge_mlp = nn.Sequential(
                 nn.Linear(2 * hidden, hidden),
                 nn.ReLU(),
@@ -133,9 +154,12 @@ def _build_model(in_dim: int, hidden: int = 64):
             )
 
         def forward(self, x, edge_index, edge_pairs):
-            h = F.relu(self.conv1(x, edge_index))
-            h = F.dropout(h, p=0.2, training=self.training)
-            h = self.conv2(h, edge_index)
+            h = x
+            for i, conv in enumerate(self.convs):
+                h = conv(h, edge_index)
+                if i < len(self.convs) - 1:        # non-linearity + dropout between layers
+                    h = F.relu(h)
+                    h = F.dropout(h, p=0.2, training=self.training)
             src_emb = h[edge_pairs[0]]
             dst_emb = h[edge_pairs[1]]
             pair = torch.cat([src_emb, dst_emb], dim=-1)
@@ -339,6 +363,8 @@ def train_gnn(
     batch_size: int = 4096,
     num_neighbors: Optional[List[int]] = None,
     use_neighbor_loader: Optional[bool] = None,
+    num_layers: int = 3,
+    aggr: str = "max",
 ) -> Dict:
     """Train a GraphSAGE edge classifier and persist alongside XGBoost.
 
@@ -371,9 +397,11 @@ def train_gnn(
     if use_neighbor_loader is None:
         use_neighbor_loader = n_edges >= NEIGHBOR_LOADER_EDGE_THRESHOLD
     if num_neighbors is None:
-        num_neighbors = [15, 10]
+        # One fan-out entry per conv layer (LinkNeighborLoader requirement);
+        # sample fewer neighbours deeper to keep the computation graph bounded.
+        num_neighbors = ([15, 10] + [5] * max(num_layers - 2, 0))[:num_layers]
 
-    model = _build_model(in_dim=X.shape[1], hidden=hidden)
+    model = _build_model(in_dim=X.shape[1], hidden=hidden, num_layers=num_layers, aggr=aggr)
     if use_neighbor_loader:
         train_log = _train_neighbor_loader(
             model, X, edge_index, train_e, val_e, y,
@@ -412,6 +440,8 @@ def train_gnn(
         "n_fraud_test":  int(y_np[test_e].sum()),
         "fraud_rate": float(y_np.mean()),
         "hidden_dim": hidden,
+        "num_layers": num_layers,
+        "aggregation": aggr,
         "max_epochs": epochs,
         "patience": patience,
         "training_mode": "neighbor_loader" if use_neighbor_loader else "full_batch",

@@ -89,8 +89,12 @@ def _extract_node_features(graph: nx.DiGraph) -> Tuple[np.ndarray, np.ndarray, L
             n_nodes = len(nodes)
             if n_nodes > 2_000:
                 # Unweighted BFS sampling — structural centrality, 10x faster
-                # than the weighted Dijkstra variant at this scale.
-                betweenness = nx.betweenness_centrality(graph, k=500, seed=42)
+                # than the weighted Dijkstra variant at this scale. Pivot count
+                # scales with graph size (capped at 2000) instead of a flat 500:
+                # k-pivot betweenness error shrinks as 1/sqrt(k), so a fixed 500
+                # on a 70k-node graph was needlessly coarse. Seeded → deterministic.
+                k_eff = min(max(500, int(0.05 * n_nodes)), 2000, n_nodes)
+                betweenness = nx.betweenness_centrality(graph, k=k_eff, seed=42)
             else:
                 betweenness = nx.betweenness_centrality(graph, weight="total_amount")
         except Exception:

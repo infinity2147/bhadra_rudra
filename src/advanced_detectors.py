@@ -24,6 +24,8 @@ class DormantActivationDetector:
         cfg = config or {}
         self.dormant_threshold_days = cfg.get("dormant_threshold_days", dormant_threshold_days)
         self.z_score_threshold = cfg.get("dormant_z_score_threshold", z_score_threshold)
+        self.post_activation_days = cfg.get("dormant_post_activation_days", 30)
+        self.pre_std_floor_ratio = cfg.get("dormant_pre_std_floor_ratio", 0.25)
 
     def detect(self) -> List[Dict]:
         """Find dormant accounts that were suddenly activated with Z-score anomaly."""
@@ -74,18 +76,28 @@ class DormantActivationDetector:
                     continue
 
                 if gap >= self.dormant_threshold_days:
-                    # Compute Z-score of post-activation activity
+                    # Compute Z-score of post-activation activity.
                     pre_amounts = daily.iloc[:i]["amount"].values
-                    post_amounts = daily.iloc[i:i+5]["amount"].values
+                    # Peak daily amount over a LONGER window (not the mean over
+                    # the first 5 days): a slow drip followed by one huge day
+                    # must still spike. Comparing the peak to the baseline is
+                    # what catches "₹1/day then ₹500M on day 6".
+                    post_window = daily.iloc[i:i + self.post_activation_days]["amount"].values
 
-                    if len(pre_amounts) < 2 or len(post_amounts) == 0:
+                    if len(pre_amounts) < 2 or len(post_window) == 0:
                         continue
 
-                    pre_mean = np.mean(pre_amounts)
-                    pre_std = np.std(pre_amounts) if np.std(pre_amounts) > 0 else 1
-                    post_mean = np.mean(post_amounts)
+                    pre_mean = float(np.mean(pre_amounts))
+                    pre_std = float(np.std(pre_amounts))
+                    if pre_std <= 0:
+                        # Scale-relative floor — a hardcoded 1 made z explode on
+                        # large, regular accounts (₹1M-regular + 20% bump → z≈2e5).
+                        pre_std = max(pre_mean * self.pre_std_floor_ratio, 1.0)
 
-                    z_score = (post_mean - pre_mean) / pre_std
+                    post_peak = float(np.max(post_window))
+                    post_mean = float(np.mean(post_window))
+
+                    z_score = (post_peak - pre_mean) / pre_std
 
                     if z_score >= self.z_score_threshold:
                         node_data = self.graph.nodes[node]
@@ -102,11 +114,12 @@ class DormantActivationDetector:
                             "dormant_days": round(gap),
                             "pre_avg_amount": round(pre_mean, 2),
                             "post_avg_amount": round(post_mean, 2),
+                            "post_peak_amount": round(post_peak, 2),
                             "activation_date": str(daily.iloc[i]["date"].date()),
                             "description": (
-                                f"Dormant account '{node_name}' activated after {gap:.0f} days "
-                                f"with Z-score spike of {z_score:.1f} "
-                                f"(avg ₹{pre_mean:,.0f} → ₹{post_mean:,.0f})"
+                                f"Dormant account '{node_name}' activated after {gap:.0f} days; "
+                                f"peak daily activity ₹{post_peak:,.0f} vs baseline "
+                                f"₹{pre_mean:,.0f} (Z-score {z_score:.1f})"
                             ),
                             "recommendation": (
                                 "Verify recent KYC updates. Check for account takeover. "
@@ -200,8 +213,12 @@ class ProfileMismatchDetector:
         biz_min_avg            = self._cfg("profile_business_min_avg_amount", 10_000)
         biz_min_txns_low_avg   = self._cfg("profile_business_min_txns_for_low_avg_check", 20)
         shell_max_txns         = self._cfg("profile_shell_max_txns", 10)
+        shell_max_volume       = self._cfg("profile_shell_max_volume", 2_000_000)
+        shell_max_single_txn   = self._cfg("profile_shell_max_single_txn", 1_000_000)
         max_branches           = self._cfg("profile_max_branches", 4)
         max_night_ratio        = self._cfg("profile_max_night_ratio", 0.4)
+        night_start            = self._cfg("profile_night_hour_start", 22)
+        night_end              = self._cfg("profile_night_hour_end", 6)
         score_per_mismatch     = self._cfg("profile_score_per_mismatch", 0.2)
         max_score              = self._cfg("profile_max_score", 0.95)
         critical_threshold     = self._cfg("profile_critical_score_threshold", 0.6)
@@ -265,8 +282,16 @@ class ProfileMismatchDetector:
                     mismatches.append("Business with consistently low transaction amounts")
 
             elif entity_type == "shell_company":
+                # Count is one facet; a shell that's near-dormant by count but
+                # moves large money is the more dangerous case. Flag on volume
+                # and on large single transfers too, so 9 massive transfers
+                # through a shell don't slip under the count gate.
                 if len(node_txns) > shell_max_txns:
                     mismatches.append(f"Shell company with {len(node_txns)} transactions")
+                if total_volume > shell_max_volume:
+                    mismatches.append(f"Shell company moving ₹{total_volume:,.0f} total volume")
+                if max_amount > shell_max_single_txn:
+                    mismatches.append(f"Shell company with a single ₹{max_amount:,.0f} transfer")
 
             # Cross-branch activity
             branches = set()
@@ -277,12 +302,17 @@ class ProfileMismatchDetector:
             if len(branches) > max_branches:
                 mismatches.append(f"Activity across {len(branches)} different branches")
 
-            # Time-based anomalies (nighttime transactions)
+            # Time-based anomalies (nighttime transactions). Boundary is
+            # config-driven and inclusive of night_start (the old `> 22`
+            # silently let the whole 22:00–22:59 hour count as daytime).
             if len(node_txns) > 0:
                 hours = pd.to_datetime(node_txns["timestamp"]).dt.hour
-                night_ratio = ((hours < 6) | (hours > 22)).mean()
+                night_ratio = ((hours < night_end) | (hours >= night_start)).mean()
                 if night_ratio > max_night_ratio:
-                    mismatches.append(f"{night_ratio:.0%} transactions during nighttime (10PM-6AM)")
+                    mismatches.append(
+                        f"{night_ratio:.0%} transactions during nighttime "
+                        f"({night_start:02d}:00–{night_end:02d}:00)"
+                    )
 
             # Compose the confidence: behavioural-rule signal, escalated by ML.
             ml_score = self._ml_score_for_entity(node)

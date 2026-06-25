@@ -74,14 +74,14 @@ The pipeline is orchestrated by `src/run_pipeline.py` (synthetic) and `src/train
 |---|---|
 | `data_generator.py` | Synthetic transactions (2.7k txns, 80 entities, 6 fraud pattern types) |
 | `graph_engine.py` | Build NetworkX `DiGraph` from the transaction DataFrame |
-| `fraud_detector.py` | 4 core heuristic detectors: cycle (Johnson's algorithm), layering (BFS), smurfing (threshold clustering), funnel (flow imbalance) |
-| `advanced_detectors.py` | 2 more detectors: dormant activation (Z-score on daily aggregates), profile mismatch (KYC behavioural rules) |
+| `fraud_detector.py` | 4 core heuristic detectors: cycle (Johnson's algorithm), layering (temporal-causal money-following walk — amount-ranked search, per-hop causality+rapidity window, amount-preservation gate, ≥3 hops, bottleneck flow), smurfing (3 modes: edge-cluster + temporal burst + window-independent fan-out cluster), funnel (flow-imbalance OR pass-through; evaluates ALL account types, amount-weighted FIFO holding time) |
+| `advanced_detectors.py` | 2 more detectors: dormant activation (peak-daily Z-score over post-gap window, scale-relative std floor), profile mismatch (KYC behavioural rules + shell volume/large-transfer rules, config-driven night window) |
 | `ml_model.py` | XGBoost edge classifier — 30 features, stratified 80/20 split, persisted as pickle with SHAP background sample |
-| `gnn_model.py` | GraphSAGE (PyTorch Geometric) — two SAGEConv layers + edge-classification MLP head; skipped if PyG not installed |
+| `gnn_model.py` | GraphSAGE (PyTorch Geometric) — configurable depth (default 3 SAGEConv layers for a 3-hop receptive field) + max aggregation (resists neighbour-dilution camouflage) + edge-classification MLP head; skipped if PyG not installed |
 | `ensemble_model.py` | **Stacked ensemble**: XGBoost + GraphSAGE + GAT base models, LR meta-learner trained on 3-fold OOF predictions. Persisted under `data/ml/{variant}/ensemble/` |
 | `train_ibm_aml.py` | Real-data trainer: stratified 100k IBM AML sample → XGB + SAGE + ensemble in `data/ml/ibm_aml/` |
 | `shap_explainer.py` | `TreeExplainer` for per-alert SHAP attributions |
-| `incident_clustering.py` | Union-find to collapse raw alerts into clustered incidents |
+| `incident_clustering.py` | Union-find to collapse raw alerts into clustered incidents; high-degree utility/hub entities (gateways, exchanges) are excluded as linking bridges so independent rings don't snowball into one super-incident |
 | `case_manager.py` | SQLite (`data/rudra.db`) case workflow + SHA-256 hash-chain audit log |
 | `config_store.py` | Detector thresholds persisted in SQLite; every detector reads from here |
 | `fund_tracer.py` | BFS forward/backward fund journey with red-flag annotation |
@@ -122,7 +122,7 @@ Run `python src/run_pipeline.py` to generate all of these.
 
 **Detector thresholds** are all read from `ConfigStore` (SQLite-backed). Never hardcode a threshold value in a detector — use `self._cfg("key", default)`.
 
-**GNN is optional** — `gnn_model.py` and `ensemble_model.py` require `torch` and `torch_geometric`. The pipeline catches `ImportError` and skips gracefully. These are listed as optional in `requirements.txt`.
+**GNN is optional** — `gnn_model.py` and `ensemble_model.py` require `torch` and `torch_geometric`. The pipeline catches `ImportError` and skips gracefully. These are listed as optional in `requirements.txt`. The backend serves GNN/ensemble scores from the persisted `edge_scores.json`, never by re-loading the `.pt` weights at runtime — so changing the SAGE architecture (depth/aggregation) is runtime-safe but requires a `python src/run_pipeline.py` retrain to regenerate scores. **Train ordering matters**: XGBoost must be fit before `torch` is imported in a process (the two segfault if torch loads first); the pipeline already does XGB→GNN, and the GNN test runs in an isolated subprocess for the same reason.
 
 **Real datasets** go in `data/real/{ibm_aml,paysim,ieee_cis}/` (hundreds of MB, not committed). `python src/train_ibm_aml.py` runs the full IBM AML 100k pipeline (XGB + SAGE + ensemble). The synthetic pipeline (`src/run_pipeline.py`) auto-trains extra variants when real datasets are present.
 
