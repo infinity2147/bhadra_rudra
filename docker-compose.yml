@@ -50,11 +50,13 @@ services:
       kafka:
         condition: service_healthy
     healthcheck:
-      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/').read()\" || exit 1"]
+      # Gate readiness on the brain being loaded (graph + alerts), not just the
+      # process being up — /api/health probes every subsystem.
+      test: ["CMD-SHELL", "python -c \"import urllib.request,json,sys; d=json.load(urllib.request.urlopen('http://localhost:8000/api/health')); sys.exit(0 if d.get('status')=='ok' else 1)\" || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 30s
+      start_period: 40s
 
   frontend:
     build:
