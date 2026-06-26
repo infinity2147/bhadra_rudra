@@ -340,14 +340,13 @@ function ArcLayout({ data, selectedNodeId, onSelectNode }) {
     nodes.sort(cmpFns[sortBy] || cmpFns.risk);
     const idx = new Map();
     nodes.forEach((n, i) => idx.set(n.id, i));
-    let max = 1;
     const es = (data.links || []).map(e => {
       const s = typeof e.source === 'object' ? e.source.id : e.source;
       const t = typeof e.target === 'object' ? e.target.id : e.target;
       const amt = e.amount || e.weight || 0;
-      if (amt > max) max = amt;
       return { ...e, source: s, target: t, amount: amt };
     });
+    const max = es.reduce((m, e) => Math.max(m, e.amount), 1);
     return { sortedNodes: nodes, edges: es, idIndex: idx, maxAmount: max };
   }, [data, sortBy]);
 
@@ -672,22 +671,35 @@ export default function Graph() {
 
   // Fetch main graph
   useEffect(() => {
-    setLoading(true);
-    setError(null);
+    let cancelled = false;
     const params = new URLSearchParams();
     if (fraudOnly) params.set('fraud_only', 'true');
     if (highRiskOnly) params.set('high_risk_only', 'true');
     if (minAmount > 0) params.set('min_amount', String(minAmount));
     params.set('limit', String(limit));
 
-    fetchAPI(`/api/graph?${params.toString()}`)
-      .then((d) => setGraphData(normalize(d)))
-      .catch((e) => setError(e.message))
-      .finally(() => setLoading(false));
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const d = await fetchAPI(`/api/graph?${params.toString()}`);
+        if (!cancelled) setGraphData(normalize(d));
+      } catch (e) {
+        if (!cancelled) setError(e.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [fraudOnly, highRiskOnly, minAmount, limit]);
 
   // Reset selection when view changes
-  useEffect(() => { setSelectedNodeId(null); setHoveredNodeId(null); }, [view, layout]);
+  useEffect(() => {
+    // Intentional: clear transient selection/hover state when the view or layout changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedNodeId(null);
+    setHoveredNodeId(null);
+  }, [view, layout]);
 
   // Searchable entity list
   const entityList = useMemo(() => {

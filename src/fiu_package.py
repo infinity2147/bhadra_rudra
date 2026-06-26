@@ -259,6 +259,7 @@ def _build_str_xml(
     graph: nx.DiGraph,
     entity_txns: pd.DataFrame,
     case: Optional[Dict],
+    shap_features: Optional[List[Dict]] = None,
 ) -> bytes:
     """Build a schema-shaped FIU-IND STR XML document.
 
@@ -266,7 +267,14 @@ def _build_str_xml(
     Reporting Entity Guidelines. We mark every PII field as REDACTED with a
     reason — banks file STRs with the PII filled in; investigators add it
     just before submission. Doing it this way keeps RUDRA DPDP-clean.
+
+    The report embeds the FATF typology + graded legal basis (from
+    fatf_typology.tag_alert) and, when `shap_features` is supplied, a
+    machine-readable `<SHAPExplainability>` block so the model's reasoning
+    travels with the regulatory filing rather than living only in the UI.
     """
+    from fatf_typology import tag_alert
+
     aid = alert.get("alert_id", "")
     pattern = alert.get("pattern_type", "")
     severity = alert.get("severity", "HIGH")
@@ -274,6 +282,7 @@ def _build_str_xml(
     total_flow = alert.get("total_flow", 0)
     desc = alert.get("description", "")
     confidence = alert.get("confidence", 0)
+    tagged = tag_alert(alert)
 
     fraud_txns = entity_txns[entity_txns["is_fraud"]].sort_values("timestamp")
 
@@ -308,6 +317,29 @@ def _build_str_xml(
     lines.append('    ' + _xml("Description", desc))
     lines.append('    ' + _xml("DetectionMethod", "Graph-based pattern analysis with ML edge classifier"))
     lines.append('  </SuspiciousActivity>')
+
+    # 3b. FATF typology + Indian-regulatory basis for action
+    lines.append('  <RegulatoryClassification>')
+    lines.append('    ' + _xml("FATFTypology", tagged["fatf_typology"], code=tagged["fatf_code"]))
+    lines.append('    ' + _xml("FIUAdvisory", tagged["fiu_advisory"]))
+    lines.append('    ' + _xml("PMLASection", tagged["pmla_section"]))
+    lines.append('    ' + _xml("RBIReference", tagged["rbi_ref"]))
+    lines.append('    ' + _xml("LegalBasis", tagged["legal_basis"]))
+    lines.append('  </RegulatoryClassification>')
+
+    # 3c. Machine-readable model explainability (only when SHAP is available)
+    if shap_features:
+        lines.append('  <SHAPExplainability>')
+        lines.append('    ' + _xml("Model", "XGBoost edge classifier"))
+        lines.append('    ' + _xml("Basis", "signed feature contributions (SHAP)"))
+        for f in shap_features[:8]:
+            lines.append('    ' + _xml(
+                "Feature", "",
+                name=str(f.get("feature", "")),
+                value=f"{float(f.get('value', 0)):.4f}",
+                contribution=f"{float(f.get('shap', 0)):.4f}",
+            ))
+        lines.append('  </SHAPExplainability>')
 
     # 4. Subjects
     lines.append('  <Subjects>')
@@ -371,12 +403,16 @@ def build_package(
     alert: Dict,
     sar_pdf_path: Optional[str],
     case: Optional[Dict] = None,
+    shap_features: Optional[List[Dict]] = None,
 ) -> bytes:
     """Build the zip in memory and return its raw bytes.
 
     sar_pdf_path is the path to a previously-generated SAR PDF if one exists;
     pass None and the zip will simply not contain the PDF (the markdown summary
     still captures every detail).
+
+    shap_features (optional) is the alert's top SHAP attributions; when supplied
+    they are embedded in STR.xml so the model's reasoning is part of the filing.
     """
     entities = alert.get("entities", [])
     mask = transactions["sender_id"].isin(entities) | transactions["receiver_id"].isin(entities)
@@ -387,7 +423,7 @@ def build_package(
     chain_csv = _build_transaction_chain_csv(transactions, entities)
     citations_txt = _build_citations_txt(alert.get("pattern_type", ""))
     audit_json = json.dumps(case or {}, indent=2, default=str).encode("utf-8")
-    str_xml = _build_str_xml(alert, graph, entity_txns, case)
+    str_xml = _build_str_xml(alert, graph, entity_txns, case, shap_features=shap_features)
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:

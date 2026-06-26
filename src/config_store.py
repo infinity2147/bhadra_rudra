@@ -32,19 +32,53 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Risk scoring — exact betweenness is O(VE); Monte Carlo approximation
     # over k pivots stays usable on 100k+ node graphs (IBM AML).
     "centrality_sample_k": 500,
-    # Layering
-    "layering_min_chain_length": 3,
-    "layering_max_chains": 200,
-    "layering_decrease_ratio": 0.85,      # next amount must be >= ratio * prev
-    "layering_max_branching_per_node": 10,  # BFS branching factor per node — was hardcoded to 5
+    # Layering — a tranche relayed quickly through a chain of intermediaries.
+    # min_chain_length counts ENTITIES (nodes). Layering means MULTIPLE
+    # obfuscation layers, so the floor is 4 (= source → ≥2 intermediaries →
+    # destination, i.e. ≥3 hops). A single intermediary (A→B→C) is a plain
+    # pass-through — that's the funnel detector's job, and on dense graphs
+    # 2-hop "chains" are mostly coincidence, not laundering.
+    "layering_min_chain_length": 4,
+    "layering_max_chains": 200,           # budget; biggest-pipe starts processed first
+    "layering_decrease_ratio": 0.85,      # each hop must carry >= ratio * previous hop
+    "layering_amount_grow_tolerance": 0.15,  # ...and <= (1+tol) * previous hop (no merging-in)
+    "layering_max_branching_per_node": 10,   # max valid continuations explored per node
+    "layering_max_depth": 8,              # longest chain (in entities) to follow
+    "layering_min_hop_amount": 50_000,    # ignore dust hops below this (defeats ₹1 decoys)
+    "layering_time_window_hours": 48,     # a hop must forward funds within this of receiving them
+    "layering_max_chain_span_hours": 72,  # whole chain must complete this fast — else it isn't "rapid"
+    "layering_max_start_nodes": 5_000,    # scale guard: only seed from the N biggest-outflow nodes
     # Smurfing
     "smurfing_threshold": 200_000,        # ₹2L reporting threshold (USD adjusts via currency check)
     "smurfing_cluster_tolerance": 0.10,
+    # Edge-cluster proximity band: avg/threshold must fall in [min,max]. The
+    # lower bound used to be hardcoded at 0.7, so deliberate structuring well
+    # below the threshold (e.g. at 0.5) was invisible. Low size-variance is the
+    # real structuring signature; proximity just sets how aggressive we are.
+    "smurfing_cluster_min_ratio": 0.5,
+    "smurfing_cluster_max_ratio": 1.0,
     # Burst smurfing — N+ txns below threshold from one sender within M minutes,
     # regardless of which receiver they go to. Catches the structuring pattern
     # where one source fans out fast across many mules within a short window.
     "smurfing_burst_min_txns": 5,
     "smurfing_burst_window_minutes": 60,
+    # Fan-out structuring — one sender spraying sub-threshold transfers once each
+    # to many distinct receivers. Window-INDEPENDENT (complements the burst
+    # window, which a launderer evades by spacing transfers past its edge).
+    "smurfing_fanout_min_txns": 8,
+    "smurfing_fanout_min_receivers": 5,
+    "smurfing_fanout_max_txns_per_receiver": 1.5,   # ~one shot per mule
+    # The structured transfers are isolated as the tightest amount-band cluster
+    # within the sender's sub-threshold activity (so background noise mixed in
+    # doesn't hide them). Amounts within this relative spread count as one band.
+    "smurfing_fanout_band_tolerance": 0.15,
+    # Recruiter / coordinator — one source funding a fleet of pass-through mules.
+    # Names the orchestrator upstream of the mules (distinct from smurfing).
+    "recruiter_min_fanout": 5,                 # min mule-like recipients to flag a coordinator
+    "recruiter_pass_through_ratio": 0.6,       # recipient min(in,out)/max(in,out) above this = forwards funds
+    "recruiter_min_seed_amount": 10_000,       # ignore dust seed transfers
+    "recruiter_min_funding_share": 0.3,        # U must supply >= this share of each mule's inflow
+                                               # (a coordinator FUNDS its fleet; not just one of many payers)
     # Shell funnel
     "funnel_imbalance_threshold": 0.7,
     "funnel_min_in_degree": 3,
@@ -56,6 +90,14 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Dormant activation
     "dormant_threshold_days": 30,
     "dormant_z_score_threshold": 2.5,
+    # Post-activation window (active days) over which we take the PEAK daily
+    # amount — peak, not mean, so a slow drip (₹1/day) followed by one huge day
+    # can't average the spike away.
+    "dormant_post_activation_days": 30,
+    # When pre-activation history is perfectly regular (std == 0), fall back to
+    # this fraction of the pre-mean instead of an absolute 1, so the z-score
+    # stays scale-relative (a hardcoded 1 turned a 20% bump into z≈200000).
+    "dormant_pre_std_floor_ratio": 0.25,
     # Profile mismatch
     # All thresholds below were hardcoded in advanced_detectors.ProfileMismatchDetector
     # until T1.1. INR amounts assume the IBM AML loader normalises currency to ISO codes
@@ -69,8 +111,17 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     "profile_business_min_avg_amount": 10_000,             # below this with ≥ N txns is anomalous
     "profile_business_min_txns_for_low_avg_check": 20,
     "profile_shell_max_txns": 10,                          # shell shouldn't transact often
+    # A shell moving large money is anomalous regardless of COUNT — count alone
+    # let a launderer push 9 massive transfers through a shell and stay silent.
+    "profile_shell_max_volume": 2_000_000,                 # ₹20L total through a shell is anomalous
+    "profile_shell_max_single_txn": 1_000_000,             # any single ₹10L+ transfer through a shell
     "profile_max_branches": 4,                             # activity across this many branches is suspicious
     "profile_max_night_ratio": 0.4,                        # >40% nighttime txns is anomalous
+    # Night window, inclusive of the start hour: a txn is "night" when
+    # hour >= start OR hour < end. The boundary used to be hardcoded `> 22`,
+    # which silently excluded the whole 22:00–22:59 hour.
+    "profile_night_hour_start": 22,
+    "profile_night_hour_end": 6,
     "profile_score_per_mismatch": 0.2,                     # confidence per mismatch found
     "profile_max_score": 0.95,                             # cap on combined score
     "profile_critical_score_threshold": 0.6,

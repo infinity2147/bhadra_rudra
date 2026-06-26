@@ -206,22 +206,22 @@ export default function Patterns() {
 
   useEffect(() => {
     let cancelled = false;
-    setLoading(true);
-    setError(null);
-
-    fetchAPI(`/api/patterns/${activeTab}`)
-      .then((res) => {
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const res = await fetchAPI(`/api/patterns/${activeTab}`);
         if (!cancelled) {
           setData(res);
           setLoading(false);
         }
-      })
-      .catch((err) => {
+      } catch (err) {
         if (!cancelled) {
           setError(err.message);
           setLoading(false);
         }
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;

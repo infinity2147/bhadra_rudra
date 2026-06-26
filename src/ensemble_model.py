@@ -153,15 +153,24 @@ def _build_gat_model(in_dim: int, hidden: int = 32, heads: int = 4):
     return GATEdgeClassifier()
 
 
-def _build_sage_model(in_dim: int, hidden: int = 64):
-    """Same architecture as gnn_model.train_gnn for fair stacking."""
+def _build_sage_model(in_dim: int, hidden: int = 64, num_layers: int = 3, aggr: str = "max"):
+    """Same architecture as gnn_model._build_model for fair stacking.
+
+    Kept in sync with gnn_model: 3 layers (wider receptive field for multi-hop
+    layering chains) + max aggregation (resists the neighbour-dilution
+    "camouflage" evasion that mean aggregation is vulnerable to).
+    """
     torch, nn, F, SAGEConv, _ = _torch_imports()
+    num_layers = max(int(num_layers), 1)
 
     class SAGEEdgeClassifier(nn.Module):
         def __init__(self):
             super().__init__()
-            self.conv1 = SAGEConv(in_dim, hidden)
-            self.conv2 = SAGEConv(hidden, hidden)
+            self.convs = nn.ModuleList()
+            prev = in_dim
+            for _ in range(num_layers):
+                self.convs.append(SAGEConv(prev, hidden, aggr=aggr))
+                prev = hidden
             self.edge_mlp = nn.Sequential(
                 nn.Linear(2 * hidden, hidden),
                 nn.ReLU(),
@@ -170,9 +179,12 @@ def _build_sage_model(in_dim: int, hidden: int = 64):
             )
 
         def forward(self, x, edge_index, edge_pairs):
-            h = F.relu(self.conv1(x, edge_index))
-            h = F.dropout(h, p=0.2, training=self.training)
-            h = self.conv2(h, edge_index)
+            h = x
+            for i, conv in enumerate(self.convs):
+                h = conv(h, edge_index)
+                if i < len(self.convs) - 1:
+                    h = F.relu(h)
+                    h = F.dropout(h, p=0.2, training=self.training)
             src_emb = h[edge_pairs[0]]
             dst_emb = h[edge_pairs[1]]
             pair = torch.cat([src_emb, dst_emb], dim=-1)

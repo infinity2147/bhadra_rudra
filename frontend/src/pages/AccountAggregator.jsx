@@ -11,7 +11,7 @@ export default function AccountAggregator() {
   const [activeHandle, setActiveHandle] = useState(null);
   const [pulled, setPulled] = useState(null);
   const [creating, setCreating] = useState(false);
-  const [pulling, setPulling] = useState(false);
+  const [, setPulling] = useState(false);
   const [customer, setCustomer] = useState('CUST-DEMO-001');
   const [fips, setFips] = useState('FIP-HDFC,FIP-AXIS');
   const [purpose, setPurpose] = useState('103');

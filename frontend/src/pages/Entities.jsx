@@ -57,26 +57,39 @@ export default function Entities() {
   const debounceRef = useRef(null);
 
   useEffect(() => {
-    setLoading(true);
-    const params = new URLSearchParams();
-    if (search) params.set('search', search);
-    if (riskLevel !== 'ALL') params.set('risk_level', riskLevel);
-
-    fetchAPI(`/api/entities?${params.toString()}`)
-      .then(data => {
-        setEntities(Array.isArray(data) ? data : data.entities ?? []);
-      })
-      .catch(() => setEntities([]))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      const params = new URLSearchParams();
+      if (search) params.set('search', search);
+      if (riskLevel !== 'ALL') params.set('risk_level', riskLevel);
+      try {
+        const data = await fetchAPI(`/api/entities?${params.toString()}`);
+        if (!cancelled) setEntities(Array.isArray(data) ? data : data.entities ?? []);
+      } catch {
+        if (!cancelled) setEntities([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [search, riskLevel]);
 
   useEffect(() => {
-    if (!selected) { setDetail(null); return; }
-    setDetailLoading(true);
-    fetchAPI(`/api/entities/${selected}`)
-      .then(data => setDetail(data))
-      .catch(() => setDetail(null))
-      .finally(() => setDetailLoading(false));
+    let cancelled = false;
+    (async () => {
+      if (!selected) { setDetail(null); return; }
+      setDetailLoading(true);
+      try {
+        const data = await fetchAPI(`/api/entities/${selected}`);
+        if (!cancelled) setDetail(data);
+      } catch {
+        if (!cancelled) setDetail(null);
+      } finally {
+        if (!cancelled) setDetailLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [selected]);
 
   function handleSearchChange(e) {
@@ -161,9 +174,25 @@ export default function Entities() {
                           : 'hover:bg-gray-50'
                       }`}
                     >
-                      <td className="px-4 py-3 font-medium">{entity.name}</td>
+                      <td className="px-4 py-3 font-medium">
+                        <div className="flex items-center gap-2">
+                          <span>{entity.name}</span>
+                          {entity.taint > 0 && (
+                            <span
+                              className="bg-amber-100 text-amber-700 text-[10px] font-semibold px-2 py-0.5 rounded"
+                              title="Persistent taint from a confirmed-fraud case — floors this entity's risk across runs"
+                            >
+                              Tainted {(entity.taint * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-4 py-3 text-gray-600 capitalize">{(entity.type || '').replace('_', ' ')}</td>
-                      <td className="px-4 py-3"><RiskScoreBar score={entity.risk_score ?? 0} /></td>
+                      <td className="px-4 py-3">
+                        <RiskScoreBar
+                          score={Math.max(entity.risk_score ?? 0, entity.effective_risk ?? 0)}
+                        />
+                      </td>
                       <td className="px-4 py-3"><SeverityBadge severity={entity.risk_level} /></td>
                     </tr>
                   ))}

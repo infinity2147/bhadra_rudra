@@ -28,15 +28,20 @@ export default function Dashboard() {
   const [error, setError] = useState(null);
   const [bench, setBench] = useState(null);
 
-  const load = () => {
-    setLoading(true);
-    fetchAPI('/api/dashboard')
-      .then(setData)
-      .catch((err) => setError(err.message))
-      .finally(() => setLoading(false));
-  };
-
-  useEffect(() => { load(); }, []);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const d = await fetchAPI('/api/dashboard');
+        if (!cancelled) setData(d);
+      } catch (err) {
+        if (!cancelled) setError(err.message);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   async function runBenchmark() {
     setBench({ loading: true });

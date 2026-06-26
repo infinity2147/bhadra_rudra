@@ -1,4 +1,4 @@
-import { Component, useState, useEffect } from 'react';
+import { Component, useState } from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import Cases from './pages/Cases';
@@ -14,6 +14,9 @@ import Copilot from './pages/Copilot';
 import SarReports from './pages/SarReports';
 import Settings from './pages/Settings';
 import AccountAggregator from './pages/AccountAggregator';
+import SimulationStudio from './pages/SimulationStudio';
+import GeoMap from './pages/GeoMap';
+import Replay from './pages/Replay';
 import { getRole, setRole } from './api';
 
 class ErrorBoundary extends Component {
@@ -49,6 +52,9 @@ const ICONS = {
   sar: 'M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z',
   settings: 'M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065zM15 12a3 3 0 11-6 0 3 3 0 016 0z',
   aa: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4',
+  simulate: 'M9.75 3.104v5.714a2.25 2.25 0 01-.659 1.591L5 14.5M9.75 3.104c-.251.023-.501.05-.75.082m.75-.082a24.301 24.301 0 014.5 0m0 0v5.714c0 .597.237 1.17.659 1.591L19.8 15.3M14.25 3.104c.251.023.501.05.75.082M19.8 15.3l-1.57.393A9.065 9.065 0 0112 15a9.065 9.065 0 00-6.23-.693L5 14.5m14.8.8l1.402 1.402c1.232 1.232.65 3.318-1.067 3.611A48.309 48.309 0 0112 21c-2.773 0-5.491-.235-8.135-.687-1.718-.293-2.3-2.379-1.067-3.61L5 14.5',
+  map: 'M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7',
+  replay: 'M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z M21 12a9 9 0 11-18 0 9 9 0 0118 0z',
 };
 
 const NAV_GROUPS = [
@@ -59,6 +65,7 @@ const NAV_GROUPS = [
       { to: '/incidents', label: 'Incidents', icon: ICONS.incidents },
       { to: '/cases', label: 'Case Workbench', icon: ICONS.cases },
       { to: '/journey', label: 'Fund Journey', icon: ICONS.journey },
+      { to: '/replay', label: 'Temporal Replay', icon: ICONS.replay },
       { to: '/graph', label: 'Network Graph', icon: ICONS.graph },
     ],
   },
@@ -66,6 +73,7 @@ const NAV_GROUPS = [
     title: 'Analyse',
     items: [
       { to: '/analytics', label: 'Channel / Branch', icon: ICONS.analytics },
+      { to: '/map', label: 'Geo Map', icon: ICONS.map },
       { to: '/patterns', label: 'Pattern Library', icon: ICONS.patterns },
       { to: '/entities', label: 'Entity Explorer', icon: ICONS.entities },
       { to: '/model', label: 'ML Models', icon: ICONS.model },
@@ -75,6 +83,7 @@ const NAV_GROUPS = [
     title: 'Act',
     items: [
       { to: '/live', label: 'Live Stream', icon: ICONS.live },
+      { to: '/simulate', label: 'Simulation Studio', icon: ICONS.simulate },
       { to: '/copilot', label: 'AI Copilot', icon: ICONS.copilot },
       { to: '/sar', label: 'SAR Reports', icon: ICONS.sar },
     ],
@@ -182,6 +191,9 @@ export default function App() {
               <Route path="/sar" element={<SarReports />} />
               <Route path="/settings" element={<Settings />} />
               <Route path="/aa" element={<AccountAggregator />} />
+              <Route path="/simulate" element={<SimulationStudio />} />
+              <Route path="/map" element={<GeoMap />} />
+              <Route path="/replay" element={<Replay />} />
               <Route path="*" element={<NotFound />} />
             </Routes>
             </div>

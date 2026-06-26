@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { fetchAPI } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
+import RegBadges from '../components/RegBadges';
 
 function formatINR(n) {
   if (n == null) return '--';
@@ -12,6 +13,13 @@ function formatINR(n) {
 
 const SEVERITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
 
+// Pick the most severe legal_basis among an incident's alerts (prefer STR).
+function pickLegalBasis(alerts) {
+  const bases = (alerts || []).map((a) => a.legal_basis).filter(Boolean);
+  if (bases.length === 0) return null;
+  return bases.find((b) => b.includes('STR')) || bases[0];
+}
+
 export default function Incidents() {
   const navigate = useNavigate();
   const [params, setParams] = useSearchParams();
@@ -21,18 +29,35 @@ export default function Incidents() {
   const [detail, setDetail] = useState(null);
 
   useEffect(() => {
-    setLoading(true);
-    fetchAPI('/api/incidents')
-      .then((d) => setIncidents((d.incidents || []).sort(
-        (a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
-      )))
-      .catch(() => setIncidents([]))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const d = await fetchAPI('/api/incidents');
+        if (!cancelled) setIncidents((d.incidents || []).sort(
+          (a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
+        ));
+      } catch {
+        if (!cancelled) setIncidents([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
-    if (!selected) { setDetail(null); return; }
-    fetchAPI(`/api/incidents/${selected}`).then(setDetail).catch(() => setDetail(null));
+    let cancelled = false;
+    (async () => {
+      if (!selected) { setDetail(null); return; }
+      try {
+        const d = await fetchAPI(`/api/incidents/${selected}`);
+        if (!cancelled) setDetail(d);
+      } catch {
+        if (!cancelled) setDetail(null);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [selected]);
 
   return (
@@ -131,6 +156,15 @@ export default function Incidents() {
                   </div>
                 </div>
 
+                {/* Regulatory basis — most severe legal_basis across underlying alerts */}
+                {pickLegalBasis(detail.alerts) && (
+                  <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3">
+                    <p className="text-xs text-red-800">
+                      <span className="font-semibold">Regulatory basis:</span> {pickLegalBasis(detail.alerts)}
+                    </p>
+                  </div>
+                )}
+
                 {/* Patterns list */}
                 {detail.patterns && detail.patterns.length > 0 && (
                   <div className="mb-4">
@@ -181,6 +215,7 @@ export default function Incidents() {
                           <span className="ml-auto text-xs text-gray-500">{formatINR(a.total_flow)}</span>
                         </div>
                         <p className="text-xs text-gray-700 mt-1 line-clamp-2">{a.description}</p>
+                        <div className="mt-1.5"><RegBadges alert={a} /></div>
                       </button>
                     ))}
                   </div>
