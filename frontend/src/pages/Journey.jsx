@@ -174,7 +174,6 @@ function FlowStoryView({ data, focusId, panelSize, selectedNodeId, onSelectNode 
   }, [columns, width, height]);   // eslint-disable-line react-hooks/exhaustive-deps
 
   const visibleEdges = edges.filter(e => positions[e.source] && positions[e.target]);
-  const maxAmount = Math.max(...visibleEdges.map(e => e.amount), 1);
 
   const [hoverEdge, setHoverEdge] = useState(null);
 
@@ -398,6 +397,9 @@ function TimelineView({ data, panelSize, selectedNodeId, onSelectNode }) {
     };
   }, [data]);
 
+  // Hooks must run before any early return (rules-of-hooks).
+  const [hoverTxn, setHoverTxn] = useState(null);
+
   if (!entities.length) {
     return (
       <div className="absolute inset-0 flex items-center justify-center text-gray-400 text-sm">
@@ -426,8 +428,6 @@ function TimelineView({ data, panelSize, selectedNodeId, onSelectNode }) {
     const t = tMin + (tRange * i) / tickCount;
     return { t, x: xFor(new Date(t).toISOString()) };
   });
-
-  const [hoverTxn, setHoverTxn] = useState(null);
 
   return (
     <div className="absolute inset-0 overflow-auto">
@@ -640,18 +640,33 @@ export default function Journey() {
   // Auto-fetch when key inputs change
   useEffect(() => {
     if ((mode === 'alert' && alertId) || (mode === 'entity' && entityId)) {
-      fetchTrace();
+      // fetchTrace owns its own setState (loading/data/error); run it off the
+      // synchronous effect body so the initial setState doesn't cascade-render.
+      (async () => { await fetchTrace(); })();
     }
   }, [mode, alertId, entityId, direction, hops, minAmount, includeNeighbors, fetchTrace]);
 
   // SHAP explain when an alert is loaded
   useEffect(() => {
-    if (mode !== 'alert' || !alertId) { setExplanation(null); return; }
-    setExplainLoading(true);
-    fetchAPI(`/api/alerts/${alertId}/explain`)
-      .then((d) => setExplanation(d && !d.error ? d : null))
-      .catch(() => setExplanation(null))
-      .finally(() => setExplainLoading(false));
+    if (mode !== 'alert' || !alertId) {
+      // Intentional: clear the explanation when no alert is selected.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setExplanation(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setExplainLoading(true);
+      try {
+        const d = await fetchAPI(`/api/alerts/${alertId}/explain`);
+        if (!cancelled) setExplanation(d && !d.error ? d : null);
+      } catch {
+        if (!cancelled) setExplanation(null);
+      } finally {
+        if (!cancelled) setExplainLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [mode, alertId]);
 
   // Decide effective view mode: force graph for cycles or dense traces,

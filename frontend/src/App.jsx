@@ -1,4 +1,4 @@
-import { Component, useState, useEffect } from 'react';
+import { Component, useState } from 'react';
 import { BrowserRouter, Routes, Route, NavLink } from 'react-router-dom';
 import Dashboard from './pages/Dashboard';
 import Cases from './pages/Cases';

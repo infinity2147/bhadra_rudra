@@ -29,18 +29,35 @@ export default function Incidents() {
   const [detail, setDetail] = useState(null);
 
   useEffect(() => {
-    setLoading(true);
-    fetchAPI('/api/incidents')
-      .then((d) => setIncidents((d.incidents || []).sort(
-        (a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
-      )))
-      .catch(() => setIncidents([]))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      try {
+        const d = await fetchAPI('/api/incidents');
+        if (!cancelled) setIncidents((d.incidents || []).sort(
+          (a, b) => (SEVERITY_ORDER[a.severity] ?? 9) - (SEVERITY_ORDER[b.severity] ?? 9),
+        ));
+      } catch {
+        if (!cancelled) setIncidents([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
-    if (!selected) { setDetail(null); return; }
-    fetchAPI(`/api/incidents/${selected}`).then(setDetail).catch(() => setDetail(null));
+    let cancelled = false;
+    (async () => {
+      if (!selected) { setDetail(null); return; }
+      try {
+        const d = await fetchAPI(`/api/incidents/${selected}`);
+        if (!cancelled) setDetail(d);
+      } catch {
+        if (!cancelled) setDetail(null);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [selected]);
 
   return (

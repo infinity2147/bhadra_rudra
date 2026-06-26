@@ -95,11 +95,18 @@ export default function Cases() {
   const [groupByIncident, setGroupByIncident] = useState(false);
 
   useEffect(() => {
-    setLoading(true);
-    fetchAPI('/api/alerts')
-      .then(data => setAlerts(data.alerts || []))
-      .catch(() => setAlerts([]))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      try {
+        const data = await fetchAPI('/api/alerts');
+        if (!cancelled) setAlerts(data.alerts || []);
+      } catch {
+        if (!cancelled) setAlerts([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   const refreshAlerts = useCallback(async () => {
@@ -108,18 +115,21 @@ export default function Cases() {
   }, []);
 
   useEffect(() => {
-    if (!selectedId) {
-      setCaseDetail(null); setNote(''); setExplanation(null); setChainStatus(null);
+    let cancelled = false;
+    (async () => {
+      if (!selectedId) {
+        setCaseDetail(null); setNote(''); setExplanation(null); setChainStatus(null);
+        setEntityFlags({}); setTracePreview(null);
+        return;
+      }
+      setDetailLoading(true);
       setEntityFlags({}); setTracePreview(null);
-      return;
-    }
-    setDetailLoading(true);
-    setEntityFlags({}); setTracePreview(null);
-    Promise.all([
-      fetchAPI(`/api/cases/${selectedId}`),
-      fetchAPI(`/api/alerts/${selectedId}/explain`).catch(() => null),
-    ])
-      .then(([c, e]) => {
+      try {
+        const [c, e] = await Promise.all([
+          fetchAPI(`/api/cases/${selectedId}`),
+          fetchAPI(`/api/alerts/${selectedId}/explain`).catch(() => null),
+        ]);
+        if (cancelled) return;
         setCaseDetail(c);
         setExplanation(e && !e.error ? e : null);
 
@@ -134,21 +144,25 @@ export default function Cases() {
               .then(d => [eid, d.flags || []])
               .catch(() => [eid, []])
           )
-        ).then(pairs => setEntityFlags(Object.fromEntries(pairs)));
+        ).then(pairs => { if (!cancelled) setEntityFlags(Object.fromEntries(pairs)); });
 
         // Pull the journey for the alert's first entity to get dominant_paths.
         // trace_for_alert doesn't compute them — use the entity-mode endpoint.
         if (entityIds[0]) {
           fetchAPI(`/api/journey/${entityIds[0]}?hops=3&direction=forward`)
-            .then(d => setTracePreview({
+            .then(d => { if (!cancelled) setTracePreview({
               dominant_paths: d.dominant_paths || [],
               terminal_classification: d.terminal_classification || {},
-            }))
-            .catch(() => setTracePreview(null));
+            }); })
+            .catch(() => { if (!cancelled) setTracePreview(null); });
         }
-      })
-      .catch(() => { setCaseDetail(null); setExplanation(null); })
-      .finally(() => setDetailLoading(false));
+      } catch {
+        if (!cancelled) { setCaseDetail(null); setExplanation(null); }
+      } finally {
+        if (!cancelled) setDetailLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [selectedId, alerts]);
 
   const filtered = useMemo(() => {

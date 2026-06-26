@@ -121,6 +121,8 @@ export default function Sankey({
 
   // Reset zoom when graph data changes
   useEffect(() => {
+    // Intentional: reset transient zoom/pan/scroll when the graph data changes.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setZoom(1);
     setPan({ x: 0, y: 0 });
     if (scrollRef.current) {

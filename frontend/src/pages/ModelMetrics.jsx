@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
@@ -28,21 +28,23 @@ export default function ModelMetrics() {
   const [variants, setVariants] = useState([]);
   const [variant, setVariant] = useState('ibm_aml');
 
-  function load(v = variant) {
+  const load = useCallback((v) => {
     setLoading(true);
     fetchAPI(`/api/ml/metrics?variant=${encodeURIComponent(v)}`)
       .then(setData)
       .catch(e => setError(e.message))
       .finally(() => setLoading(false));
-  }
-
-  useEffect(() => {
-    fetchAPI('/api/ml/variants')
-      .then((d) => setVariants(d.variants || []))
-      .catch(() => setVariants([]));
   }, []);
 
-  useEffect(() => { load(variant); }, [variant]);
+  useEffect(() => {
+    let cancelled = false;
+    fetchAPI('/api/ml/variants')
+      .then((d) => { if (!cancelled) setVariants(d.variants || []); })
+      .catch(() => { if (!cancelled) setVariants([]); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => { (async () => { await load(variant); })(); }, [load, variant]);
 
   async function retrain() {
     setRetraining(true);

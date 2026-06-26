@@ -57,26 +57,39 @@ export default function Entities() {
   const debounceRef = useRef(null);
 
   useEffect(() => {
-    setLoading(true);
-    const params = new URLSearchParams();
-    if (search) params.set('search', search);
-    if (riskLevel !== 'ALL') params.set('risk_level', riskLevel);
-
-    fetchAPI(`/api/entities?${params.toString()}`)
-      .then(data => {
-        setEntities(Array.isArray(data) ? data : data.entities ?? []);
-      })
-      .catch(() => setEntities([]))
-      .finally(() => setLoading(false));
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      const params = new URLSearchParams();
+      if (search) params.set('search', search);
+      if (riskLevel !== 'ALL') params.set('risk_level', riskLevel);
+      try {
+        const data = await fetchAPI(`/api/entities?${params.toString()}`);
+        if (!cancelled) setEntities(Array.isArray(data) ? data : data.entities ?? []);
+      } catch {
+        if (!cancelled) setEntities([]);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [search, riskLevel]);
 
   useEffect(() => {
-    if (!selected) { setDetail(null); return; }
-    setDetailLoading(true);
-    fetchAPI(`/api/entities/${selected}`)
-      .then(data => setDetail(data))
-      .catch(() => setDetail(null))
-      .finally(() => setDetailLoading(false));
+    let cancelled = false;
+    (async () => {
+      if (!selected) { setDetail(null); return; }
+      setDetailLoading(true);
+      try {
+        const data = await fetchAPI(`/api/entities/${selected}`);
+        if (!cancelled) setDetail(data);
+      } catch {
+        if (!cancelled) setDetail(null);
+      } finally {
+        if (!cancelled) setDetailLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
   }, [selected]);
 
   function handleSearchChange(e) {
