@@ -44,8 +44,11 @@ from ml_model import (
     list_variants as ml_list_variants,
 )
 from gnn_model import load_gnn_metrics, load_gnn_edge_scores
-from shap_explainer import explain_alert as shap_explain_alert
+from shap_explainer import explain_alert as shap_explain_alert, explain_edge
 from fund_tracer import trace_journey, trace_for_alert
+from taint_store import TaintStore
+from fatf_typology import tag_alert
+from geo import city_flows
 from case_manager import CaseStore, VALID_STATUSES
 from fiu_package import build_package as build_fiu_package
 from incident_clustering import cluster_alerts, alert_to_incident_map
@@ -100,6 +103,8 @@ state = {
     "aa_client": None,           # Sahamati Account Aggregator client (real or mock-backed)
     "dilisense_client": None,    # DiliSense KYC client (real or mock-backed)
     "ingestor": None,            # Real Kafka stream ingestor (or in-process fallback)
+    "taint": None,               # TaintStore — persistent decaying taint that floors risk
+    "ensemble_edge_scores": None,  # lazily-loaded per-edge {xgb,sage,gat,ensemble}
     "loaded": False,
 }
 
@@ -210,6 +215,10 @@ def load_or_generate():
     # Config store (same SQLite file)
     state["config"] = ConfigStore(os.path.join(VARIANT_DIR, "rudra.db"))
 
+    # Persistent taint memory (same SQLite file) — decaying taint seeded from
+    # confirmed-fraud cases, floors future risk scores across pipeline runs.
+    state["taint"] = TaintStore(os.path.join(VARIANT_DIR, "rudra.db"))
+
     # AA + DiliSense clients — pick up env-driven creds; fall back to mock when absent.
     state["aa_client"] = AAClient()
     state["dilisense_client"] = DilisenseClient()
@@ -303,7 +312,43 @@ def _alerts_with_case_status() -> List[Dict]:
         decorated["assigned_to"] = case.get("assigned_to") if case else None
         decorated["ml_score"] = ml_score
         decorated["incident_id"] = a2i.get(a.get("alert_id"))
+        # FATF typology + Indian-regulatory refs + graded legal basis (additive).
+        decorated = tag_alert(decorated)
         out.append(decorated)
+    return out
+
+
+def _ensemble_edge_scores() -> Dict:
+    """Lazily load + cache the per-edge ensemble scores ({xgb,sage,gat,ensemble})."""
+    if state.get("ensemble_edge_scores") is None:
+        try:
+            from ensemble_model import load_ensemble_edge_scores
+            state["ensemble_edge_scores"] = load_ensemble_edge_scores(DATA_DIR, variant=state["variant"]) or {}
+        except Exception:
+            state["ensemble_edge_scores"] = {}
+    return state["ensemble_edge_scores"]
+
+
+def _risk_scores_with_taint() -> List[Dict]:
+    """Entity risk list with each score floored by its persisted taint.
+
+    A clean-looking account that sits near confirmed fraud can't drop below its
+    taint; genuinely high scores are preserved. Adds `taint` + `effective_risk`.
+    """
+    base = state["risk_scores"] or []
+    taint = state.get("taint")
+    if not taint:
+        return base
+    taint_map = taint.get_all()
+    out = []
+    for e in base:
+        eid = e.get("entity_id")
+        t = taint_map.get(eid, {}).get("taint", 0.0)
+        eff = max(float(e.get("risk_score", 0.0)), float(t))
+        row = dict(e)
+        row["taint"] = round(float(t), 4)
+        row["effective_risk"] = round(eff, 4)
+        out.append(row)
     return out
 
 
@@ -690,13 +735,14 @@ def get_entities(
     returning everything makes the frontend dropdown unusable. limit=0 means
     no cap.
     """
-    entities = state["risk_scores"]
+    entities = _risk_scores_with_taint()
     if search:
         entities = [e for e in entities if search.lower() in e["name"].lower()]
     if risk_level:
         entities = [e for e in entities if e["risk_level"] == risk_level]
     total = len(entities)
-    entities_sorted = sorted(entities, key=lambda e: e["risk_score"], reverse=True)
+    # Rank by taint-floored effective risk so confirmed-adjacent accounts surface.
+    entities_sorted = sorted(entities, key=lambda e: e.get("effective_risk", e["risk_score"]), reverse=True)
     if limit and limit > 0:
         entities_sorted = entities_sorted[:limit]
     return {"entities": entities_sorted, "total": total, "returned": len(entities_sorted)}
@@ -869,6 +915,222 @@ def get_ensemble_edge_scores(variant: str = "ibm_aml", limit: int = 100):
     return {"trained": True, "variant": variant, "edges": items, "total": len(scores)}
 
 
+@app.get("/api/ml/ensemble/edge/{u}/{v}")
+def get_ensemble_edge(u: str, v: str):
+    """Per-model scores for ONE edge: how XGBoost, GraphSAGE and GAT each vote
+    and how the meta-learner resolves them. Powers the 'layers agree' panel."""
+    scores = _ensemble_edge_scores()
+    row = scores.get(f"{u}->{v}")
+    if not row:
+        return {"found": False, "edge": f"{u}->{v}"}
+    models = {k: row[k] for k in ("xgb", "sage", "gat") if k in row}
+    ens = row.get("ensemble")
+    vals = list(models.values())
+    spread = (max(vals) - min(vals)) if vals else 0.0
+    return {
+        "found": True,
+        "edge": f"{u}->{v}",
+        "models": models,
+        "ensemble": ens,
+        "agreement": round(1.0 - spread, 3),     # 1.0 = all models agree
+        "spread": round(spread, 3),
+    }
+
+
+# ── Health (deployment / docker healthcheck) ────────────────────────────────
+
+@app.get("/api/health")
+def health():
+    """Probe every subsystem so a load-balancer / compose healthcheck can gate
+    readiness on the brain being loaded, not just the process being up."""
+    checks = {}
+    g = state.get("graph")
+    checks["graph_loaded"] = bool(g is not None and g.number_of_nodes() > 0)
+    checks["alerts_loaded"] = bool(state.get("alerts"))
+    checks["ml_bundle"] = bool(state.get("ml_bundle"))
+    try:
+        state["config"].get_all()
+        checks["db"] = True
+    except Exception:
+        checks["db"] = False
+    ing = state.get("ingestor")
+    try:
+        checks["stream"] = bool(ing and ing.status().get("running"))
+    except Exception:
+        checks["stream"] = False
+    core_ok = checks["graph_loaded"] and checks["alerts_loaded"]
+    return {"status": "ok" if core_ok else "degraded", "variant": state.get("variant"), "checks": checks}
+
+
+# ── Geo: inter-city fund flows + fraud hotspots ─────────────────────────────
+
+@app.get("/api/geo/flows")
+def geo_flows():
+    """Aggregate the (real) branch network into inter-city flows + per-city
+    fraud hotspots for the India map view."""
+    return city_flows(state["transactions"])
+
+
+# ── Persistent taint memory ─────────────────────────────────────────────────
+
+@app.get("/api/taint")
+def list_taint(limit: int = 100):
+    """Entities carrying persistent taint (from confirmed-fraud cases)."""
+    taint = state.get("taint")
+    if not taint:
+        return {"entities": [], "total": 0}
+    allt = taint.get_all()
+    g = state["graph"]
+    rows = []
+    for eid, info in list(allt.items())[:limit]:
+        name = g.nodes[eid].get("name", eid) if g is not None and g.has_node(eid) else eid
+        rows.append({"entity_id": eid, "name": name, **info})
+    return {"entities": rows, "total": len(allt)}
+
+
+@app.post("/api/taint/seed/{alert_id}")
+def seed_taint(alert_id: str, role: str = Depends(get_role)):
+    """Manually seed decaying taint from an alert's entities (investigator action).
+    Auto-seeding also happens when a case is escalated / SAR-filed."""
+    require("case.note", role)
+    taint = state.get("taint")
+    if not taint:
+        raise HTTPException(503, "Taint store unavailable")
+    alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
+    if not alert or not alert.get("entities"):
+        raise HTTPException(404, "Alert not found or has no entities")
+    computed = taint.seed(state["graph"], alert["entities"], source=f"manual:{alert_id}")
+    return {"seeded": len(computed), "alert_id": alert_id, "entities": alert["entities"]}
+
+
+# ── Simulation Studio: score-your-own-transaction + scripted scenarios ──────
+
+_SIM_SCENARIOS = {
+    "layering_chain": {
+        "label": "Rapid layering chain",
+        "description": "₹50L relayed through 3 fresh intermediaries within minutes.",
+        "txns": [
+            {"sender": "SIM_SRC", "receiver": "SIM_M1", "amount": 5_000_000, "rail": "RTGS"},
+            {"sender": "SIM_M1", "receiver": "SIM_M2", "amount": 4_800_000, "rail": "RTGS"},
+            {"sender": "SIM_M2", "receiver": "SIM_DST", "amount": 4_600_000, "rail": "NEFT"},
+        ],
+    },
+    "smurfing_fanout": {
+        "label": "Smurfing fan-out",
+        "description": "One sender sprays sub-threshold ₹1.9L transfers to 8 mules.",
+        "txns": [
+            {"sender": "SIM_SMURF", "receiver": f"SIM_MULE{i}", "amount": 190_000, "rail": "IMPS"}
+            for i in range(8)
+        ],
+    },
+    "round_trip": {
+        "label": "Round-trip cycle",
+        "description": "Funds cycle A→B→C→A — classic round-tripping.",
+        "txns": [
+            {"sender": "SIM_A", "receiver": "SIM_B", "amount": 1_000_000, "rail": "NEFT"},
+            {"sender": "SIM_B", "receiver": "SIM_C", "amount": 980_000, "rail": "NEFT"},
+            {"sender": "SIM_C", "receiver": "SIM_A", "amount": 960_000, "rail": "NEFT"},
+        ],
+    },
+    "recruiter_fleet": {
+        "label": "Recruiter / coordinator",
+        "description": "A coordinator funds 6 accounts that each forward onward.",
+        "txns": (
+            [{"sender": "SIM_COORD", "receiver": f"SIM_R{i}", "amount": 1_000_000, "rail": "IMPS"} for i in range(6)]
+            + [{"sender": f"SIM_R{i}", "receiver": f"SIM_SINK{i}", "amount": 950_000, "rail": "NEFT"} for i in range(6)]
+        ),
+    },
+}
+
+
+async def _score_and_publish(sender, receiver, amount, channel, rail, currency, ts, publish=True) -> Dict:
+    """Score one transaction live (ml + severity + signals + ensemble + SHAP) and,
+    best-effort, publish it onto the stream so the live feed reacts."""
+    from streaming.ingestor import _severity_from_score, _signals_from_features
+    bundle = state.get("ml_bundle")
+    graph = state["graph"]
+    out = {"sender": sender, "receiver": receiver, "amount": amount, "channel": channel, "rail": rail}
+    if bundle is None:
+        out["error"] = "ML bundle not loaded"
+        return out
+
+    res = score_live_txn(bundle, graph, sender, receiver, float(amount), channel, rail, ts, currency)
+    ml_score = res["ml_score"]
+    features = res["features"]
+    threshold = bundle.get("threshold")
+    out["ml_score"] = round(float(ml_score), 4)
+    out["threshold"] = threshold
+    out["severity"] = _severity_from_score(ml_score, float(amount), currency, threshold)
+    out["signals"] = _signals_from_features(features)
+    out["latency_ms"] = res["latency_ms"]
+    out["edge_exists"] = bool(graph.has_edge(sender, receiver))
+
+    edge_row = _ensemble_edge_scores().get(f"{sender}->{receiver}")
+    if edge_row:
+        out["ensemble"] = {k: edge_row[k] for k in ("xgb", "sage", "gat", "ensemble") if k in edge_row}
+    if graph.has_edge(sender, receiver):
+        try:
+            expl = explain_edge(bundle, graph, state["transactions"], sender, receiver)
+            if expl:
+                out["shap"] = expl.get("top_features")
+        except Exception:
+            pass
+
+    if publish and state.get("ingestor"):
+        try:
+            import uuid
+            txn = StreamTxn(
+                transaction_id=f"SIM_{uuid.uuid4().hex[:8]}",
+                sender_id=sender, receiver_id=receiver, amount=float(amount),
+                timestamp=ts.isoformat(), channel=channel, transaction_type=rail, currency=currency,
+            )
+            await state["ingestor"].publish(txn)
+            out["published"] = True
+        except Exception:
+            out["published"] = False
+    return out
+
+
+@app.get("/api/simulate/scenarios")
+def simulate_scenarios():
+    """List the one-click fraud scenarios an evaluator can inject."""
+    return {"scenarios": [
+        {"name": k, "label": v["label"], "description": v["description"], "n_txns": len(v["txns"])}
+        for k, v in _SIM_SCENARIOS.items()
+    ]}
+
+
+@app.post("/api/simulate/score")
+async def simulate_score(body: dict):
+    """Score a user-built transaction and surface the full breakdown (ml score,
+    severity, honest signals, ensemble votes, SHAP) — and push it to the live feed."""
+    sender = str(body.get("sender") or "SIM_SENDER")
+    receiver = str(body.get("receiver") or "SIM_RECEIVER")
+    amount = float(body.get("amount") or 0)
+    channel = str(body.get("channel") or "NetBanking")
+    rail = str(body.get("rail") or body.get("transaction_type") or "NEFT")
+    currency = str(body.get("currency") or "INR")
+    ts = pd.Timestamp(body["timestamp"]) if body.get("timestamp") else pd.Timestamp.now()
+    return await _score_and_publish(sender, receiver, amount, channel, rail, currency, ts, publish=True)
+
+
+@app.post("/api/simulate/scenario/{name}")
+async def simulate_scenario(name: str):
+    """Inject a scripted fraud scenario; each txn is scored live and streamed."""
+    sc = _SIM_SCENARIOS.get(name)
+    if not sc:
+        raise HTTPException(404, f"Unknown scenario. Options: {list(_SIM_SCENARIOS)}")
+    results = []
+    for t in sc["txns"]:
+        results.append(await _score_and_publish(
+            t["sender"], t["receiver"], float(t["amount"]),
+            t.get("channel", "NetBanking"), t.get("rail", "NEFT"), "INR",
+            pd.Timestamp.now(), publish=True,
+        ))
+    return {"scenario": name, "label": sc["label"], "description": sc["description"],
+            "injected": len(results), "results": results}
+
+
 @app.get("/api/ml/tabular")
 def get_tabular_baseline():
     """IEEE-CIS tabular baseline metrics (separate from graph models)."""
@@ -964,6 +1226,12 @@ def dispose_case(alert_id: str, body: dict, role: str = Depends(get_role)):
         author=body.get("author", role.lower()),
         assigned_to=body.get("assigned_to"),
     )
+    # Confirming fraud seeds persistent, decaying taint from the alert's entities
+    # so the suspicion survives future pipeline runs and floors neighbours' risk.
+    if status in ("ESCALATED", "SAR_FILED") and state.get("taint"):
+        alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
+        if alert and alert.get("entities"):
+            state["taint"].seed(state["graph"], alert["entities"], source=f"{status}:{alert_id}")
     return case
 
 
@@ -1003,8 +1271,19 @@ def download_fiu_package(alert_id: str, role: str = Depends(get_role)):
     sar = state["sar_gen"].generate_sar(alert)
     sar_pdf_path = state["sar_gen"].export_sar_pdf(sar, sar_dir)
     case = state["cases"].get(alert_id)
+    # Embed the alert's SHAP attributions in the STR XML when the ML bundle is
+    # available, so the model's reasoning travels with the regulatory filing.
+    shap_features = None
+    if state.get("ml_bundle"):
+        try:
+            expl = shap_explain_alert(state["ml_bundle"], state["graph"], state["transactions"], alert)
+            if expl:
+                shap_features = expl.get("top_features")
+        except Exception:
+            shap_features = None
     zip_bytes = build_fiu_package(
         state["graph"], state["transactions"], alert, sar_pdf_path, case=case,
+        shap_features=shap_features,
     )
     return StreamingResponse(
         BytesIO(zip_bytes),
