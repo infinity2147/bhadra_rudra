@@ -161,9 +161,25 @@ export default function Entities() {
                           : 'hover:bg-gray-50'
                       }`}
                     >
-                      <td className="px-4 py-3 font-medium">{entity.name}</td>
+                      <td className="px-4 py-3 font-medium">
+                        <div className="flex items-center gap-2">
+                          <span>{entity.name}</span>
+                          {entity.taint > 0 && (
+                            <span
+                              className="bg-amber-100 text-amber-700 text-[10px] font-semibold px-2 py-0.5 rounded"
+                              title="Persistent taint from a confirmed-fraud case — floors this entity's risk across runs"
+                            >
+                              Tainted {(entity.taint * 100).toFixed(0)}%
+                            </span>
+                          )}
+                        </div>
+                      </td>
                       <td className="px-4 py-3 text-gray-600 capitalize">{(entity.type || '').replace('_', ' ')}</td>
-                      <td className="px-4 py-3"><RiskScoreBar score={entity.risk_score ?? 0} /></td>
+                      <td className="px-4 py-3">
+                        <RiskScoreBar
+                          score={Math.max(entity.risk_score ?? 0, entity.effective_risk ?? 0)}
+                        />
+                      </td>
                       <td className="px-4 py-3"><SeverityBadge severity={entity.risk_level} /></td>
                     </tr>
                   ))}

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { fetchAPI } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
+import RegBadges from '../components/RegBadges';
 
 function formatCurrency(value) {
   if (value == null) return '--';
@@ -62,6 +63,19 @@ export default function SarReports() {
     downloadFile(filename, JSON.stringify(report, null, 2), 'application/json');
   }
 
+  const selectedAlertObj = alerts.find(
+    (a) => (a.alert_id ?? a.id) === selectedAlert,
+  );
+  const regRefs = selectedAlertObj?.regulatory_refs;
+  const hasRegRefs = Array.isArray(regRefs) && regRefs.length > 0;
+  const showRegSection =
+    selectedAlertObj &&
+    (selectedAlertObj.fatf_code ||
+      selectedAlertObj.legal_basis ||
+      hasRegRefs ||
+      selectedAlertObj.pmla_section ||
+      selectedAlertObj.rbi_ref);
+
   return (
     <div className="h-full overflow-y-auto">
       <div className="p-6 max-w-4xl">
@@ -110,6 +124,31 @@ export default function SarReports() {
           </div>
           {alertsLoading && <p className="text-xs text-gray-400 mt-2">Loading alerts...</p>}
         </div>
+
+        {/* Regulatory context for the selected alert (additive) */}
+        {showRegSection && (
+          <div className="mt-6 bg-white border border-gray-200 rounded-xl p-5">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <h2 className="text-lg font-bold text-gray-900">Regulatory Context</h2>
+              <RegBadges alert={selectedAlertObj} />
+            </div>
+            {selectedAlertObj.legal_basis && (
+              <p className="text-sm text-gray-700 mt-3">
+                <span className="font-semibold">Legal basis:</span> {selectedAlertObj.legal_basis}
+              </p>
+            )}
+            {(hasRegRefs || selectedAlertObj.pmla_section || selectedAlertObj.rbi_ref) && (
+              <div className="mt-3">
+                <p className="text-xs font-medium text-gray-500 uppercase tracking-wide">Regulatory references</p>
+                <ul className="mt-1.5 space-y-1 text-sm text-gray-700 list-disc list-inside">
+                  {hasRegRefs && regRefs.map((ref, i) => <li key={i}>{ref}</li>)}
+                  {selectedAlertObj.pmla_section && <li>PMLA: {selectedAlertObj.pmla_section}</li>}
+                  {selectedAlertObj.rbi_ref && <li>RBI: {selectedAlertObj.rbi_ref}</li>}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Report Output */}
         {report && (
