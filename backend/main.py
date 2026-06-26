@@ -1091,13 +1091,51 @@ async def _score_and_publish(sender, receiver, amount, channel, rail, currency, 
     return out
 
 
+def _sample_flagged_edge():
+    """A real, high-ML-score edge from the dataset, for prefilling the Studio.
+
+    Scoring fictitious accounts yields a contextless number with no ensemble/SHAP
+    (those need a real graph edge). Defaulting the form to an actual flagged edge
+    makes the first score meaningful — high probability, ensemble votes, and SHAP
+    all populate. We pick the highest XGBoost-scored edge that exists in the graph.
+    """
+    graph = state["graph"]
+    es = state["edge_scores"] or {}
+    best, best_s = None, -1.0
+    for k, s in es.items():
+        if "->" not in k or s <= best_s:
+            continue
+        u, v = k.split("->", 1)
+        if graph.has_edge(u, v):
+            best, best_s = (u, v), float(s)
+    if not best:
+        return None
+    u, v = best
+    ed = graph[u][v]
+    rail_mix = ed.get("rail_mix") or {}
+    ch_mix = ed.get("channel_mix") or {}
+    rail = max(rail_mix, key=rail_mix.get) if rail_mix else "NEFT"
+    channel = max(ch_mix, key=ch_mix.get) if ch_mix else "NetBanking"
+    return {
+        "sender": u, "receiver": v,
+        "sender_name": graph.nodes[u].get("name", u),
+        "receiver_name": graph.nodes[v].get("name", v),
+        "amount": round(float(ed.get("total_amount", 0.0)), 2),
+        "channel": channel, "rail": rail,
+        "xgb_score": round(best_s, 4),
+    }
+
+
 @app.get("/api/simulate/scenarios")
 def simulate_scenarios():
-    """List the one-click fraud scenarios an evaluator can inject."""
-    return {"scenarios": [
-        {"name": k, "label": v["label"], "description": v["description"], "n_txns": len(v["txns"])}
-        for k, v in _SIM_SCENARIOS.items()
-    ]}
+    """List the one-click fraud scenarios + a real flagged edge to prefill the form."""
+    return {
+        "scenarios": [
+            {"name": k, "label": v["label"], "description": v["description"], "n_txns": len(v["txns"])}
+            for k, v in _SIM_SCENARIOS.items()
+        ],
+        "sample_edge": _sample_flagged_edge(),
+    }
 
 
 @app.post("/api/simulate/score")

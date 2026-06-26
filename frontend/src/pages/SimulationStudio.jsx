@@ -66,6 +66,7 @@ export default function SimulationStudio() {
   const [error, setError] = useState(null);
 
   const [scenarios, setScenarios] = useState([]);
+  const [sampleEdge, setSampleEdge] = useState(null);
   const [injecting, setInjecting] = useState(null); // scenario name currently being injected
   const [toast, setToast] = useState(null);
 
@@ -106,10 +107,31 @@ export default function SimulationStudio() {
     return () => { cancelled = true; clearInterval(id); };
   }, [refreshFeed]);
 
-  // --- Scenarios ----------------------------------------------------------
+  function loadSampleEdge(edge) {
+    if (!edge) return;
+    setForm(f => ({
+      ...f,
+      sender: edge.sender,
+      receiver: edge.receiver,
+      amount: edge.amount,
+      channel: CHANNELS.includes(edge.channel) ? edge.channel : f.channel,
+      rail: RAILS.includes(edge.rail) ? edge.rail : f.rail,
+    }));
+  }
+
+  // --- Scenarios + prefill the form with a REAL flagged edge --------------
+  // Scoring fictitious accounts gives a contextless number with no ensemble/SHAP
+  // (both need a real graph edge). So we default the form to an actual flagged
+  // edge from the dataset — the first score is then meaningful out of the box.
   useEffect(() => {
     fetchAPI('/api/simulate/scenarios')
-      .then(d => setScenarios(d?.scenarios || []))
+      .then(d => {
+        setScenarios(d?.scenarios || []);
+        if (d?.sample_edge) {
+          setSampleEdge(d.sample_edge);
+          loadSampleEdge(d.sample_edge);
+        }
+      })
       .catch(() => setScenarios([]));
   }, []);
 
@@ -253,6 +275,20 @@ export default function SimulationStudio() {
               >
                 {scoring ? 'Scoring…' : 'Score & Stream'}
               </button>
+
+              {sampleEdge && (
+                <button
+                  onClick={() => loadSampleEdge(sampleEdge)}
+                  className="w-full px-4 py-2 rounded-lg text-xs font-medium border border-indigo-200 text-indigo-700 hover:bg-indigo-50 transition-colors"
+                  title={`A real flagged counterparty edge (XGB ${sampleEdge.xgb_score})`}
+                >
+                  Load a real flagged edge ↺
+                </button>
+              )}
+              <p className="text-[11px] text-gray-400 leading-snug">
+                Tip: real account IDs from the dataset return a full breakdown (ensemble + SHAP).
+                Made-up names score on the transaction features alone.
+              </p>
             </div>
           </div>
 
@@ -315,6 +351,14 @@ export default function SimulationStudio() {
                   </p>
                 </div>
               </div>
+
+              {result.edge_exists === false && (
+                <div className="mt-4 rounded-md bg-amber-50 border border-amber-200 px-3 py-2 text-xs text-amber-800">
+                  These accounts aren&apos;t in the dataset, so the model is scoring the transaction&apos;s
+                  own features only — <b>ensemble votes and SHAP need a known counterparty edge</b>.
+                  Press <b>Load a real flagged edge</b> to see the full breakdown.
+                </div>
+              )}
 
               {Array.isArray(result.signals) && result.signals.length > 0 && (
                 <div className="mt-4 flex flex-wrap gap-1.5">
