@@ -199,9 +199,18 @@ export default function Settings() {
                     />
                     <input
                       type="number"
+                      min={f.min}
+                      max={f.max}
                       step={f.step || (f.type === 'int' ? 1 : 0.01)}
                       value={val ?? 0}
-                      onChange={(e) => setDraft((d) => ({ ...d, [f.key]: Number(e.target.value) }))}
+                      onChange={(e) => {
+                        // Clamp to the field's documented range so the typed
+                        // number can't exceed what the slider allows.
+                        const raw = Number(e.target.value);
+                        if (Number.isNaN(raw)) return;
+                        const clamped = Math.min(f.max, Math.max(f.min, raw));
+                        setDraft((d) => ({ ...d, [f.key]: clamped }));
+                      }}
                       disabled={!isAdmin}
                       className="col-span-2 px-2 py-1 border border-gray-300 rounded text-sm disabled:bg-gray-50"
                     />

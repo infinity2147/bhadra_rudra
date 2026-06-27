@@ -70,7 +70,11 @@ export default function Replay() {
       try {
         const d = await fetchAPI('/api/alerts');
         if (cancelled) return;
-        const list = Array.isArray(d) ? d : (d.alerts || []);
+        const raw = Array.isArray(d) ? d : (d.alerts || []);
+        // Only multi-entity alerts have a fund flow to replay — single-entity
+        // alerts (e.g. Profile Mismatch) have no inter-account timeline, so we
+        // don't offer them and leave the user staring at an empty stage.
+        const list = raw.filter(a => (a.entities || []).length >= 2);
         // Surface the cinematic patterns first — layering chains and circular
         // rings make the most compelling replays.
         const rank = (a) => {
@@ -284,7 +288,7 @@ export default function Replay() {
           {!alertsLoading && alerts.length === 0 && <option>No alerts available</option>}
           {alerts.map((a) => (
             <option key={a.alert_id} value={a.alert_id}>
-              {a.alert_id} — {a.pattern_type} ({a.severity})
+              {a.alert_id} — {a.pattern_type} ({a.severity}) · {(a.entities || []).length} entities
             </option>
           ))}
         </select>

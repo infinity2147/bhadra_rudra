@@ -34,6 +34,24 @@ def _cfg(config: Optional[Dict], key: str, default):
     return config.get(key, default)
 
 
+def _scc3_members(graph: nx.DiGraph) -> Set[str]:
+    """Union of all nodes in strongly-connected components of size >= 3.
+
+    Memoised on the graph object (`graph.graph`) — Tarjan over a 100k+ node
+    graph is far too slow to repeat on every trace request, and the graph is
+    stable between rebuilds (a rebuild creates a fresh object, dropping the cache).
+    """
+    cached = graph.graph.get("_scc3_members")
+    if cached is not None:
+        return cached
+    members: Set[str] = set()
+    for comp in nx.strongly_connected_components(graph):
+        if len(comp) >= 3:
+            members.update(comp)
+    graph.graph["_scc3_members"] = members
+    return members
+
+
 def _build_txn_index(transactions: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     """Pre-group transactions by entity once — O(N_txns).
 
@@ -453,12 +471,21 @@ def trace_journey(
     min_amount: float = 0,
     edge_ml_scores: Optional[Dict[str, float]] = None,
     config: Optional[Dict] = None,
+    txn_index: Optional[Dict] = None,
+    baseline_stats: Optional[Dict] = None,
+    burst_counts: Optional[Dict] = None,
+    transit_ratios: Optional[Dict] = None,
 ) -> Dict:
     """Compute the end-to-end fund journey around a focal entity.
 
     Returns a dict ready for serialisation to the frontend: source entity,
     nodes (with side + flags), links (with flags + ML score), chronological
     timeline of underlying transactions, and a top-level summary.
+
+    The four per-entity structures (txn_index/baseline_stats/burst_counts/
+    transit_ratios) each cost a full O(N_txns) pass to build. Callers that
+    serve many requests (the API) build them ONCE at startup and pass them in;
+    when omitted they're built on demand so standalone use still works.
     """
     if not graph.has_node(entity_id):
         return {"error": f"Entity {entity_id} not found"}
@@ -469,15 +496,15 @@ def trace_journey(
 
     risk_map = {r["entity_id"]: r["risk_score"] for r in risk_scores}
 
-    # Pre-build entity→transactions index ONCE (O(N_txns))
-    # so _annotate_node_flags can do a dict lookup instead of a full scan.
-    txn_index = _build_txn_index(transactions)
-    # Per-entity baseline stats for the outflow_zscore_anomaly flag.
-    baseline_stats = _build_baseline_stats(transactions)
-    # Per-entity velocity-burst counts for the velocity_burst flag.
-    burst_counts = _build_burst_counts(transactions)
-    # Per-entity transit ratios for the transit_node flag (mule signature).
-    transit_ratios = _build_transit_ratios(transactions)
+    # Use caller-supplied caches when available; otherwise build on demand.
+    if txn_index is None:
+        txn_index = _build_txn_index(transactions)
+    if baseline_stats is None:
+        baseline_stats = _build_baseline_stats(transactions)
+    if burst_counts is None:
+        burst_counts = _build_burst_counts(transactions)
+    if transit_ratios is None:
+        transit_ratios = _build_transit_ratios(transactions)
 
     # 1. Walk graph in requested direction(s)
     forward_depth: Dict[str, int] = {}
@@ -502,12 +529,8 @@ def trace_journey(
     # 2. SCC membership — use the FULL graph so cycles that extend beyond
     # max_hops are still detected.  A node in a 6-hop cycle with max_hops=3
     # would be invisible if we only ran SCC on the BFS-clipped subgraph.
-    scc_set: Set[str] = set()
-    for comp in nx.strongly_connected_components(graph):
-        if len(comp) >= 3:
-            scc_set.update(comp)
-    # Keep only the SCC members that are actually in our trace
-    scc_set &= all_node_ids
+    # Memoised on the graph so we don't re-run Tarjan over 100k+ nodes per call.
+    scc_set = _scc3_members(graph) & all_node_ids
 
     # 3. Build node list
     nodes_out = []
@@ -728,6 +751,10 @@ def trace_for_alert(
     include_neighbors: bool = False,
     max_hops: int = 1,
     config: Optional[Dict] = None,
+    txn_index: Optional[Dict] = None,
+    baseline_stats: Optional[Dict] = None,
+    burst_counts: Optional[Dict] = None,
+    transit_ratios: Optional[Dict] = None,
 ) -> Dict:
     """Trace a journey scoped to the specific entities named in an alert.
 
@@ -767,11 +794,15 @@ def trace_for_alert(
     risk_map = {r["entity_id"]: r["risk_score"] for r in risk_scores}
     edge_ml_scores = edge_ml_scores or {}
 
-    # Pre-build entity→transactions index ONCE for flag annotation
-    txn_index = _build_txn_index(transactions)
-    baseline_stats = _build_baseline_stats(transactions)
-    burst_counts = _build_burst_counts(transactions)
-    transit_ratios = _build_transit_ratios(transactions)
+    # Use caller-supplied caches when available; otherwise build on demand.
+    if txn_index is None:
+        txn_index = _build_txn_index(transactions)
+    if baseline_stats is None:
+        baseline_stats = _build_baseline_stats(transactions)
+    if burst_counts is None:
+        burst_counts = _build_burst_counts(transactions)
+    if transit_ratios is None:
+        transit_ratios = _build_transit_ratios(transactions)
 
     # Collect edges among these nodes
     all_edges = [
@@ -780,12 +811,8 @@ def trace_for_alert(
     ]
 
     # SCC from the FULL graph (same reasoning as trace_journey — cycles can
-    # extend beyond the alert entity set).
-    scc_set: Set[str] = set()
-    for comp in nx.strongly_connected_components(graph):
-        if len(comp) >= 3:
-            scc_set.update(comp)
-    scc_set &= node_set
+    # extend beyond the alert entity set). Memoised on the graph.
+    scc_set = _scc3_members(graph) & node_set
 
     entity_set = set(entities)
     nodes_out = []

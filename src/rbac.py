@@ -48,10 +48,21 @@ PERMISSIONS = {
 
 
 def get_role(x_user_role: Optional[str] = Header(default=None)) -> str:
-    """FastAPI dependency: pull the role from the X-User-Role header."""
-    if x_user_role and x_user_role.upper() in VALID_ROLES:
-        return x_user_role.upper()
-    return DEFAULT_ROLE
+    """FastAPI dependency: pull the role from the X-User-Role header.
+
+    No header → DEFAULT_ROLE (demo convenience). But a header that's PRESENT and
+    not a recognised role is rejected with 403 rather than silently elevated to
+    the default — an unknown role must never inherit privileges.
+    """
+    if x_user_role is None or x_user_role.strip() == "":
+        return DEFAULT_ROLE
+    role = x_user_role.upper()
+    if role not in VALID_ROLES:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Unknown role '{x_user_role}'. Valid roles: {sorted(VALID_ROLES)}",
+        )
+    return role
 
 
 def require(action: str, role: str) -> None:

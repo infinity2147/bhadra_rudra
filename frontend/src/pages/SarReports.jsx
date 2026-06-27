@@ -88,6 +88,7 @@ export default function SarReports() {
           <label className="block text-sm font-medium text-gray-700 mb-2">Select Alert</label>
           <div className="flex gap-3">
             <select
+              data-testid="sar-alert-select"
               value={selectedAlert}
               onChange={e => { setSelectedAlert(e.target.value); setReport(null); }}
               className="flex-1 px-4 py-2.5 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
