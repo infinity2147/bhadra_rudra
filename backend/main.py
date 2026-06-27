@@ -1174,6 +1174,11 @@ def get_journey(
         state["graph"], state["transactions"], state["risk_scores"],
         entity_id=entity_id, direction=direction, max_hops=hops,
         min_amount=min_amount, edge_ml_scores=state["edge_scores"],
+        # Reuse indices built once at startup — avoids a ~38s rebuild per call.
+        txn_index=state.get("_txn_index"),
+        baseline_stats=state.get("_baseline_stats"),
+        burst_counts=state.get("_burst_counts"),
+        transit_ratios=state.get("_transit_ratios"),
     )
 
 
@@ -1186,6 +1191,11 @@ def get_journey_for_alert(alert_id: str, include_neighbors: bool = False):
         state["graph"], state["transactions"], state["risk_scores"],
         alert=alert, edge_ml_scores=state["edge_scores"],
         include_neighbors=include_neighbors,
+        # Reuse indices built once at startup — avoids a ~38s rebuild per call.
+        txn_index=state.get("_txn_index"),
+        baseline_stats=state.get("_baseline_stats"),
+        burst_counts=state.get("_burst_counts"),
+        transit_ratios=state.get("_transit_ratios"),
     )
 
 

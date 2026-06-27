@@ -453,6 +453,10 @@ def trace_journey(
     min_amount: float = 0,
     edge_ml_scores: Optional[Dict[str, float]] = None,
     config: Optional[Dict] = None,
+    txn_index: Optional[Dict] = None,
+    baseline_stats: Optional[Dict] = None,
+    burst_counts: Optional[Dict] = None,
+    transit_ratios: Optional[Dict] = None,
 ) -> Dict:
     """Compute the end-to-end fund journey around a focal entity.
 
@@ -469,15 +473,18 @@ def trace_journey(
 
     risk_map = {r["entity_id"]: r["risk_score"] for r in risk_scores}
 
-    # Pre-build entity→transactions index ONCE (O(N_txns))
-    # so _annotate_node_flags can do a dict lookup instead of a full scan.
-    txn_index = _build_txn_index(transactions)
-    # Per-entity baseline stats for the outflow_zscore_anomaly flag.
-    baseline_stats = _build_baseline_stats(transactions)
-    # Per-entity velocity-burst counts for the velocity_burst flag.
-    burst_counts = _build_burst_counts(transactions)
-    # Per-entity transit ratios for the transit_node flag (mule signature).
-    transit_ratios = _build_transit_ratios(transactions)
+    # Reuse caller-supplied indices when present (the backend builds these ONCE
+    # at startup); otherwise build them now so direct/test calls still work.
+    # Building from scratch is O(N_txns) and dominates latency on large datasets
+    # (~38s on the 100k-row IBM AML set), so passing them in is the hot path.
+    if txn_index is None:
+        txn_index = _build_txn_index(transactions)
+    if baseline_stats is None:
+        baseline_stats = _build_baseline_stats(transactions)
+    if burst_counts is None:
+        burst_counts = _build_burst_counts(transactions)
+    if transit_ratios is None:
+        transit_ratios = _build_transit_ratios(transactions)
 
     # 1. Walk graph in requested direction(s)
     forward_depth: Dict[str, int] = {}
@@ -728,6 +735,10 @@ def trace_for_alert(
     include_neighbors: bool = False,
     max_hops: int = 1,
     config: Optional[Dict] = None,
+    txn_index: Optional[Dict] = None,
+    baseline_stats: Optional[Dict] = None,
+    burst_counts: Optional[Dict] = None,
+    transit_ratios: Optional[Dict] = None,
 ) -> Dict:
     """Trace a journey scoped to the specific entities named in an alert.
 
@@ -767,11 +778,16 @@ def trace_for_alert(
     risk_map = {r["entity_id"]: r["risk_score"] for r in risk_scores}
     edge_ml_scores = edge_ml_scores or {}
 
-    # Pre-build entity→transactions index ONCE for flag annotation
-    txn_index = _build_txn_index(transactions)
-    baseline_stats = _build_baseline_stats(transactions)
-    burst_counts = _build_burst_counts(transactions)
-    transit_ratios = _build_transit_ratios(transactions)
+    # Reuse caller-supplied indices when present (backend builds these once at
+    # startup); otherwise build them now so direct/test calls still work.
+    if txn_index is None:
+        txn_index = _build_txn_index(transactions)
+    if baseline_stats is None:
+        baseline_stats = _build_baseline_stats(transactions)
+    if burst_counts is None:
+        burst_counts = _build_burst_counts(transactions)
+    if transit_ratios is None:
+        transit_ratios = _build_transit_ratios(transactions)
 
     # Collect edges among these nodes
     all_edges = [
