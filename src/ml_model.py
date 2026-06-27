@@ -71,7 +71,16 @@ _CTX_CACHE: Dict[str, Dict] = {}
 
 
 def _build_context(graph: nx.DiGraph) -> Dict:
-    """Pre-compute things we want once per graph, not once per edge."""
+    """Pre-compute things we want once per graph, not once per edge.
+
+    Memoised on the graph object: a single-edge SHAP explanation (or any
+    extract_features call) would otherwise recompute per-node strengths + SCC
+    over the whole graph — seconds on a 100k+ node graph, paid on every request.
+    A graph rebuild creates a fresh object, so the cache invalidates naturally.
+    """
+    cached = graph.graph.get("_ml_ctx_cache")
+    if cached is not None:
+        return cached
     in_strength: Dict[str, float] = {}
     out_strength: Dict[str, float] = {}
     for node in graph.nodes():
@@ -84,11 +93,13 @@ def _build_context(graph: nx.DiGraph) -> Dict:
         if len(comp) >= 3:
             scc_members.update(comp)
 
-    return {
+    ctx = {
         "in_strength": in_strength,
         "out_strength": out_strength,
         "scc_members": scc_members,
     }
+    graph.graph["_ml_ctx_cache"] = ctx
+    return ctx
 
 
 def _node_type_flags(graph: nx.DiGraph, node_id: str, prefix: str) -> Dict[str, int]:

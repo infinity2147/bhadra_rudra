@@ -237,6 +237,22 @@ def load_or_generate():
     except Exception as e:
         print(f"[backend] tracer cache build skipped: {e}")
 
+    # Warm the caches that otherwise make the FIRST request slow: the memoised
+    # SCC set (journey/replay), the ML feature context (SHAP in Simulation
+    # Studio), and the ensemble edge-score file. One-time cost at boot instead
+    # of a multi-second stall on the first user interaction.
+    try:
+        from fund_tracer import _scc3_members
+        _scc3_members(state["graph"])
+        from ml_model import _build_context as _warm_ml_ctx
+        _warm_ml_ctx(state["graph"])
+        _ensemble_edge_scores()
+        if state.get("ml_bundle"):
+            from shap_explainer import get_explainer
+            get_explainer(state["ml_bundle"]["model"], state["ml_bundle"].get("background"))
+    except Exception as e:
+        print(f"[backend] cache warm skipped: {e}")
+
     state["loaded"] = True
     aa_mode = "REAL" if state["aa_client"].is_real else "mock"
     kyc_mode = "REAL" if state["dilisense_client"].is_real else "mock"
@@ -315,6 +331,22 @@ def _alerts_with_case_status() -> List[Dict]:
         # FATF typology + Indian-regulatory refs + graded legal basis (additive).
         decorated = tag_alert(decorated)
         out.append(decorated)
+    return out
+
+
+def _tracer_caches() -> Dict:
+    """The per-entity structures the fund tracer needs, built ONCE at startup.
+
+    Passing these in turns the journey endpoints from ~14s (four full passes over
+    100k+ transactions per request) into a fast lookup. Falls back to on-demand
+    building inside the tracer for any cache that wasn't pre-built.
+    """
+    out = {}
+    for state_key, arg in (("_txn_index", "txn_index"), ("_baseline_stats", "baseline_stats"),
+                           ("_burst_counts", "burst_counts"), ("_transit_ratios", "transit_ratios")):
+        v = state.get(state_key)
+        if v is not None:
+            out[arg] = v
     return out
 
 
@@ -687,38 +719,55 @@ def get_incident(incident_id: str):
 
 @app.get("/api/patterns/{pattern_type}")
 def get_pattern(pattern_type: str):
+    """Transactions + alerts for one detector pattern.
+
+    Derived from the DETECTED ALERTS' entities — NOT from a per-pattern
+    `fraud_pattern` tag. That tag only exists in the synthetic generator; real
+    datasets (IBM AML) carry a single is_fraud label, so the old filter always
+    returned nothing and every tab showed "No transaction data". Pulling the
+    flows among each pattern's flagged entities works on any dataset.
+    """
     df = state["transactions"]
-    fraud_txns = df[df["is_fraud"]]
-    pattern_map = {
-        "circular": "circular_transaction",
-        "layering": "rapid_layering",
-        "smurfing": "smurfing",
-        "funnel": "shell_funnel",
-        "dormant": "dormant_activation",
-        "profile": "profile_mismatch",
+    # substring matched against the alert's pattern_type label
+    needle = {
+        "circular": "circular", "layering": "layering", "smurfing": "smurfing",
+        "funnel": "funnel", "dormant": "dormant", "profile": "profile",
+        "recruiter": "recruiter",
+    }.get(pattern_type, pattern_type).lower()
+
+    matched = [a for a in _alerts_with_case_status()
+               if needle in a.get("pattern_type", "").lower()]
+    entities = set()
+    for a in matched:
+        entities.update(a.get("entities", []))
+
+    if entities and {"sender_id", "receiver_id"}.issubset(df.columns):
+        txns = df[df["sender_id"].isin(entities) & df["receiver_id"].isin(entities)]
+        if txns.empty:
+            # single-entity patterns (dormant / profile): show the entity's own activity
+            txns = df[df["sender_id"].isin(entities) | df["receiver_id"].isin(entities)]
+    else:
+        txns = df.iloc[0:0]
+
+    cols = [c for c in ["transaction_id", "timestamp", "sender_name", "receiver_name",
+                        "amount", "transaction_type", "channel", "sender_type",
+                        "receiver_type", "sender_branch", "is_fraud"]
+            if c in txns.columns]
+    sorted_txns = txns.sort_values("timestamp") if "timestamp" in txns.columns else txns
+    if cols:
+        out = sorted_txns[cols].head(300).copy()
+        if "timestamp" in out.columns:
+            out["timestamp"] = out["timestamp"].astype(str)
+        txn_list = out.to_dict("records")
+    else:
+        txn_list = []
+    return {
+        "pattern": pattern_type,
+        "alerts": matched,
+        "transactions": txn_list,
+        "total_volume": round(float(txns["amount"].sum()), 2) if len(txns) and "amount" in txns.columns else 0,
+        "total_transactions": int(len(txns)),
     }
-    pattern_fraud = pattern_map.get(pattern_type)
-    if pattern_fraud and pattern_fraud in [
-        "circular_transaction", "rapid_layering", "smurfing", "shell_funnel", "dormant_activation"
-    ]:
-        txns = fraud_txns[fraud_txns["fraud_pattern"] == pattern_fraud]
-        alerts = [a for a in state["alerts"]
-                  if pattern_fraud.replace("_", " ").title() in a.get("pattern_type", "")
-                  or pattern_fraud in a.get("pattern_type", "").lower()]
-        cols = [c for c in ["timestamp", "sender_name", "receiver_name", "amount", "transaction_type",
-                             "channel", "sender_type", "receiver_type", "sender_branch", "fraud_case_id"]
-                 if c in txns.columns]
-        txn_list = txns[cols].sort_values(["fraud_case_id", "timestamp"]).to_dict("records") if cols else []
-        return {
-            "pattern": pattern_type,
-            "alerts": alerts,
-            "transactions": txn_list,
-            "total_volume": round(float(txns["amount"].sum()), 2) if len(txns) > 0 else 0,
-            "total_transactions": len(txns),
-        }
-    alert_type = "Dormant Activation" if pattern_type == "dormant" else "Profile Mismatch"
-    alerts = [a for a in state["alerts"] if a.get("pattern_type") == alert_type]
-    return {"pattern": pattern_type, "alerts": alerts, "transactions": [], "total_volume": 0, "total_transactions": 0}
 
 
 # ── Entities ───────────────────────────────────────────────────────────────
@@ -1100,15 +1149,35 @@ def _sample_flagged_edge():
     all populate. We pick the highest XGBoost-scored edge that exists in the graph.
     """
     graph = state["graph"]
-    es = state["edge_scores"] or {}
-    best, best_s = None, -1.0
-    for k, s in es.items():
-        if "->" not in k or s <= best_s:
-            continue
-        u, v = k.split("->", 1)
-        if graph.has_edge(u, v):
-            best, best_s = (u, v), float(s)
-    if not best:
+
+    def _max_scored_edge(scores):
+        b, bs = None, -1.0
+        for k, s in scores.items():
+            try:
+                sv = float(s)
+            except (TypeError, ValueError):
+                continue
+            if "->" not in k or sv <= bs:
+                continue
+            uu, vv = k.split("->", 1)
+            if graph.has_edge(uu, vv):
+                b, bs = (uu, vv), sv
+        return b
+
+    # 1. Highest XGBoost-scored edge in the graph.
+    best = _max_scored_edge(state.get("edge_scores") or {})
+    # 2. Fall back to ensemble scores if the XGB edge_scores failed to load.
+    if best is None:
+        ens = _ensemble_edge_scores() or {}
+        best = _max_scored_edge({k: v.get("ensemble", 0) for k, v in ens.items()
+                                 if isinstance(v, dict)})
+    # 3. Last resort: any edge that carries a flagged transaction.
+    if best is None:
+        for uu, vv, d in graph.edges(data=True):
+            if d.get("fraud_count", 0) > 0:
+                best = (uu, vv)
+                break
+    if best is None:
         return None
     u, v = best
     ed = graph[u][v]
@@ -1122,7 +1191,7 @@ def _sample_flagged_edge():
         "receiver_name": graph.nodes[v].get("name", v),
         "amount": round(float(ed.get("total_amount", 0.0)), 2),
         "channel": channel, "rail": rail,
-        "xgb_score": round(best_s, 4),
+        "xgb_score": round(float((state.get("edge_scores") or {}).get(f"{u}->{v}", 0.0)), 4),
     }
 
 
@@ -1144,11 +1213,21 @@ async def simulate_score(body: dict):
     severity, honest signals, ensemble votes, SHAP) — and push it to the live feed."""
     sender = str(body.get("sender") or "SIM_SENDER")
     receiver = str(body.get("receiver") or "SIM_RECEIVER")
-    amount = float(body.get("amount") or 0)
+    # Coerce hostile input gracefully — a non-numeric amount or bad timestamp
+    # must yield a clean 400, never a 500.
+    try:
+        amount = float(body.get("amount") or 0)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "amount must be a number")
+    if amount < 0:
+        raise HTTPException(400, "amount must be non-negative")
     channel = str(body.get("channel") or "NetBanking")
     rail = str(body.get("rail") or body.get("transaction_type") or "NEFT")
     currency = str(body.get("currency") or "INR")
-    ts = pd.Timestamp(body["timestamp"]) if body.get("timestamp") else pd.Timestamp.now()
+    try:
+        ts = pd.Timestamp(body["timestamp"]) if body.get("timestamp") else pd.Timestamp.now()
+    except (ValueError, TypeError):
+        raise HTTPException(400, "timestamp is not a valid date/time")
     return await _score_and_publish(sender, receiver, amount, channel, rail, currency, ts, publish=True)
 
 
@@ -1212,6 +1291,7 @@ def get_journey(
         state["graph"], state["transactions"], state["risk_scores"],
         entity_id=entity_id, direction=direction, max_hops=hops,
         min_amount=min_amount, edge_ml_scores=state["edge_scores"],
+        **_tracer_caches(),
     )
 
 
@@ -1224,6 +1304,7 @@ def get_journey_for_alert(alert_id: str, include_neighbors: bool = False):
         state["graph"], state["transactions"], state["risk_scores"],
         alert=alert, edge_ml_scores=state["edge_scores"],
         include_neighbors=include_neighbors,
+        **_tracer_caches(),
     )
 
 

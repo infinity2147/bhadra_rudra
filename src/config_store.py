@@ -13,6 +13,7 @@ so behaviour is unchanged on first run.
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 import threading
 from typing import Any, Dict, Optional
@@ -218,8 +219,44 @@ class ConfigStore:
                 pass
         return out
 
+    @staticmethod
+    def _coerce_value(key: str, value: Any) -> Any:
+        """Validate + coerce a single config value against its default's type.
+
+        Every threshold in DEFAULT_CONFIG is a non-negative number. A value of
+        the wrong type (a string, None, a bool) or a negative number is rejected
+        with ValueError rather than persisted — a poisoned threshold would
+        otherwise TypeError or silently corrupt the next detector run.
+
+        Whole-number floats are accepted for int keys (JSON sends 6 and 6.0
+        identically) and coerced down to int so callers see a stable type.
+        """
+        if key not in DEFAULT_CONFIG:
+            raise ValueError(f"Unknown config key: {key}")
+        default = DEFAULT_CONFIG[key]
+        # bool is a subtype of int in Python — reject it explicitly so True/False
+        # can't masquerade as 1/0 in a numeric threshold.
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"Config '{key}' must be a number, got {type(value).__name__}: {value!r}"
+            )
+        # Reject NaN / ±Infinity. Python's json.loads accepts these by default,
+        # so they can reach us over the wire. Infinity 500s on response
+        # serialize; NaN is worse — every `x <= NaN` is False, silently
+        # disabling a detector with no error at all.
+        if not math.isfinite(value):
+            raise ValueError(f"Config '{key}' must be a finite number, got {value}")
+        if value < 0:
+            raise ValueError(f"Config '{key}' must be non-negative, got {value}")
+        if isinstance(default, int) and not isinstance(default, bool):
+            if float(value) != int(value):
+                raise ValueError(f"Config '{key}' must be a whole number, got {value}")
+            return int(value)
+        return float(value)
+
     def set(self, key: str, value: Any) -> None:
         from datetime import datetime
+        value = self._coerce_value(key, value)
         with self._lock:
             c = self.conn.cursor()
             c.execute(
@@ -233,10 +270,10 @@ class ConfigStore:
             self.conn.commit()
 
     def set_many(self, values: Dict[str, Any]) -> Dict[str, Any]:
-        for k, v in values.items():
-            if k not in DEFAULT_CONFIG:
-                # Reject unknown keys — prevents arbitrary writes
-                raise ValueError(f"Unknown config key: {k}")
+        # Validate + coerce EVERY value before writing any, so a single bad
+        # value can't leave the batch half-applied (atomic update).
+        coerced = {k: self._coerce_value(k, v) for k, v in values.items()}
+        for k, v in coerced.items():
             self.set(k, v)
         return self.get_all()
 

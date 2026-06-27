@@ -35,6 +35,22 @@ def _import_shap():
         )
 
 
+# Constructing a TreeExplainer with a background dataset takes ~seconds; it's the
+# same explainer for every edge of a given model, so build it once and reuse.
+_EXPLAINER_CACHE: Dict[int, object] = {}
+
+
+def get_explainer(model, background=None):
+    """Return a cached SHAP TreeExplainer for `model` (built once per model)."""
+    key = id(model)
+    ex = _EXPLAINER_CACHE.get(key)
+    if ex is None:
+        shap = _import_shap()
+        ex = shap.TreeExplainer(model, data=background) if background is not None else shap.TreeExplainer(model)
+        _EXPLAINER_CACHE[key] = ex
+    return ex
+
+
 def explain_edge(
     model_bundle: Dict,
     graph: nx.DiGraph,
@@ -60,7 +76,6 @@ def explain_edge(
     if not graph.has_edge(sender, receiver):
         return None
 
-    shap = _import_shap()
     model = model_bundle["model"]
     feature_cols = model_bundle["feature_columns"]
     background = model_bundle.get("background")
@@ -71,8 +86,9 @@ def explain_edge(
         return None
     edge_vec = X.values[0]
 
-    # TreeExplainer is fast and exact for XGBoost/sklearn tree models
-    explainer = shap.TreeExplainer(model, data=background) if background is not None else shap.TreeExplainer(model)
+    # TreeExplainer is fast and exact for XGBoost/sklearn tree models.
+    # Cached + reused — construction with a background set is the slow part.
+    explainer = get_explainer(model, background)
     shap_vals = explainer.shap_values(edge_vec.reshape(1, -1))
 
     # shap_values can come back as ndarray or list — normalise to a 1D vector
