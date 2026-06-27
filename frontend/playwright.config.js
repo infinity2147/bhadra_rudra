@@ -12,7 +12,11 @@ import { defineConfig } from '@playwright/test';
 // regex-on-body, which is what made the earlier throwaway probes flaky.
 export default defineConfig({
   testDir: './e2e',
-  fullyParallel: true,
+  // These specs drive ONE shared, stateful backend and some flows are slow
+  // (Cases note->verify ~18s). Running workers in parallel races on that single
+  // backend and flakes, so this suite is serial by design.
+  fullyParallel: false,
+  workers: 1,
   forbidOnly: !!process.env.CI,
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
