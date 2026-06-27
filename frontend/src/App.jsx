@@ -111,6 +111,7 @@ function RoleSwitcher() {
     <div className="px-3 py-2 border-t border-gray-200">
       <p className="text-[10px] font-semibold text-gray-400 uppercase tracking-wider mb-1">Role</p>
       <select
+        data-testid="role-switcher"
         value={role}
         onChange={(e) => change(e.target.value)}
         className="w-full text-xs px-2 py-1.5 border border-gray-300 rounded bg-white"
