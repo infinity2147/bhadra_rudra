@@ -64,6 +64,13 @@ FEATURE_COLUMNS = [
     "weekend_ratio",
     "in_scc_3plus",             # part of a strongly-connected component ≥ 3
 ]
+# NOTE: transit-ratio / velocity-burst node features were trialled here (v4) on
+# the theory that the ML was "blind" to the heuristics' temporal signals. They
+# were reverted: on IBM AML they gave NO ranking gain on XGBoost (AP 0.661→0.662,
+# a clean test since trees are scale-invariant) because the signals are too
+# sparse (~100–300 of 119k nodes fire). The real recall lever turned out to be
+# the operating point — see fbeta_optimal_threshold (F2). Don't re-add without
+# evidence of an AUPRC lift on a held-out set.
 
 # Per-graph cache so we can call extract_features many times without recomputing
 # the global node-level stats.
@@ -111,15 +118,40 @@ def _node_type_flags(graph: nx.DiGraph, node_id: str, prefix: str) -> Dict[str, 
     }
 
 
-def _edge_temporal_features(txns_for_edge: pd.DataFrame) -> Tuple[float, float]:
-    """Return (night_ratio, weekend_ratio) for the txns on this edge."""
-    if len(txns_for_edge) == 0:
-        return 0.0, 0.0
-    ts = pd.to_datetime(txns_for_edge["timestamp"])
-    hours = ts.dt.hour
-    night = ((hours < 6) | (hours >= 22)).mean()
-    weekend = (ts.dt.weekday >= 5).mean()
-    return float(night), float(weekend)
+def _edge_temporal_table(transactions: pd.DataFrame) -> Dict[Tuple[str, str], Tuple[float, float, float]]:
+    """Pre-aggregate per-edge temporal features in ONE vectorized pass.
+
+    Returns {(sender, receiver): (night_ratio, weekend_ratio, time_span_hours)}.
+
+    Why this exists: the previous code called ``pd.to_datetime`` once PER EDGE
+    (~88k times on IBM AML) on tiny sub-frames. With no explicit format each call
+    fails inference and falls back to per-element ``dateutil`` parsing — ~56s for
+    extract_features and a flood of warnings, and since extract_features also runs
+    on the live-scoring / SHAP path it inflated request latency. A consistent
+    timestamp column parses vectorized in ~10ms; night/weekend ratios and the
+    time span then collapse to a single groupby aggregation.
+    """
+    if "timestamp" not in transactions.columns or len(transactions) == 0:
+        return {}
+    ts = pd.to_datetime(transactions["timestamp"], errors="coerce")
+    tmp = pd.DataFrame({
+        "sender_id": transactions["sender_id"].to_numpy(),
+        "receiver_id": transactions["receiver_id"].to_numpy(),
+        "is_night": ((ts.dt.hour < 6) | (ts.dt.hour >= 22)).to_numpy(dtype=float),
+        "is_weekend": (ts.dt.weekday >= 5).to_numpy(dtype=float),
+        "ts": ts.to_numpy(),
+    })
+    agg = tmp.groupby(["sender_id", "receiver_id"]).agg(
+        night=("is_night", "mean"),
+        weekend=("is_weekend", "mean"),
+        first=("ts", "min"),
+        last=("ts", "max"),
+    )
+    span_h = (agg["last"] - agg["first"]).dt.total_seconds() / 3600.0
+    return {
+        key: (float(n), float(w), float(s) if pd.notna(s) else 0.0)
+        for key, n, w, s in zip(agg.index, agg["night"], agg["weekend"], span_h)
+    }
 
 
 def extract_features(
@@ -151,9 +183,9 @@ def extract_features(
     out_str = ctx["out_strength"]
     scc_members = ctx["scc_members"]
 
-    txn_by_edge = {
-        key: sub for key, sub in transactions.groupby(["sender_id", "receiver_id"])
-    }
+    # Per-edge temporal features (night/weekend ratio + time span), pre-computed
+    # once and looked up in the loop — see _edge_temporal_table for why.
+    edge_temporal = _edge_temporal_table(transactions)
 
     rows = []
     for u, v in edges:
@@ -167,12 +199,8 @@ def extract_features(
         std = float(ed.get("std_amount", 0) or 0)
         cnt = int(ed["transaction_count"])
 
-        try:
-            first = pd.to_datetime(ed["first_seen"])
-            last = pd.to_datetime(ed["last_seen"])
-            time_span_h = (last - first).total_seconds() / 3600.0
-        except Exception:
-            time_span_h = 0.0
+        # night/weekend ratio + time span — pre-computed once (see edge_temporal)
+        night_ratio, weekend_ratio, time_span_h = edge_temporal.get((u, v), (0.0, 0.0, 0.0))
 
         sender_branch = graph.nodes[u].get("branch", "")
         receiver_branch = graph.nodes[v].get("branch", "")
@@ -189,13 +217,6 @@ def extract_features(
         # Near-threshold scoring: 1.0 if avg amount is just below the reporting limit
         # USD → $9,500 (US CTR threshold $10,000) | INR → ₹1,95,000 (RBI ₹2L threshold)
         near_threshold = max(0.0, 1.0 - abs(avg - struct_threshold) / struct_threshold) if avg < struct_cap else 0.0
-
-        # Temporal features from raw txns
-        sub = txn_by_edge.get((u, v))
-        if sub is not None:
-            night_ratio, weekend_ratio = _edge_temporal_features(sub)
-        else:
-            night_ratio, weekend_ratio = 0.0, 0.0
 
         row = {
             "log_total_amount": np.log1p(total),
@@ -262,6 +283,37 @@ def _train_xgb(X_train, y_train, X_test, y_test):
         return model, "gradient_boosting_fallback"
 
 
+def fbeta_optimal_threshold(y_true, y_prob, beta: float = 2.0) -> Tuple[float, float]:
+    """Pick the decision threshold that maximises F-beta on the PR curve.
+
+    F1 (beta=1) weights precision and recall equally. For AML that is the wrong
+    trade-off: a missed launderer costs far more than an analyst reviewing a
+    false positive. beta=2 weights recall 2x precision, so the operating point
+    moves to catch more fraud at the cost of more (cheap) reviews — which is why
+    the prior F1-optimal threshold (~0.85) was leaving ~half the fraud uncaught.
+
+    Shared by all three trainers (XGBoost, ensemble, GNN) so they agree on what
+    counts as fraud. Returns (best_threshold, fbeta_at_best).
+    """
+    from sklearn.metrics import precision_recall_curve
+
+    precisions, recalls, thresholds = precision_recall_curve(y_true, y_prob)
+    if len(thresholds) == 0:
+        return 0.5, 0.0
+    p = precisions[:-1]
+    r = recalls[:-1]
+    b2 = beta * beta
+    denom = b2 * p + r
+    # Safe divide: only evaluate where denom > 0 (else F-beta is 0 by definition),
+    # avoiding a divide-by-zero RuntimeWarning when both precision and recall are 0.
+    fbeta = np.divide(
+        (1 + b2) * p * r, denom,
+        out=np.zeros_like(denom), where=denom > 0,
+    )
+    i = int(np.argmax(fbeta))
+    return float(thresholds[i]), float(fbeta[i])
+
+
 def train_and_save(
     graph: nx.DiGraph,
     transactions: pd.DataFrame,
@@ -278,7 +330,7 @@ def train_and_save(
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import (
         precision_score, recall_score, f1_score, roc_auc_score,
-        confusion_matrix, average_precision_score, precision_recall_curve,
+        confusion_matrix, average_precision_score,
     )
 
     out_dir = os.path.join(data_dir, "ml", variant)
@@ -304,16 +356,10 @@ def train_and_save(
 
     y_prob = model.predict_proba(X_test)[:, 1]
 
-    # Find F1-optimal threshold instead of default 0.5.
-    # Maximising F1 finds the best balance between precision and recall —
-    # it reduces false positives (alert fatigue) while keeping recall high.
-    # This is more demo-friendly than recall-only optimisation, which was
-    # producing ~6,000 false positives at threshold=0.22.
-    precisions_c, recalls_c, thresholds_c = precision_recall_curve(y_test, y_prob)
-    p = precisions_c[:-1]
-    r = recalls_c[:-1]
-    f1_scores = np.where((p + r) > 0, 2 * p * r / (p + r), 0.0)
-    best_threshold = float(thresholds_c[np.argmax(f1_scores)])
+    # Operating point: maximise F2 (recall-favouring), not F1. See
+    # fbeta_optimal_threshold — a missed launderer costs far more than an
+    # analyst review, so we trade some precision for recall on purpose.
+    best_threshold, fbeta2 = fbeta_optimal_threshold(y_test, y_prob, beta=2.0)
 
     y_pred = (y_prob >= best_threshold).astype(int)
     cm = confusion_matrix(y_test, y_pred)
@@ -329,6 +375,8 @@ def train_and_save(
         "n_fraud_train": int(y_train.sum()),
         "n_fraud_test": int(y_test.sum()),
         "threshold": round(best_threshold, 4),
+        "threshold_objective": "f2",
+        "fbeta2": round(fbeta2, 4),
         "precision": float(precision_score(y_test, y_pred, zero_division=0)),
         "recall": float(recall_score(y_test, y_pred, zero_division=0)),
         "f1": float(f1_score(y_test, y_pred, zero_division=0)),
@@ -357,7 +405,7 @@ def train_and_save(
         "model": model,
         "feature_columns": FEATURE_COLUMNS,
         "background": background,
-        "threshold": best_threshold,   # recall-optimal, not default 0.5
+        "threshold": best_threshold,   # F2-optimal (recall-favouring), not default 0.5
     }
     with open(os.path.join(out_dir, "model.pkl"), "wb") as f:
         pickle.dump(bundle, f)

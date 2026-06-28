@@ -195,7 +195,8 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
     else:
         try:
             from gnn_model import train_gnn
-            gnn_metrics = train_gnn(graph, data_dir, variant=dataset, epochs=200)
+            gnn_metrics = train_gnn(graph, data_dir, variant=dataset, epochs=200,
+                                    transactions=df)
             print(f"  SAGE F1={gnn_metrics['f1']:.3f}  AUC={gnn_metrics['auc']:.3f}")
         except ImportError as e:
             print(f"  SAGE skipped (PyTorch Geometric not installed): {e}")

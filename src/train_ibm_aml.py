@@ -86,7 +86,8 @@ def main(
     print("[ibm_aml] Training GraphSAGE...")
     t = time.perf_counter()
     try:
-        gnn_m = train_gnn(graph, data_dir, variant="ibm_aml", epochs=gnn_epochs)
+        gnn_m = train_gnn(graph, data_dir, variant="ibm_aml", epochs=gnn_epochs,
+                          transactions=df)
         early = "(early-stopped)" if gnn_m.get("early_stopped") else ""
         print(f"   SAGE F1={gnn_m['f1']:.3f}  AUC={gnn_m['auc']:.3f}  "
               f"loss={gnn_m['final_loss']:.4f}  "
