@@ -312,8 +312,10 @@ def _alerts_with_case_status() -> List[Dict]:
     for a in state["alerts"]:
         entities = a.get("entities", [])
         case = cases.get(a.get("alert_id"))
-        ml_score = None
-        if len(entities) >= 2 and graph is not None:
+        # ML-generated alerts already carry their ensemble score — keep it rather
+        # than overwriting with the XGB edge-score max below.
+        ml_score = a.get("ml_score")
+        if ml_score is None and len(entities) >= 2 and graph is not None:
             best = 0.0
             for u in entities:
                 for v in entities:

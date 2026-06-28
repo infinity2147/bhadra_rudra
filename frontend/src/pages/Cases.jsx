@@ -52,6 +52,22 @@ function MLScoreBar({ score }) {
   );
 }
 
+const TIER_META = {
+  1: { label: 'T1', title: 'Tier 1 — ML detection corroborated by a typology rule (highest confidence, ~74% precision)', cls: 'bg-emerald-100 text-emerald-800 ring-emerald-300' },
+  2: { label: 'T2', title: 'Tier 2 — ML detection, model-only (recall workhorse)', cls: 'bg-indigo-100 text-indigo-800 ring-indigo-300' },
+  3: { label: 'T3', title: 'Tier 3 — typology rule (no ML corroboration)', cls: 'bg-gray-100 text-gray-700 ring-gray-300' },
+};
+
+function TierBadge({ tier }) {
+  const m = TIER_META[tier];
+  if (!m) return null;
+  return (
+    <span title={m.title} className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ring-1 ${m.cls}`}>
+      {m.label}
+    </span>
+  );
+}
+
 const FLAG_TONES = {
   shell_company:           'bg-red-100 text-red-800 ring-red-200',
   part_of_cycle:           'bg-red-100 text-red-800 ring-red-200',
@@ -92,6 +108,7 @@ export default function Cases() {
   const [entityFlags, setEntityFlags] = useState({});      // {entity_id: [flags]}
   const [tracePreview, setTracePreview] = useState(null);  // {dominant_paths: [...]}
   const [mlBand, setMlBand] = useState('ALL');             // 'ALL' | 'HIGH' | 'MED' | 'LOW' | 'NONE'
+  const [tierFilter, setTierFilter] = useState('ALL');     // 'ALL' | '1' | '2' | '3'
   const [groupByIncident, setGroupByIncident] = useState(false);
 
   useEffect(() => {
@@ -181,6 +198,9 @@ export default function Cases() {
         return true;
       });
     }
+    if (tierFilter !== 'ALL') {
+      xs = xs.filter(a => String(a.tier) === tierFilter);
+    }
     if (search.trim()) {
       const q = search.toLowerCase();
       xs = xs.filter(a =>
@@ -190,11 +210,14 @@ export default function Cases() {
       );
     }
     return [...xs].sort((a, b) => {
+      // Tier first (1 = ML+rule agreement, highest precision), then severity, then flow.
+      const tierDiff = (a.tier ?? 99) - (b.tier ?? 99);
+      if (tierDiff !== 0) return tierDiff;
       const sevDiff = (SEVERITY_ORDER[a.severity] ?? 99) - (SEVERITY_ORDER[b.severity] ?? 99);
       if (sevDiff !== 0) return sevDiff;
       return (b.total_flow ?? 0) - (a.total_flow ?? 0);
     });
-  }, [alerts, activeStatus, mlBand, search]);
+  }, [alerts, activeStatus, mlBand, tierFilter, search]);
 
   // Group filtered alerts by incident_id for the grouped view.
   const groupedFiltered = useMemo(() => {
@@ -301,6 +324,7 @@ export default function Cases() {
           <div className="flex flex-col gap-1.5">
             <SeverityBadge severity={a.severity} />
             <StatusPill status={a.case_status} />
+            <TierBadge tier={a.tier} />
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-baseline gap-2 flex-wrap">
@@ -408,6 +432,33 @@ export default function Cases() {
             );
           })}
         </div>
+
+        {/* Confidence tier chips — ML detection vs rule corroboration */}
+        <div className="flex items-center gap-1.5 pb-3 text-xs">
+          <span className="text-gray-500 uppercase tracking-wide font-semibold mr-1">Tier:</span>
+          {[
+            { key: 'ALL', label: 'All' },
+            { key: '1', label: 'T1 · ML+rule', tone: 'bg-emerald-50 text-emerald-700 ring-emerald-200' },
+            { key: '2', label: 'T2 · ML only', tone: 'bg-indigo-50 text-indigo-700 ring-indigo-200' },
+            { key: '3', label: 'T3 · rule only', tone: 'bg-gray-50 text-gray-600 ring-gray-200' },
+          ].map(b => {
+            const active = tierFilter === b.key;
+            const count = b.key === 'ALL' ? null : alerts.filter(a => String(a.tier) === b.key).length;
+            return (
+              <button
+                key={b.key}
+                onClick={() => setTierFilter(b.key)}
+                className={`px-2.5 py-0.5 rounded-full ring-1 transition-colors ${
+                  active
+                    ? 'bg-indigo-600 text-white ring-indigo-600'
+                    : b.tone || 'bg-white text-gray-600 ring-gray-200 hover:bg-gray-50'
+                }`}
+              >
+                {b.label}{count != null ? ` (${count})` : ''}
+              </button>
+            );
+          })}
+        </div>
       </div>
 
       <div className="flex-1 flex min-h-0">
@@ -459,9 +510,10 @@ export default function Cases() {
                   <div>
                     <p className="text-xs font-mono text-gray-400">{selectedAlert.alert_id}</p>
                     <h2 className="text-lg font-bold text-gray-900 mt-0.5">{selectedAlert.pattern_type}</h2>
-                    <div className="flex items-center gap-2 mt-2">
+                    <div className="flex items-center gap-2 mt-2 flex-wrap">
                       <SeverityBadge severity={selectedAlert.severity} />
                       <StatusPill status={caseDetail?.status} />
+                      <TierBadge tier={selectedAlert.tier} />
                       {caseDetail?.incident_id && (
                         <button
                           onClick={() => navigate('/incidents')}
@@ -471,6 +523,14 @@ export default function Cases() {
                         </button>
                       )}
                     </div>
+                    {selectedAlert.tier && (
+                      <p className="text-[11px] text-gray-500 mt-1.5">
+                        {TIER_META[selectedAlert.tier]?.title}
+                        {selectedAlert.corroborated_by?.length
+                          ? ` — corroborated by: ${selectedAlert.corroborated_by.join(', ')}`
+                          : ''}
+                      </p>
+                    )}
                   </div>
                   <button
                     onClick={() => { setSelectedId(null); setParams({}); }}
