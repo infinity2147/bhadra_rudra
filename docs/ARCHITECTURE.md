@@ -45,8 +45,10 @@
 │              │                        funnel — config-driven thresholds)   │
 │              └─ advanced_detectors.py(dormant z-score, profile mismatch)   │
 │                                                                            │
-│  ML          ┌─ ml_model.py          (XGBoost edge classifier, 30 feats)   │
-│              ├─ gnn_model.py         (GraphSAGE on PyTorch Geometric)      │
+│  ML          ┌─ ml_model.py          (XGBoost edge classifier, F2 point)   │
+│              ├─ gnn_model.py         (GraphSAGE: edge-fusion + AUPRC sel.)  │
+│              ├─ ensemble_model.py    (XGB + SAGE + GAT, LR meta-learner)    │
+│              ├─ ml_alert_generator.py(ML alerts + rule/ML confidence tiers) │
 │              ├─ tabular_baseline.py  (IEEE-CIS Kaggle baseline)            │
 │              └─ shap_explainer.py    (per-alert SHAP attributions)         │
 │                                                                            │
@@ -100,15 +102,29 @@ Every detector reads its thresholds from `ConfigStore`; nothing is hardcoded exc
 
 - **XGBoost (30 features)** is the primary edge classifier. Features cover amount stats, endpoint structure, channel/rail mix, near-threshold proximity, night/weekend ratios, and SCC membership. Trained with `scale_pos_weight` for class imbalance; 80/20 stratified split.
   - The `neighbor_fraud_density` feature (1-hop neighbour fraud rate) was deliberately *removed* because it created circular reasoning on heavily-clustered synthetic fraud rings. Production banks cannot trust a model that flags B because A nearby was already flagged.
-- **GraphSAGE GNN** is the structural baseline. Two-layer SAGEConv on the same graph, edge classification head concatenates sender/receiver embeddings. Hidden dim 64, ~60 epochs. Trains in seconds on CPU.
+  - **Operating point: F2, not F1.** The decision threshold is chosen to maximise F2 (recall weighted 2× precision) via a shared `fbeta_optimal_threshold` helper, because a missed launderer costs far more than an analyst review. This is the single biggest recall lever (XGB recall 0.48 → 0.67).
+  - A transit-ratio / velocity-burst feature set was trialled and **reverted** — it gave no AUPRC gain on the held-out set (0.661 → 0.662; a clean test since trees are scale-invariant) because the signals are too sparse on real data. Documented so it isn't re-attempted blind.
+- **GraphSAGE GNN** is a full co-detector, not just a structural baseline. 3 SAGEConv layers (3-hop receptive field) + max aggregation (resists neighbour-dilution camouflage), seeded for reproducibility, with two changes that lifted its AUPRC from ~0.13 to **0.62**: (a) the edge head **fuses the per-edge transaction features** alongside the two endpoint embeddings — node embeddings alone were blind to amount/rail/temporal signal; (b) early-stopping / model selection on **validation AUPRC** rather than threshold-dependent F1.
+- **Stacked ensemble** = XGBoost + GraphSAGE + GAT base models with a logistic-regression meta-learner trained on out-of-fold predictions. AUPRC 0.661, recall 0.703; the meta-learner now genuinely weights all three bases.
 - **IEEE-CIS tabular XGBoost** is a separate baseline trained on the public Kaggle dataset the evaluators suggested. ~400 anonymised features, no graph structure. Surfaced under "ML → Baselines" tab. Honest because IEEE-CIS is credit-card fraud, not fund flow.
 - **SHAP TreeExplainer** computes per-edge attributions on the XGBoost model. Cached background sample stashed in the model pickle so the explainer is cheap to instantiate at request time.
+
+### 2.4a Detection architecture — ML detects, rules corroborate (tiered)
+
+The ML model is the **primary detector**, not a decoration. Every edge it scores above the F2 threshold becomes a first-class alert via `ml_alert_generator.py`; the rule engine is the **corroboration + explanation** lane. The two are combined as a **confidence tier, never an averaged score** (averaging a 67%-recall probability with a ~3%-precision rule-only signal helps nothing — measured):
+
+- **Tier 1** — ML and a typology rule agree on an entity. Highest precision (~74% at the entity level), priority queue, carries the rule's typology narrative for the STR.
+- **Tier 2** — ML only. The recall workhorse.
+- **Tier 3** — a clean high-precision typology (circular / layering / recruiter) with no ML corroboration, kept for its narrative.
+- **Suppressed** — noisy rule-only alerts (smurfing / profile-mismatch / shell-funnel firing without ML agreement), which alone are near-noise.
+
+Why this and not pure rules: on the IBM AML benchmark ~84% of laundering is structureless single transfers (degree ≤ 2, not in any cycle/chain), so graph-pattern rules have a hard recall ceiling (~17%). The ML edge classifier catches ~67%. Fusing the two lifts end-to-end fraud-entity recall from ~17% to ~67% while every alert stays explainable: SHAP attributions for ML alerts (served lazily by `/api/alerts/{id}/explain`), typology narratives for rule alerts.
 
 ### 2.5 Workflow + persistence
 
 - **SQLite** (`data/rudra.db`) holds cases, audit log, and config. Single file — no Postgres dependency.
 - **Hash-chain audit log**: each audit entry stores `prev_hash` (previous entry's hash) and `this_hash = SHA-256(prev_hash || canonical_entry_json)`. Verification walks the chain and recomputes — any insert/edit/delete is detectable. Test `test_hash_chain_detects_tampering` proves this.
-- **Incident clustering** (union-find on entity overlap) collapses related alerts into actionable incidents. On the IBM AML 100k benchmark this turns **562 raw alerts into 344 incidents**, and — the point that matters — merges the dangerous rings: the largest critical incident bundles **76 alerts spanning all five pattern types (circular, layering, smurfing, shell-funnel, profile) across 50 entities into a single case**.
+- **Incident clustering** (union-find on entity overlap, with high-degree hub entities excluded as bridges so independent rings don't snowball) collapses the tiered alert set into actionable incidents. On the IBM AML 100k benchmark the ML-led alert set (~9.3k alerts at the recall-favouring threshold) collapses to ~5.3k incidents; the value is that corroborated rings merge into one investigable case rather than scattering across the queue. Tier ordering then floats the highest-confidence (ML + rule) cases to the top.
 
 ### 2.6 RBAC
 
@@ -153,14 +169,14 @@ One zip download contains everything a compliance team needs to file a Suspiciou
 ## 3. Data flow
 
 ### Cold start
-1. Run `python src/run_pipeline.py --dataset ibm_aml` once. Pipeline: load the dataset (stratified 100k IBM AML sample, cached) → build graph → run all six detectors → cluster incidents → train XGBoost (+ GraphSAGE + stacked ensemble when PyTorch is installed) → persist artefacts under `data/<variant>/` and `data/ml/<variant>/`. (SAR PDFs are generated on-request by the backend, not in the pipeline.)
+1. Run `python src/run_pipeline.py --dataset ibm_aml` once — this single command does everything (no need to run `train_ibm_aml.py` separately). Pipeline: load the dataset (stratified 100k IBM AML sample, cached) → build graph → run all six rule detectors → train XGBoost (+ GraphSAGE + stacked ensemble when PyTorch is installed) → **generate ML alerts above the F2 threshold, fuse + tier them with the rule alerts (`ml_alert_generator.fuse_ml_alerts`), then cluster into incidents** → persist artefacts under `data/<variant>/` and `data/ml/<variant>/`. (SAR PDFs are generated on-request by the backend, not in the pipeline.)
 2. Backend boots bound to `RUDRA_DATASET` (default `ibm_aml`); if the variant's required artefacts are missing it raises with the exact regenerate command rather than starting on empty/fake state.
 3. Backend loads everything into memory; opens a case row in SQLite for every alert that doesn't have one yet.
 
 ### Investigator workflow (real session)
-1. Investigator opens `/incidents` → sees 6 clustered incidents (down from 290 alerts).
-2. Picks the CRITICAL incident, sees its 237 underlying alerts and 55 involved entities.
-3. Clicks "Trace primary alert" → `/journey?alert=ALERT_CIRC_0001` → fund-flow Sankey + transaction timeline + red flags + SHAP "why this score".
+1. Investigator opens `/cases` → the alert queue is sorted **tier-first** (Tier 1 = ML + rule agreement at the top), filterable by tier and ML-score band, or grouped into clustered incidents on `/incidents`.
+2. Picks a top Tier-1 case, sees the corroborating typology ("corroborated by: Circular Transaction, …") and the involved entities.
+3. Clicks "Trace primary alert" → `/journey?alert=…` → fund-flow Sankey + transaction timeline + red flags + SHAP "why this score" (computed on demand for ML alerts).
 4. Reviews the audit trail on the Cases page. Verifies the hash chain (Supervisor button) — gets back "chain intact, head hash 1c3ce68a…".
 5. Adds an investigation note, moves the case to INVESTIGATING (allowed for any role), then asks a Supervisor to file SAR.
 6. Supervisor clicks "File SAR" → status moves to SAR_FILED. Downloads FIU zip — gets STR.xml + SAR PDF + subgraph + chain CSV.
@@ -184,13 +200,15 @@ Two numbers matter, and they are different things:
 
 `GET /api/benchmark/latency` exposes this live, and the Dashboard contrasts it with the 24-hour T+1 batch cycle the RBI 2023 FRM framework rules out. This is the number that lets an investigator freeze funds before they leave the bank.
 
-**One-time batch pipeline** — building the world from cold. Scale depends on the dataset: the synthetic set is ~80 nodes / ~1,800 edges (end-to-end in ~1 s); the IBM AML 100k benchmark is **~119k nodes / 87,772 edges**, where the full rebuild + all six detectors + XGBoost training takes a few minutes. The streaming path then keeps the in-memory graph current with incremental `add_transaction` updates, so the batch cost is paid once at startup, not per transaction.
+**One-time batch pipeline** — building the world from cold. Scale depends on the dataset: the synthetic set is ~80 nodes / ~1,800 edges (end-to-end in ~1 s); the IBM AML 100k benchmark is **~119k nodes / 87,772 edges**, where the full rebuild + all six detectors + XGBoost training takes a few minutes, and training the GraphSAGE + GAT + ensemble adds a few more (CPU). The streaming path then keeps the in-memory graph current with incremental `add_transaction` updates, so the batch cost is paid once at startup, not per transaction.
 
 ---
 
 ## 5. Honest limitations
 
-- The honest production number is **F1 = 0.617, AUC = 0.927** (precision 0.851, recall 0.484) on the IBM AML 100k benchmark with single-CPU XGBoost. The synthetic F1 of ~0.99 is artificially high because the embedded patterns are clean by construction — it is not the number we stand behind. The published SOTA on this benchmark (FraudGT + BDH) is ~0.72 and needs multi-GPU training over days; 0.617 is the strong-baseline number a public sector bank can actually deploy on its own hardware.
+- The honest ranking quality is **AUC = 0.927 / Average-Precision = 0.661** on the IBM AML 100k benchmark with single-CPU XGBoost (GraphSAGE AUPRC 0.623, ensemble 0.661). At the F1-optimal threshold the model scores **F1 ≈ 0.62** — the strong-baseline number for single-CPU training; the published SOTA (FraudGT + BDH) is ~0.72 and needs multi-GPU training over days. We deliberately operate at the **recall-favouring F2 point** (recall 0.67, precision 0.41) rather than F1-optimal, so the reported F1 is lower *by design* while recall — the metric that matters for catching laundering — is materially higher. The synthetic F1 of ~0.99 is artificially high because the embedded patterns are clean by construction and is not a number we stand behind.
+- **Rule heuristics alone have low recall (~17%) on real data** — most IBM AML laundering is structureless single transfers with no ring/chain structure for a graph rule to match. This is expected, and is exactly why detection is ML-led with rules as the corroboration/explanation lane (§2.4a); the fused system reaches ~67% recall.
+- **ML auto-alert volume is high at β=2** — scoring every edge above the recall-favouring threshold yields ~9k alerts / ~5k incidents on the 100k sample. Tier sorting handles triage; the threshold is a single configurable knob to trade recall for fewer, higher-precision alerts.
 - IBM AML / PaySim / IEEE-CIS variants are *trainable* but not bundled (datasets are 100s of MB). Place the CSVs under `data/real/<dataset>/` and re-run the pipeline.
 - Streaming replays the loaded dataset onto the ingest bus (Kafka when a broker is reachable, in-process `asyncio.Queue` otherwise) — there is no live bank feed in the demo, but the transport, scoring, and ring buffer are the real production path. A production deployment swaps the replay source for the bank's live transaction bus + Pathway as outlined in the PoA.
 - Account Aggregator + DiliSense are mocks with realistic shapes. Production calls Sahamati-licensed AAs and the DiliSense API directly.
@@ -203,8 +221,9 @@ Two numbers matter, and they are different things:
 | Choice | Reason |
 |---|---|
 | **NetworkX** over Neo4j | Pure Python, no daemon, sub-millisecond queries on a 1,800-edge graph. Migrating to Neo4j is a search-and-replace job if scale demands it. |
-| **XGBoost** as primary | Industry-standard tabular fraud-detection model. Fast inference (<1 ms per edge), no GPU needed, exact SHAP explanations via TreeExplainer. |
-| **GraphSAGE** as secondary | Lightest credible GNN. Gives the model "see your neighbours" capability without the training cost of FraudGT. Honest baseline for our PoA's GNN claim. |
+| **XGBoost** as primary detector | Industry-standard tabular fraud-detection model. Fast inference (<1 ms per edge), no GPU needed, exact SHAP explanations via TreeExplainer. Generates first-class alerts at the F2 operating point. |
+| **GraphSAGE + GAT** co-detectors | "See your neighbours" relational signal XGBoost lacks, without FraudGT's training cost. Edge-feature fusion + AUPRC selection make them competitive (AUPRC ~0.62), not just a baseline; they feed the stacked ensemble. |
+| **Confidence tiers** over a blended score | Averaging a high-recall ML probability with a low-precision rule signal helps nothing (measured). Tiering by ML/rule agreement keeps each lane's strength: ML recall, rule precision + auditability. |
 | **SQLite** over Postgres | Single-file, zero-config, atomic per-statement. Right call for a hackathon POC. Schema is portable to Postgres in production. |
 | **SHA-256 hash chain** | Tamper-evidence is what regulators ask for. Implementing it client-side is one function and one column; outsourcing to a real blockchain would be overkill. |
 | **FastAPI** over Flask | Native async, automatic OpenAPI docs at `/docs`, dependency injection (used for RBAC). |
