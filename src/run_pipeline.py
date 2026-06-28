@@ -195,7 +195,8 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
     else:
         try:
             from gnn_model import train_gnn
-            gnn_metrics = train_gnn(graph, data_dir, variant=dataset, epochs=200)
+            gnn_metrics = train_gnn(graph, data_dir, variant=dataset, epochs=200,
+                                    transactions=df)
             print(f"  SAGE F1={gnn_metrics['f1']:.3f}  AUC={gnn_metrics['auc']:.3f}")
         except ImportError as e:
             print(f"  SAGE skipped (PyTorch Geometric not installed): {e}")
@@ -220,6 +221,30 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
                       f"P={ens['precision']:.3f}  R={ens['recall']:.3f}")
             except Exception as e:
                 print(f"  Ensemble failed: {e}")
+
+    # ── 6. Fuse ML detections with rule alerts (tiered) ──────────────────────
+    # ML is the detector (high recall on structureless laundering the rules
+    # miss); rules corroborate + explain. Runs AFTER ML training so ensemble
+    # edge scores exist, then re-saves alerts + re-clusters incidents.
+    print("\n[6/6] Fusing ML detections with rule alerts (tiered)...")
+    try:
+        from ml_alert_generator import fuse_ml_alerts
+        combined, summary = fuse_ml_alerts(data_dir, dataset, graph, all_alerts)
+        if summary.get("note"):
+            print(f"  {summary['note']} — alerts unchanged ({len(combined)}).")
+        else:
+            print(f"  ML alerts: {summary['ml_alerts_generated']} (thr {summary['ml_threshold']})  "
+                  f"| rule kept: {summary['rule_alerts_kept']}/{summary['rule_alerts_in']}")
+            print(f"  Tiers — T1(ML+rule)={summary['tier1']}  T2(ML-only)={summary['tier2']}  "
+                  f"T3(rule-only)={summary['tier3']}  total={summary['total']}")
+        with open(os.path.join(variant_dir, "fraud_alerts.json"), "w") as f:
+            json.dump(combined, f, indent=2, default=str)
+        incidents = cluster_alerts(combined, graph=graph)
+        with open(os.path.join(variant_dir, "incidents.json"), "w") as f:
+            json.dump(incidents, f, indent=2, default=str)
+        print(f"  Re-clustered: {len(combined)} alerts -> {len(incidents)} incidents")
+    except Exception as e:
+        print(f"  ML fusion failed (keeping rule-only alerts): {e}")
 
     # SAR PDFs are generated on-request by the backend (GET /api/sar/generate
     # and the FIU package endpoint), so the pipeline no longer pre-bakes them.

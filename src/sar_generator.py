@@ -298,12 +298,34 @@ class SARGenerator:
         confidence = alert.get("confidence", 0)
         flow = alert.get("total_flow", 0)
 
+        is_ml = alert.get("source") == "ml" or "ML" in pattern
+        method = (
+            "Stacked ML ensemble (XGBoost + GraphSAGE + GAT) edge classification"
+            if is_ml else
+            "Graph-based pattern analysis with multi-signal scoring"
+        )
+
+        tier = alert.get("tier")
+        tier_label = {1: "Tier 1 — ML detection corroborated by a typology rule",
+                      2: "Tier 2 — ML detection (model-only)",
+                      3: "Tier 3 — typology rule"}.get(tier)
+        corrob = alert.get("corroborated_by") or []
+
+        extra = ""
+        if tier_label:
+            extra += f"\nConfidence Tier: {tier_label}"
+        if corrob:
+            extra += f"\nCorroborating Signals: {', '.join(corrob)}"
+        if is_ml:
+            extra += ("\nModel Explainability: per-feature SHAP attribution is available "
+                      "for this edge (see the case explanation panel).")
+
         return (
             f"{desc}\n\n"
             f"Pattern Classification: {pattern}\n"
             f"Detection Confidence: {confidence}%\n"
             f"Total Flagged Flow: ₹{flow:,.0f}\n"
-            f"Detection Method: Graph-based pattern analysis with multi-signal scoring\n"
+            f"Detection Method: {method}{extra}\n"
             f"Detection Timestamp: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
         )
 

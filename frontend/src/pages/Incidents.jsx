@@ -211,6 +211,15 @@ export default function Incidents() {
                       >
                         <div className="flex items-center gap-2">
                           <SeverityBadge severity={a.severity} />
+                          {a.tier && (
+                            <span
+                              title={a.tier === 1 ? 'Tier 1 — ML + rule agree' : a.tier === 2 ? 'Tier 2 — ML only' : 'Tier 3 — rule only'}
+                              className={`px-1.5 py-0.5 rounded text-[10px] font-bold ring-1 ${
+                                a.tier === 1 ? 'bg-emerald-100 text-emerald-800 ring-emerald-300'
+                                : a.tier === 2 ? 'bg-indigo-100 text-indigo-800 ring-indigo-300'
+                                : 'bg-gray-100 text-gray-700 ring-gray-300'}`}
+                            >T{a.tier}</span>
+                          )}
                           <span className="text-xs font-mono text-gray-400">{a.alert_id}</span>
                           <span className="ml-auto text-xs text-gray-500">{formatINR(a.total_flow)}</span>
                         </div>

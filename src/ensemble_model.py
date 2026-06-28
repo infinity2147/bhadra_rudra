@@ -126,7 +126,7 @@ def _edge_index_and_labels(graph: nx.DiGraph, idx: Dict[str, int]):
 # Defined here (not gnn_model.py) so the GAT is owned by the ensemble. It
 # uses GATv2Conv (more stable than original GAT) with multi-head attention.
 
-def _build_gat_model(in_dim: int, hidden: int = 32, heads: int = 4):
+def _build_gat_model(in_dim: int, hidden: int = 32, heads: int = 4, edge_feat_dim: int = 0):
     torch, nn, F, _, GATv2Conv = _torch_imports()
 
     class GATEdgeClassifier(nn.Module):
@@ -135,30 +135,38 @@ def _build_gat_model(in_dim: int, hidden: int = 32, heads: int = 4):
             self.conv1 = GATv2Conv(in_dim, hidden, heads=heads, dropout=0.2)
             # heads outputs concatenated → hidden*heads → reduce in conv2
             self.conv2 = GATv2Conv(hidden * heads, hidden, heads=1, dropout=0.2)
+            # Fuse the edge's own transaction features into the head — see
+            # gnn_model._build_model for why (node embeddings alone left the GNN
+            # blind to amount/rail/temporal signal). edge_feat_dim=0 = original.
+            self.edge_feat_dim = edge_feat_dim
             self.edge_mlp = nn.Sequential(
-                nn.Linear(2 * hidden, hidden),
+                nn.Linear(2 * hidden + edge_feat_dim, hidden),
                 nn.ReLU(),
                 nn.Dropout(0.2),
                 nn.Linear(hidden, 1),
             )
 
-        def forward(self, x, edge_index, edge_pairs):
+        def forward(self, x, edge_index, edge_pairs, edge_feats=None):
             h = F.elu(self.conv1(x, edge_index))
             h = self.conv2(h, edge_index)
             src_emb = h[edge_pairs[0]]
             dst_emb = h[edge_pairs[1]]
-            pair = torch.cat([src_emb, dst_emb], dim=-1)
-            return self.edge_mlp(pair).squeeze(-1)
+            parts = [src_emb, dst_emb]
+            if self.edge_feat_dim and edge_feats is not None:
+                parts.append(edge_feats)
+            return self.edge_mlp(torch.cat(parts, dim=-1)).squeeze(-1)
 
     return GATEdgeClassifier()
 
 
-def _build_sage_model(in_dim: int, hidden: int = 64, num_layers: int = 3, aggr: str = "max"):
+def _build_sage_model(in_dim: int, hidden: int = 64, num_layers: int = 3, aggr: str = "max",
+                      edge_feat_dim: int = 0):
     """Same architecture as gnn_model._build_model for fair stacking.
 
     Kept in sync with gnn_model: 3 layers (wider receptive field for multi-hop
     layering chains) + max aggregation (resists the neighbour-dilution
-    "camouflage" evasion that mean aggregation is vulnerable to).
+    "camouflage" evasion that mean aggregation is vulnerable to) + edge-feature
+    fusion in the head (edge_feat_dim).
     """
     torch, nn, F, SAGEConv, _ = _torch_imports()
     num_layers = max(int(num_layers), 1)
@@ -171,14 +179,15 @@ def _build_sage_model(in_dim: int, hidden: int = 64, num_layers: int = 3, aggr: 
             for _ in range(num_layers):
                 self.convs.append(SAGEConv(prev, hidden, aggr=aggr))
                 prev = hidden
+            self.edge_feat_dim = edge_feat_dim
             self.edge_mlp = nn.Sequential(
-                nn.Linear(2 * hidden, hidden),
+                nn.Linear(2 * hidden + edge_feat_dim, hidden),
                 nn.ReLU(),
                 nn.Dropout(0.2),
                 nn.Linear(hidden, 1),
             )
 
-        def forward(self, x, edge_index, edge_pairs):
+        def forward(self, x, edge_index, edge_pairs, edge_feats=None):
             h = x
             for i, conv in enumerate(self.convs):
                 h = conv(h, edge_index)
@@ -187,8 +196,10 @@ def _build_sage_model(in_dim: int, hidden: int = 64, num_layers: int = 3, aggr: 
                     h = F.dropout(h, p=0.2, training=self.training)
             src_emb = h[edge_pairs[0]]
             dst_emb = h[edge_pairs[1]]
-            pair = torch.cat([src_emb, dst_emb], dim=-1)
-            return self.edge_mlp(pair).squeeze(-1)
+            parts = [src_emb, dst_emb]
+            if self.edge_feat_dim and edge_feats is not None:
+                parts.append(edge_feats)
+            return self.edge_mlp(torch.cat(parts, dim=-1)).squeeze(-1)
 
     return SAGEEdgeClassifier()
 
@@ -206,7 +217,7 @@ def _train_xgb_fold(X_train, y_train):
 
 
 def _train_gnn_fold(model_builder, X_np, edge_index_np, train_edge_idx, y_np, epochs,
-                    patience: int = 50, val_frac: float = 0.15):
+                    patience: int = 50, val_frac: float = 0.15, edge_feats_np=None):
     """Train a GNN base model on the given fold's edges. Returns (model, all_edge_probas).
 
     **T2.8 changes**:
@@ -214,16 +225,21 @@ def _train_gnn_fold(model_builder, X_np, edge_index_np, train_edge_idx, y_np, ep
         stopping (val_frac default 15%). The fold's TEST edges (those not in
         train_edge_idx) are still entirely held out — we never see them
         during training, so OOF predictions remain leakage-free.
-      - Trains up to `epochs` with early stopping (patience=50) on val F1.
-        Patience tuned for the small inner-val signal in K-fold CV: with
-        only ~10% of total edges in val (after the outer fold takes 33%),
-        F1 noise can cause premature stopping at patience=20. 50 epochs is
-        the right balance for our 88k-edge benchmark.
       - Uses AdamW + weight decay instead of vanilla Adam.
+
+    **Edge fusion + selection (current):**
+      - When ``edge_feats_np`` ([n_edges, F] raw) is supplied, each edge's
+        transaction features are standardised on THIS fold's train edges only
+        (leakage-free) and fused into the classification head — same lever that
+        lifts the standalone SAGE from ~0.13 to ~0.62 AUPRC.
+      - Early stopping is on validation Average Precision, not F1-at-0.5: the
+        threshold-dependent F1 signal is noisy on imbalanced data and was
+        selecting poor epochs.
     """
     torch, nn, F, _, _ = _torch_imports()
     from torch.optim import AdamW
     from sklearn.model_selection import train_test_split
+    from sklearn.metrics import average_precision_score
 
     X = torch.tensor(X_np, dtype=torch.float32)
     edge_index = torch.tensor(edge_index_np, dtype=torch.long)
@@ -246,30 +262,42 @@ def _train_gnn_fold(model_builder, X_np, edge_index_np, train_edge_idx, y_np, ep
         train_actual_idx = train_edge_idx
         val_idx = None
 
+    # Edge features — standardise on the fold's TRAIN edges only (no leakage).
+    edge_feats = None
+    edge_feat_dim = 0
+    if edge_feats_np is not None:
+        ef = np.nan_to_num(edge_feats_np.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+        mu = ef[train_actual_idx].mean(axis=0)
+        sd = ef[train_actual_idx].std(axis=0); sd[sd == 0] = 1.0
+        edge_feats = torch.tensor((ef - mu) / sd, dtype=torch.float32)
+        edge_feat_dim = edge_feats.shape[1]
+
     train_pairs = torch.stack(
         [edge_index[0, train_actual_idx], edge_index[1, train_actual_idx]], dim=0,
     )
+    train_ef = edge_feats[train_actual_idx] if edge_feats is not None else None
     y_train = y[train_actual_idx]
 
     pos = int(y_train.sum().item()); neg = int((1 - y_train).sum().item())
     pos_weight = torch.tensor([max(neg / max(pos, 1), 1.0)], dtype=torch.float32)
     loss_fn = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
-    model = model_builder(in_dim=X.shape[1])
+    model = model_builder(in_dim=X.shape[1], edge_feat_dim=edge_feat_dim)
     optimizer = AdamW(model.parameters(), lr=0.005, weight_decay=5e-4)
 
     if val_idx is not None:
         val_pairs = torch.stack([edge_index[0, val_idx], edge_index[1, val_idx]], dim=0)
+        val_ef = edge_feats[val_idx] if edge_feats is not None else None
         y_val_np = y_np[val_idx].astype(int)
 
-    best_val_f1 = -1.0
+    best_val_ap = -1.0
     best_state = None
     epochs_no_improve = 0
 
     for epoch in range(epochs):
         model.train()
         optimizer.zero_grad()
-        logits = model(X, edge_index, train_pairs)
+        logits = model(X, edge_index, train_pairs, train_ef)
         loss = loss_fn(logits, y_train)
         loss.backward()
         optimizer.step()
@@ -279,18 +307,12 @@ def _train_gnn_fold(model_builder, X_np, edge_index_np, train_edge_idx, y_np, ep
         # Quick val check every epoch — cheap for our graph size
         model.eval()
         with torch.no_grad():
-            val_logits = model(X, edge_index, val_pairs)
+            val_logits = model(X, edge_index, val_pairs, val_ef)
             val_prob = torch.sigmoid(val_logits).cpu().numpy()
-        # Lightweight F1 estimate at threshold 0.5 — full sweep is overkill per epoch
-        val_pred = (val_prob >= 0.5).astype(int)
-        if val_pred.sum() == 0 or y_val_np.sum() == 0:
-            val_f1 = 0.0
-        else:
-            from sklearn.metrics import f1_score
-            val_f1 = float(f1_score(y_val_np, val_pred, zero_division=0))
+        val_ap = float(average_precision_score(y_val_np, val_prob)) if y_val_np.sum() else 0.0
 
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
+        if val_ap > best_val_ap:
+            best_val_ap = val_ap
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
             epochs_no_improve = 0
         else:
@@ -304,7 +326,7 @@ def _train_gnn_fold(model_builder, X_np, edge_index_np, train_edge_idx, y_np, ep
     # Score every edge for the OOF aggregation later.
     model.eval()
     with torch.no_grad():
-        all_logits = model(X, edge_index, edge_index)
+        all_logits = model(X, edge_index, edge_index, edge_feats)
         all_prob = torch.sigmoid(all_logits).cpu().numpy()
     return model, all_prob
 
@@ -367,15 +389,19 @@ def train_ensemble(
         xgb_m = _train_xgb_fold(X_xgb[train_e], y_np[train_e])
         oof_xgb[test_e] = xgb_m.predict_proba(X_xgb[test_e])[:, 1]
 
-        # SAGE — full graph for message passing, only train_e edges supervise
+        # SAGE — full graph for message passing, only train_e edges supervise.
+        # X_xgb (the same tabular edge features the XGB base uses) is fused into
+        # the head; standardisation happens per-fold inside _train_gnn_fold.
         _, sage_all = _train_gnn_fold(
             _build_sage_model, X_node, edge_index_np, train_e, y_np, epochs=gnn_epochs,
+            edge_feats_np=X_xgb,
         )
         oof_sage[test_e] = sage_all[test_e]
 
         # GAT — same setup, different architecture
         _, gat_all = _train_gnn_fold(
             _build_gat_model, X_node, edge_index_np, train_e, y_np, epochs=gnn_epochs,
+            edge_feats_np=X_xgb,
         )
         oof_gat[test_e] = gat_all[test_e]
 
@@ -396,11 +422,10 @@ def train_ensemble(
     def _block(name, scores):
         y_hold = y_np[hold_mask]
         s_hold = scores[hold_mask]
-        # F1-optimal threshold from precision-recall curve
-        from sklearn.metrics import precision_recall_curve
-        p, r, thr = precision_recall_curve(y_hold, s_hold)
-        f1c = np.where((p[:-1] + r[:-1]) > 0, 2 * p[:-1] * r[:-1] / (p[:-1] + r[:-1]), 0.0)
-        best_thr = float(thr[np.argmax(f1c)]) if len(thr) else 0.5
+        # F2-optimal threshold (recall-favouring) — same objective as the XGB
+        # and GNN trainers, so all base models + the ensemble agree on fraud.
+        from ml_model import fbeta_optimal_threshold
+        best_thr, _ = fbeta_optimal_threshold(y_hold, s_hold, beta=2.0)
         y_pred = (s_hold >= best_thr).astype(int)
         return {
             "model": name,
@@ -446,9 +471,11 @@ def train_ensemble(
     final_xgb = _train_xgb_fold(X_xgb, y_np)
     final_sage_model, sage_full = _train_gnn_fold(
         _build_sage_model, X_node, edge_index_np, np.arange(n_edges), y_np, epochs=gnn_epochs,
+        edge_feats_np=X_xgb,
     )
     final_gat_model, gat_full = _train_gnn_fold(
         _build_gat_model, X_node, edge_index_np, np.arange(n_edges), y_np, epochs=gnn_epochs,
+        edge_feats_np=X_xgb,
     )
 
     xgb_full = final_xgb.predict_proba(X_xgb)[:, 1]
