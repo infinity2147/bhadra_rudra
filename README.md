@@ -53,6 +53,10 @@ This single command does everything — you do **not** need to run `train_ibm_am
 
 **How detection works now (ML-led, rule-corroborated):** the ML edge classifier is the primary detector — every edge it scores above the recall-favouring (F2) threshold becomes a first-class alert. The rule engine is the corroboration + explanation layer. Alerts are combined as a **confidence tier**, not an averaged score: **Tier 1** = ML and a typology rule agree (highest precision, priority queue), **Tier 2** = ML only (recall workhorse), **Tier 3** = a clean rule typology kept for its narrative. Noisy rule-only alerts are suppressed. On the IBM AML benchmark this lifts fraud-entity recall from ~17% (rules alone) to ~67% while keeping every alert explainable (SHAP for ML, typology for rules).
 
+The pipeline then applies a third, **temporal triage axis — recurrence escalation**: an entity re-flagged across multiple time windows escalates **L1 → L2 → L3** (a serial re-offender outranks a one-shot). This is additive only — no alert is suppressed, so recall and precision are unchanged — and it surfaces as a recurrence badge in the Cases view. Thresholds are config-driven (`recurrence_window_hours`, `recurrence_l2_windows`, `recurrence_l3_windows`).
+
+**Re-running after a code update:** if you pull changes that touch only detectors, alert fusion, or the UI (not the ML model code), you do **not** need to retrain the models — just re-run `python src/run_pipeline.py --dataset ibm_aml`. It quickly re-fits XGBoost, **skips** the already-trained GraphSAGE + ensemble, and regenerates the tiered + escalated alerts and incidents. Only pass `--force-retrain-ml` (or set `RUDRA_FORCE_RETRAIN=1`) when the model architecture or feature set changed.
+
 ### Step 4: Start the backend (terminal one)
 
 On Linux or macOS:
