@@ -68,6 +68,27 @@ function TierBadge({ tier }) {
   );
 }
 
+// Temporal recurrence escalation (orthogonal to tier/severity). L1 is the common
+// case (~88%) so we only badge the re-offenders (L2/L3) to keep the list legible.
+const ESC_META = {
+  2: { label: 'L2', cls: 'bg-amber-100 text-amber-800 ring-amber-300' },
+  3: { label: 'L3', cls: 'bg-red-100 text-red-800 ring-red-300' },
+};
+
+function EscalationBadge({ escalation }) {
+  const m = escalation && ESC_META[escalation.level];
+  if (!m) return null;
+  const n = escalation.hit_count;
+  return (
+    <span
+      title={`${escalation.label} — re-flagged across ${n} time windows${escalation.entity ? ` (driver: ${escalation.entity})` : ''}`}
+      className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold ring-1 ${m.cls}`}
+    >
+      ↻{m.label}·{n}
+    </span>
+  );
+}
+
 const FLAG_TONES = {
   shell_company:           'bg-red-100 text-red-800 ring-red-200',
   part_of_cycle:           'bg-red-100 text-red-800 ring-red-200',
@@ -210,9 +231,14 @@ export default function Cases() {
       );
     }
     return [...xs].sort((a, b) => {
-      // Tier first (1 = ML+rule agreement, highest precision), then severity, then flow.
+      // Tier first (1 = ML+rule agreement, highest precision), then temporal
+      // recurrence (a serial re-offender outranks a one-shot), then severity, then flow.
       const tierDiff = (a.tier ?? 99) - (b.tier ?? 99);
       if (tierDiff !== 0) return tierDiff;
+      const escDiff = (b.escalation?.level ?? 1) - (a.escalation?.level ?? 1);
+      if (escDiff !== 0) return escDiff;
+      const hitDiff = (b.escalation?.hit_count ?? 1) - (a.escalation?.hit_count ?? 1);
+      if (hitDiff !== 0) return hitDiff;  // within a level, the worst recurrer first
       const sevDiff = (SEVERITY_ORDER[a.severity] ?? 99) - (SEVERITY_ORDER[b.severity] ?? 99);
       if (sevDiff !== 0) return sevDiff;
       return (b.total_flow ?? 0) - (a.total_flow ?? 0);
@@ -325,6 +351,7 @@ export default function Cases() {
             <SeverityBadge severity={a.severity} />
             <StatusPill status={a.case_status} />
             <TierBadge tier={a.tier} />
+            <EscalationBadge escalation={a.escalation} />
           </div>
           <div className="flex-1 min-w-0">
             <div className="flex items-baseline gap-2 flex-wrap">
@@ -514,6 +541,7 @@ export default function Cases() {
                       <SeverityBadge severity={selectedAlert.severity} />
                       <StatusPill status={caseDetail?.status} />
                       <TierBadge tier={selectedAlert.tier} />
+                      <EscalationBadge escalation={selectedAlert.escalation} />
                       {caseDetail?.incident_id && (
                         <button
                           onClick={() => navigate('/incidents')}
@@ -529,6 +557,14 @@ export default function Cases() {
                         {selectedAlert.corroborated_by?.length
                           ? ` — corroborated by: ${selectedAlert.corroborated_by.join(', ')}`
                           : ''}
+                      </p>
+                    )}
+                    {selectedAlert.escalation?.level > 1 && (
+                      <p className="text-[11px] text-amber-700 mt-1">
+                        {selectedAlert.escalation.label} — {selectedAlert.escalation.entity || 'this entity'} re-flagged
+                        across {selectedAlert.escalation.hit_count} time windows
+                        {selectedAlert.escalation.windows?.length
+                          ? ` (#${selectedAlert.escalation.windows.join(', #')})` : ''}
                       </p>
                     )}
                   </div>

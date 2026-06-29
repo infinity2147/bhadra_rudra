@@ -73,6 +73,11 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # within the sender's sub-threshold activity (so background noise mixed in
     # doesn't hide them). Amounts within this relative spread count as one band.
     "smurfing_fanout_band_tolerance": 0.15,
+    # Fuzzy fire-gate margin (0 = hard threshold, unchanged). Admits fan-out
+    # transfers up to this fraction ABOVE the structuring threshold, at a
+    # confidence attenuated by how far above the limit they sit — a structurer
+    # who slightly overshoots the cap still structures.
+    "smurfing_fuzzy_margin": 0.0,
     # Recruiter / coordinator — one source funding a fleet of pass-through mules.
     # Names the orchestrator upstream of the mules (distinct from smurfing).
     "recruiter_min_fanout": 5,                 # min mule-like recipients to flag a coordinator
@@ -83,6 +88,10 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # Shell funnel
     "funnel_imbalance_threshold": 0.7,
     "funnel_min_in_degree": 3,
+    # Fuzzy fire-gate margin (0 = hard threshold, unchanged). Admits nodes whose
+    # flow imbalance falls up to this fraction BELOW the threshold, at a
+    # confidence attenuated by membership.
+    "funnel_fuzzy_margin": 0.0,
     # Pass-through detection — flags balanced flows that the imbalance rule
     # misses (in ≈ out, money doesn't sit, classic mule behaviour).
     "funnel_pass_through_min_ratio": 0.9,           # min(in,out)/max(in,out) above this is "balanced"
@@ -136,6 +145,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # high ML score alone surfaces in the ML / graph views, not as a
     # mislabelled "profile mismatch".
     "profile_min_rule_score": 0.4,
+    # Recurrence escalation (temporal triage axis — IRB). An entity re-flagged
+    # across N distinct windows escalates L1->L2->L3. Additive only: never
+    # suppresses an alert, so recall is unchanged.
+    "recurrence_window_hours": 24,        # window size for "distinct occurrences"
+    "recurrence_l2_windows": 2,           # >= this many distinct windows -> L2 "Investigate"
+    "recurrence_l3_windows": 3,           # >= this many distinct windows -> L3 "Recurring Pattern"
     # ML
     "ml_alert_threshold": 0.6,
     # Fund tracer annotation thresholds (kept in sync with detectors)

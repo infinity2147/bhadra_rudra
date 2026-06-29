@@ -16,6 +16,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 import json
 
+from fuzzy import ramp_upper, ramp_lower
+
 
 class FraudDetector:
     def __init__(self, graph: nx.DiGraph, transactions: Optional[pd.DataFrame] = None,
@@ -623,9 +625,14 @@ class FraudDetector:
         min_receivers = int(self._cfg("smurfing_fanout_min_receivers", 5))
         max_per_receiver = float(self._cfg("smurfing_fanout_max_txns_per_receiver", 1.5))
         band_tol = float(self._cfg("smurfing_fanout_band_tolerance", 0.15))
+        # Fuzzy amount gate: admit transfers up to `margin` above the structuring
+        # threshold (a structurer who slightly overshoots the limit still
+        # structures), attenuating confidence by how far above they sit. margin 0
+        # → the hard `amount < threshold` gate, byte-for-byte unchanged.
+        margin = float(self._cfg("smurfing_fuzzy_margin", 0.0))
 
         txns = self.transactions
-        below = txns[txns["amount"] < threshold]
+        below = txns[txns["amount"] < threshold * (1.0 + margin)]
         if below.empty:
             return fanout_alerts
 
@@ -678,11 +685,17 @@ class FraudDetector:
                 0.95,
                 0.45 + min(n_recv, 30) * 0.015 + proximity * 0.2 + max(0.0, band_tol - cluster_cv),
             )
+            # Weakest-link fuzzy attenuation: a cluster is only as "sub-threshold"
+            # as its highest member. All members below the limit → factor 1.0
+            # (unchanged); a near-above member drags the confidence down.
+            fuzzy_factor = float(min((ramp_upper(a, threshold, margin) for a in amounts), default=1.0))
+            confidence *= fuzzy_factor
 
             alert = {
                 "alert_id": f"ALERT_SMURF_{starting_seq + len(fanout_alerts) + 1:04d}",
                 "pattern_type": "Smurfing / Structuring",
                 "detection_mode": "fan_out",
+                "fuzzy": bool(fuzzy_factor < 1.0),
                 "severity": "HIGH" if total > 1_000_000 or n_recv >= min_receivers * 2 else "MEDIUM",
                 "confidence": round(confidence * 100, 1),
                 "entities": [sender] + list(receivers),
@@ -730,6 +743,10 @@ class FraudDetector:
         pt_min_ratio = self._cfg("funnel_pass_through_min_ratio", 0.9)
         pt_max_holding = self._cfg("funnel_max_holding_seconds", 3600)
         pt_min_flow = self._cfg("funnel_pass_through_min_flow", 500_000)
+        # Fuzzy imbalance gate: admit nodes whose flow imbalance falls just short
+        # of the hard threshold, attenuating confidence by membership. margin 0 →
+        # the hard `imbalance >= threshold` gate, unchanged.
+        fuzzy_margin = float(self._cfg("funnel_fuzzy_margin", 0.0))
         alerts = []
 
         for node in self.graph.nodes():
@@ -765,7 +782,8 @@ class FraudDetector:
             avg_holding_seconds = self._avg_holding_time(node)
 
             triggers = []
-            if imbalance >= flow_imbalance_threshold:
+            mu_imbalance = ramp_lower(imbalance, flow_imbalance_threshold, fuzzy_margin)
+            if mu_imbalance > 0.0:
                 triggers.append("flow_imbalance")
             if (pass_through_ratio >= pt_min_ratio
                     and avg_holding_seconds is not None
@@ -797,6 +815,11 @@ class FraudDetector:
             # flagged on the behaviour above.
             score += {"shell_company": 0.1, "business": 0.05}.get(node_type, 0.0)
             score = min(score, 0.95)
+            # Attenuate only when the node qualified *solely* via a near-miss
+            # imbalance; a pass-through co-trigger is a hard exact signal, so it
+            # keeps full confidence. margin 0 → mu is 1.0 on every fired node.
+            fuzzy_factor = mu_imbalance if triggers == ["flow_imbalance"] else 1.0
+            score *= fuzzy_factor
 
             node_name = self.graph.nodes[node].get("name", node)
             in_names = [self.graph.nodes[p].get("name", p) for p in in_partners]
@@ -823,6 +846,7 @@ class FraudDetector:
                 "alert_id": f"ALERT_FUNNEL_{len(alerts) + 1:04d}",
                 "pattern_type": "Shell Company Funnel",
                 "detection_mode": detection_mode,
+                "fuzzy": bool(fuzzy_factor < 1.0),
                 "severity": severity,
                 "confidence": round(score * 100, 1),
                 "entities": [node] + in_partners,
