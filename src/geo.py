@@ -102,10 +102,12 @@ def city_flows(transactions: pd.DataFrame) -> Dict:
         in_g = df[df["dst_city"] == city]
         outflow = float(out_g["amount"].sum())
         inflow = float(in_g["amount"].sum())
-        fraud_volume = float(
-            out_g.loc[out_g["is_fraud"] > 0, "amount"].sum()
-            + in_g.loc[in_g["is_fraud"] > 0, "amount"].sum()
-        )
+        # Attribute fraud to the RECEIVING city only (where the dirty money
+        # lands). Counting both inflow and outflow double-counts every
+        # inter-city transfer, so the per-city totals summed to ~2x the true
+        # fraud volume (top 2 cities alone exceeded the real total). Inflow-only
+        # makes Σ(city fraud_volume) == total fraud volume.
+        fraud_volume = float(in_g.loc[in_g["is_fraud"] > 0, "amount"].sum())
         total = inflow + outflow
         lat, lng = INDIA_CITIES.get(city, (None, None))
         cities.append({
@@ -116,7 +118,9 @@ def city_flows(transactions: pd.DataFrame) -> Dict:
             "outflow": round(outflow, 2),
             "txn_count": int(len(out_g) + len(in_g)),
             "fraud_volume": round(fraud_volume, 2),
-            "fraud_rate": round(fraud_volume / total, 4) if total > 0 else 0.0,
+            # Fraud share of money RECEIVED by the city (consistent with the
+            # inflow-attributed fraud_volume above).
+            "fraud_rate": round(fraud_volume / inflow, 4) if inflow > 0 else 0.0,
         })
 
     cities.sort(key=lambda c: c["fraud_volume"], reverse=True)

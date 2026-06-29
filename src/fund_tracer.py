@@ -294,17 +294,25 @@ def _bfs_in_direction(
     direction: str,
     max_hops: int,
     min_amount: float,
+    max_nodes: int = 400,
 ) -> Tuple[Dict[str, int], Set[Tuple[str, str]]]:
     """Walk the graph from `source` and return (node_depth, edges_visited).
 
     direction ∈ {"forward", "backward"}.
     Edges below `min_amount` are skipped — same convention as the rest of the app.
+    `max_nodes` caps the frontier: a high-degree hub at 3 hops over a 100k-node
+    graph would otherwise explode the walk (measured ~9s) plus the per-node
+    annotation that follows. A journey of a few hundred nodes is already past
+    what's readable, so we stop pulling in new nodes once the cap is hit. Every
+    emitted edge still connects two visited nodes (no dangling endpoints).
     """
     visited_depth = {source: 0}
     edges: Set[Tuple[str, str]] = set()
     frontier: Set[str] = {source}
 
     for depth in range(max_hops):
+        if len(visited_depth) >= max_nodes:
+            break
         # Use a set to dedupe within a single BFS round — multiple frontier
         # nodes can point to the same neighbour, and the old list version would
         # process that neighbour once per pointer.
@@ -320,12 +328,12 @@ def _bfs_in_direction(
                     continue
                 if graph[u][v]["total_amount"] < min_amount:
                     continue
-                if edge in edges:
-                    continue
-                edges.add(edge)
                 if nb not in visited_depth:
+                    if len(visited_depth) >= max_nodes:
+                        continue   # at cap: don't pull in new nodes (or their edges)
                     visited_depth[nb] = depth + 1
                     next_frontier.add(nb)
+                edges.add(edge)   # nb is now visited (or already was) → no dangling edge
         if not next_frontier:
             break
         frontier = next_frontier
@@ -619,8 +627,10 @@ def trace_journey(
     dominant_paths: List[Dict] = []
     flow_distribution: List[Dict] = []
     if direction in ("forward", "both"):
-        # Candidate sink nodes: downstream leaves (out-degree 0 within trace)
-        trace_sub = graph.subgraph(all_node_ids)
+        # Candidate sink nodes: downstream leaves (out-degree 0 within trace).
+        # Materialise (.copy()) so dijkstra/max-flow run on a real small graph,
+        # not a view over the 100k-node parent.
+        trace_sub = graph.subgraph(all_node_ids).copy()
         sinks = [n for n in all_node_ids if n != entity_id and trace_sub.out_degree(n) == 0]
         # Also include the farthest-depth downstream nodes if no pure sinks
         if not sinks and forward_depth:
@@ -637,7 +647,11 @@ def trace_journey(
                     amt = d.get("total_amount", 0)
                     target_risk = risk_map.get(v, 0.0)
                     return 1.0 / ((amt + 1.0) * (target_risk + 0.1))
-                path = nx.dijkstra_path(graph, entity_id, sink, weight=risk_weight)
+                # Run on the traced SUBGRAPH, not the full 100k-node graph:
+                # Dijkstra (Python weight callable) + max-flow over the whole
+                # bank per sink was the ~9s journey cost — and wrong, since a
+                # dominant path must stay within the journey being shown.
+                path = nx.dijkstra_path(trace_sub, entity_id, sink, weight=risk_weight)
                 path_amount = min(
                     graph[path[i]][path[i + 1]].get("total_amount", 0)
                     for i in range(len(path) - 1)
@@ -657,7 +671,7 @@ def trace_journey(
             # visible here but invisible in the single Dijkstra path above.
             try:
                 flow_value, flow_dict = nx.maximum_flow(
-                    graph, entity_id, sink, capacity="total_amount",
+                    trace_sub, entity_id, sink, capacity="total_amount",
                 )
                 edge_contribs = [
                     {"source": u, "target": v, "flow": round(float(f), 2)}

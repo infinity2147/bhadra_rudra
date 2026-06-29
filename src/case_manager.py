@@ -240,7 +240,7 @@ class CaseStore:
         c.execute("SELECT * FROM audit_log WHERE alert_id = ? ORDER BY id", (alert_id,))
         return [dict(r) for r in c.fetchall()]
 
-    def _row_to_case(self, row: sqlite3.Row) -> Dict:
+    def _row_to_case(self, row: sqlite3.Row, with_audit: bool = True) -> Dict:
         return {
             "alert_id": row["alert_id"],
             "pattern_type": row["pattern_type"],
@@ -252,7 +252,9 @@ class CaseStore:
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
             "incident_id": row["incident_id"],
-            "audit_log": self._audit_rows(row["alert_id"]),
+            # The audit trail is shown only on a single case (get); fetching it
+            # per row in list() was an N+1 (one query per case → seconds on 8k).
+            "audit_log": self._audit_rows(row["alert_id"]) if with_audit else [],
         }
 
     # ── Public API ──────────────────────────────────────────────
@@ -270,7 +272,7 @@ class CaseStore:
             c.execute("SELECT * FROM cases WHERE status = ? ORDER BY updated_at DESC", (status,))
         else:
             c.execute("SELECT * FROM cases ORDER BY updated_at DESC")
-        return [self._row_to_case(r) for r in c.fetchall()]
+        return [self._row_to_case(r, with_audit=False) for r in c.fetchall()]
 
     @_synchronized
     def status_counts(self, all_alerts: List[Dict]) -> Dict[str, int]:

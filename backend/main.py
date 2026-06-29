@@ -250,6 +250,14 @@ def load_or_generate():
         if state.get("ml_bundle"):
             from shap_explainer import get_explainer
             get_explainer(state["ml_bundle"]["model"], state["ml_bundle"].get("background"))
+        # Pre-warm the per-page views so the FIRST page load is instant — no
+        # manual command, happens automatically at boot. Each fills its cache
+        # once; requests then read the stored result (recompute only after an
+        # invalidating mutation: dispose / retrain / rerun).
+        _alerts_with_case_status()                                 # Cases
+        get_dashboard()                                            # Dashboard
+        geo_flows()                                                # Geo Map
+        analytics_channels(); analytics_branches(); analytics_products()  # Channel/Branch/Product
     except Exception as e:
         print(f"[backend] cache warm skipped: {e}")
 
@@ -302,8 +310,13 @@ async def shutdown_streaming():
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _alerts_with_case_status() -> List[Dict]:
-    """Decorate alerts with case status + ML score + incident id."""
+def _compute_alerts_with_case_status() -> List[Dict]:
+    """Decorate alerts with case status + ML score + incident id (UNCACHED).
+
+    Everything except the cache wrapper should call _alerts_with_case_status().
+    This is multi-second on ~8k alerts (a SQLite case lookup + tag_alert each),
+    which is why the result is memoised.
+    """
     cases = state["cases"]
     edge_scores = state["edge_scores"] or {}
     graph = state["graph"]
@@ -326,6 +339,15 @@ def _alerts_with_case_status() -> List[Dict]:
             if best > 0:
                 ml_score = round(best, 3)
         decorated = dict(a)
+        # Funnel alerts persisted before total_flow was canonical carry only
+        # total_inflow/total_outflow — derive total_flow so UI sums don't read 0.
+        if decorated.get("total_flow") is None and (
+            "total_inflow" in decorated or "total_outflow" in decorated
+        ):
+            decorated["total_flow"] = round(max(
+                decorated.get("total_inflow", 0) or 0,
+                decorated.get("total_outflow", 0) or 0,
+            ), 2)
         decorated["case_status"] = case.get("status") if case else "OPEN"
         decorated["assigned_to"] = case.get("assigned_to") if case else None
         decorated["ml_score"] = ml_score
@@ -334,6 +356,30 @@ def _alerts_with_case_status() -> List[Dict]:
         decorated = tag_alert(decorated)
         out.append(decorated)
     return out
+
+
+def _alerts_with_case_status() -> List[Dict]:
+    """Cached decorated-alert list — recomputed lazily after a cache invalidation.
+
+    Read-only by contract: callers filter/select but must NOT mutate the returned
+    dicts (they are shared cache entries). All current callers comply.
+    """
+    if state.get("_alerts_cache") is None:
+        state["_alerts_cache"] = _compute_alerts_with_case_status()
+    return state["_alerts_cache"]
+
+
+def _invalidate_derived_caches() -> None:
+    """Drop memoised views derived from alerts / cases / incidents / metrics.
+
+    MUST be called after any mutation to those — a case dispose (changes
+    case_status / assigned_to) or an ML retrain (replaces alerts + incidents +
+    scores). Miss a call here and the UI shows stale case status. The next
+    request recomputes lazily.
+    """
+    state["_alerts_cache"] = None
+    state["_dashboard_cache"] = None
+    state["_view_cache"] = {}   # geo + analytics group-bys (transaction-derived)
 
 
 def _tracer_caches() -> Dict:
@@ -414,6 +460,15 @@ def me(role: str = Depends(get_role)):
 
 @app.get("/api/dashboard")
 def get_dashboard():
+    # Cached: the Pandas group-bys over ~100k rows are multi-second. case_status_counts
+    # is the only live field, so this is invalidated on dispose + retrain via
+    # _invalidate_derived_caches().
+    if state.get("_dashboard_cache") is None:
+        state["_dashboard_cache"] = _compute_dashboard()
+    return state["_dashboard_cache"]
+
+
+def _compute_dashboard():
     df = state["transactions"]
     alerts = state["alerts"]
     summary = state["summary"]
@@ -1018,8 +1073,11 @@ def health():
 @app.get("/api/geo/flows")
 def geo_flows():
     """Aggregate the (real) branch network into inter-city flows + per-city
-    fraud hotspots for the India map view."""
-    return city_flows(state["transactions"])
+    fraud hotspots for the India map view. Cached (group-bys over 100k rows)."""
+    vc = state.setdefault("_view_cache", {})
+    if "geo" not in vc:
+        vc["geo"] = city_flows(state["transactions"])
+    return vc["geo"]
 
 
 # ── Persistent taint memory ─────────────────────────────────────────────────
@@ -1275,6 +1333,8 @@ def retrain_ml(role: str = Depends(get_role)):
     state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant=ACTIVE_VARIANT)
     state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant=ACTIVE_VARIANT)
     state["ml_bundle"] = ml_load_model(DATA_DIR, variant=ACTIVE_VARIANT)
+    # New edge scores + metrics → invalidate memoised alert + dashboard views.
+    _invalidate_derived_caches()
     return {"status": "ok", "variant": ACTIVE_VARIANT, "metrics": m}
 
 
@@ -1370,6 +1430,8 @@ def dispose_case(alert_id: str, body: dict, role: str = Depends(get_role)):
         alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
         if alert and alert.get("entities"):
             state["taint"].seed(state["graph"], alert["entities"], source=f"{status}:{alert_id}")
+    # Case status / assignment changed → drop memoised alert + dashboard views.
+    _invalidate_derived_caches()
     return case
 
 
@@ -1504,6 +1566,8 @@ def rerun_detection(role: str = Depends(get_role)):
     state["alerts"] = all_alerts
     state["incidents"] = incidents
     state["risk_scores"] = risk_scores_data
+    # Alerts / incidents / scores all replaced → invalidate memoised views.
+    _invalidate_derived_caches()
     return {
         "status": "ok",
         "alert_count": len(all_alerts),
@@ -1516,6 +1580,9 @@ def rerun_detection(role: str = Depends(get_role)):
 
 @app.get("/api/analytics/channels")
 def analytics_channels():
+    vc = state.setdefault("_view_cache", {})
+    if "channels" in vc:
+        return vc["channels"]
     df = state["transactions"]
     if "channel" not in df.columns:
         return {"by_channel": [], "by_rail": [], "by_hour": []}
@@ -1547,11 +1614,15 @@ def analytics_channels():
     ).reset_index()
     by_hour.columns = ["hour", "count", "fraud_count"]
     by_hour = by_hour.to_dict("records")
-    return {"by_channel": by_channel, "by_rail": by_rail, "by_hour": by_hour}
+    vc["channels"] = {"by_channel": by_channel, "by_rail": by_rail, "by_hour": by_hour}
+    return vc["channels"]
 
 
 @app.get("/api/analytics/branches")
 def analytics_branches():
+    vc = state.setdefault("_view_cache", {})
+    if "branches" in vc:
+        return vc["branches"]
     df = state["transactions"]
     fraud_df = df[df["is_fraud"]]
     sender_view = df.groupby("sender_branch").agg(
@@ -1582,28 +1653,37 @@ def analytics_branches():
         * 100
     ).round(2)
     merged = merged.sort_values("total_volume", ascending=False)
-    return {"branches": merged.to_dict("records")}
+    vc["branches"] = {"branches": merged.to_dict("records")}
+    return vc["branches"]
 
 
 @app.get("/api/analytics/products")
 def analytics_products():
+    vc = state.setdefault("_view_cache", {})
+    if "products" in vc:
+        return vc["products"]
     df = state["transactions"]
     if "sender_product" not in df.columns:
         return {"by_product": []}
+    fmask = df["is_fraud"].astype(bool)
     sender_view = df.groupby("sender_product").agg(
         out_volume=("amount", "sum"),
         out_count=("amount", "count"),
         out_fraud=("is_fraud", "sum"),
+        out_fraud_volume=("amount", lambda x: x[fmask.loc[x.index]].sum()),
     ).rename_axis("product").reset_index()
     receiver_view = df.groupby("receiver_product").agg(
         in_volume=("amount", "sum"),
         in_count=("amount", "count"),
         in_fraud=("is_fraud", "sum"),
+        in_fraud_volume=("amount", lambda x: x[fmask.loc[x.index]].sum()),
     ).rename_axis("product").reset_index()
     merged = pd.merge(sender_view, receiver_view, on="product", how="outer").fillna(0)
     merged["total_volume"] = merged["in_volume"] + merged["out_volume"]
-    merged["total_fraud"] = merged["in_fraud"] + merged["out_fraud"]
-    return {"by_product": merged.sort_values("total_volume", ascending=False).to_dict("records")}
+    merged["total_fraud"] = merged["in_fraud"] + merged["out_fraud"]            # count of fraud txns
+    merged["total_fraud_volume"] = merged["in_fraud_volume"] + merged["out_fraud_volume"]  # ₹ volume
+    vc["products"] = {"by_product": merged.sort_values("total_volume", ascending=False).to_dict("records")}
+    return vc["products"]
 
 
 # ── Live Mode ──────────────────────────────────────────────────────────────
