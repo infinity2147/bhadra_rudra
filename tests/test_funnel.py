@@ -57,6 +57,22 @@ def test_individual_passthrough_mule_is_detected():
     assert "M" in flagged, f"individual pass-through mule not detected; flagged={flagged}"
 
 
+def test_funnel_alert_carries_total_flow():
+    """Funnel alerts must emit the canonical total_flow the UI/aggregations sum
+    (regression: they previously had only total_inflow/total_outflow, so the
+    Pattern Library showed ₹0 total volume for Shell Funnels)."""
+    g = nx.DiGraph()
+    t0 = datetime(2025, 3, 1, 10, 0, 0)
+    for src in ("A", "B", "C"):
+        _add_edge(g, src, "M", 2_000_000, t0)
+    _add_edge(g, "M", "Z", 6_000_000, t0 + timedelta(minutes=10))
+    _set_types(g, A="individual", B="individual", C="individual", M="individual", Z="individual")
+
+    alert = next(a for a in FraudDetector(g).detect_shell_funnels() if a["funnel_entity"] == "M")
+    assert "total_flow" in alert
+    assert alert["total_flow"] == max(alert["total_inflow"], alert["total_outflow"]) > 0
+
+
 def test_holding_time_is_amount_weighted_fifo():
     """A ₹10 decoy deposited 5 min before a ₹10M exit must not fake a 5-minute
     holding time — the ₹10M tranche sat for months and that must dominate."""

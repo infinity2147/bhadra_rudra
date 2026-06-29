@@ -64,6 +64,8 @@ Key non-trivial components:
 ### 2. Backend (`backend/main.py`)
 Single FastAPI ASGI app, ~50 endpoints. All state is loaded once at startup into a `state` dict (transactions DataFrame, alerts list, NetworkX graph, ML bundles, AA + DiliSense clients, Kafka stream ingestor, etc.). `src/` is inserted into `sys.path` so all engine modules are importable directly. Two startup hooks: a sync one for data + ML, an async one to bring up the Kafka consumer. A shutdown hook stops the consumer cleanly.
 
+**Startup pre-warm + derived-view caching (no manual step).** Expensive per-page views are memoised in `state` and **pre-computed once at startup** inside `load_or_generate()`, so the first page load on any machine is instant — nobody runs a "warm the cache" command. Cached: the decorated alert list (`_alerts_with_case_status`), the dashboard (`get_dashboard`), and the geo + channel/branch analytics group-bys (`state["_view_cache"]`), alongside the pre-existing SCC / ML-context / ensemble / SHAP warm. `_invalidate_derived_caches()` drops them on the only mutations that matter — case **dispose**, ML **retrain**, detection **rerun**; misses there = stale case status. The whole warm block is wrapped in try/except so a partial dataset can't break startup. This lives in committed code (not local state), so a fresh clone behaves identically.
+
 RBAC pattern: `Depends(get_role)` extracts `X-User-Role` header → `require(action, role)` raises HTTP 403 on violations. Three roles: `INVESTIGATOR`, `SUPERVISOR`, `ADMIN`.
 
 ### 3. Python engine (`src/`)

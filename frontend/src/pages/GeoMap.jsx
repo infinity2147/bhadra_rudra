@@ -50,7 +50,10 @@ function colorFor(rate) {
 }
 
 function inr(x) {
-  return Number(x || 0).toLocaleString('en-IN');
+  const n = Number(x || 0);
+  if (n >= 1e7) return `${(n / 1e7).toFixed(2)} Cr`;
+  if (n >= 1e5) return `${(n / 1e5).toFixed(2)} L`;
+  return n.toLocaleString('en-IN');
 }
 
 function pct(x) {
@@ -171,6 +174,10 @@ export default function GeoMap() {
         <h1 className="text-2xl font-bold text-gray-900">India Fund-Flow Map</h1>
         <p className="text-sm text-gray-500">
           Inter-city fund flows and fraud hotspots across the branch network
+        </p>
+        <p className="text-xs text-amber-700 mt-1">
+          Amounts and fraud are real. On anonymised datasets (IBM AML) the branch→city
+          mapping is illustrative (deterministic), not actual geography.
         </p>
       </div>
 
@@ -298,7 +305,7 @@ export default function GeoMap() {
                   </div>
                   <div>
                     <dt className="text-xs text-gray-500">Transactions</dt>
-                    <dd className="font-semibold text-gray-900">{inr(selected.txn_count)}</dd>
+                    <dd className="font-semibold text-gray-900">{Number(selected.txn_count || 0).toLocaleString('en-IN')}</dd>
                   </div>
                   <div>
                     <dt className="text-xs text-gray-500">Fraud volume</dt>

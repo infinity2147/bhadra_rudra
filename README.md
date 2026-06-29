@@ -74,6 +74,8 @@ $env:RUDRA_DATASET = "ibm_aml"
 uvicorn main:app --port 8000
 ```
 
+The backend **pre-warms its caches at startup automatically** — the per-page views (alert list, dashboard, geo + channel/branch analytics) and the ML/SCC/ensemble context are computed once during boot, so the first page load is instant. There is **no separate caching step to run**; this happens on every start, on any machine.
+
 ### Step 5: Start the frontend (terminal two)
 
 ```bash

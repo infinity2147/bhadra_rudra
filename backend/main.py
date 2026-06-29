@@ -54,7 +54,7 @@ from fiu_package import build_package as build_fiu_package
 from incident_clustering import cluster_alerts, alert_to_incident_map
 from config_store import ConfigStore, DEFAULT_CONFIG
 from rbac import get_role, require, role_capabilities, VALID_ROLES
-from live_scoring import score_live_txn, benchmark_pipeline
+from live_scoring import score_live_txn
 from integrations import AAClient, DilisenseClient
 from streaming import get_ingestor, StreamTxn
 from streaming.kafka_producer import replay_transactions
@@ -250,6 +250,14 @@ def load_or_generate():
         if state.get("ml_bundle"):
             from shap_explainer import get_explainer
             get_explainer(state["ml_bundle"]["model"], state["ml_bundle"].get("background"))
+        # Pre-warm the per-page views so the FIRST page load is instant — no
+        # manual command, happens automatically at boot. Each fills its cache
+        # once; requests then read the stored result (recompute only after an
+        # invalidating mutation: dispose / retrain / rerun).
+        _alerts_with_case_status()                                 # Cases
+        get_dashboard()                                            # Dashboard
+        geo_flows()                                                # Geo Map
+        analytics_channels(); analytics_branches()                 # Channel/Branch
     except Exception as e:
         print(f"[backend] cache warm skipped: {e}")
 
@@ -302,8 +310,13 @@ async def shutdown_streaming():
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _alerts_with_case_status() -> List[Dict]:
-    """Decorate alerts with case status + ML score + incident id."""
+def _compute_alerts_with_case_status() -> List[Dict]:
+    """Decorate alerts with case status + ML score + incident id (UNCACHED).
+
+    Everything except the cache wrapper should call _alerts_with_case_status().
+    This is multi-second on ~8k alerts (a SQLite case lookup + tag_alert each),
+    which is why the result is memoised.
+    """
     cases = state["cases"]
     edge_scores = state["edge_scores"] or {}
     graph = state["graph"]
@@ -326,6 +339,15 @@ def _alerts_with_case_status() -> List[Dict]:
             if best > 0:
                 ml_score = round(best, 3)
         decorated = dict(a)
+        # Funnel alerts persisted before total_flow was canonical carry only
+        # total_inflow/total_outflow — derive total_flow so UI sums don't read 0.
+        if decorated.get("total_flow") is None and (
+            "total_inflow" in decorated or "total_outflow" in decorated
+        ):
+            decorated["total_flow"] = round(max(
+                decorated.get("total_inflow", 0) or 0,
+                decorated.get("total_outflow", 0) or 0,
+            ), 2)
         decorated["case_status"] = case.get("status") if case else "OPEN"
         decorated["assigned_to"] = case.get("assigned_to") if case else None
         decorated["ml_score"] = ml_score
@@ -334,6 +356,30 @@ def _alerts_with_case_status() -> List[Dict]:
         decorated = tag_alert(decorated)
         out.append(decorated)
     return out
+
+
+def _alerts_with_case_status() -> List[Dict]:
+    """Cached decorated-alert list — recomputed lazily after a cache invalidation.
+
+    Read-only by contract: callers filter/select but must NOT mutate the returned
+    dicts (they are shared cache entries). All current callers comply.
+    """
+    if state.get("_alerts_cache") is None:
+        state["_alerts_cache"] = _compute_alerts_with_case_status()
+    return state["_alerts_cache"]
+
+
+def _invalidate_derived_caches() -> None:
+    """Drop memoised views derived from alerts / cases / incidents / metrics.
+
+    MUST be called after any mutation to those — a case dispose (changes
+    case_status / assigned_to) or an ML retrain (replaces alerts + incidents +
+    scores). Miss a call here and the UI shows stale case status. The next
+    request recomputes lazily.
+    """
+    state["_alerts_cache"] = None
+    state["_dashboard_cache"] = None
+    state["_view_cache"] = {}   # geo + analytics group-bys (transaction-derived)
 
 
 def _tracer_caches() -> Dict:
@@ -414,9 +460,17 @@ def me(role: str = Depends(get_role)):
 
 @app.get("/api/dashboard")
 def get_dashboard():
+    # Cached: the Pandas group-bys over ~100k rows are multi-second. case_status_counts
+    # is the only live field, so this is invalidated on dispose + retrain via
+    # _invalidate_derived_caches().
+    if state.get("_dashboard_cache") is None:
+        state["_dashboard_cache"] = _compute_dashboard()
+    return state["_dashboard_cache"]
+
+
+def _compute_dashboard():
     df = state["transactions"]
     alerts = state["alerts"]
-    summary = state["summary"]
 
     fraud_txns = df[df["is_fraud"]]
     total_volume = float(df["amount"].sum())
@@ -476,8 +530,11 @@ def get_dashboard():
             "fraud_transactions": len(fraud_txns),
             "fraud_volume": round(fraud_volume, 2),
             "fraud_rate": round(len(fraud_txns) / max(len(df), 1) * 100, 1),
-            "total_alerts": summary["total_alerts"],
-            "critical_alerts": summary.get("critical_alerts", 0),
+            # Count the actual tiered alert set (what Cases/Incidents show), not
+            # summary["total_alerts"] — that's the pre-fuse rule count (~701) and
+            # under-reports the real ML+rule total (~8.7k).
+            "total_alerts": len(alerts),
+            "critical_alerts": sum(1 for a in alerts if a.get("severity") == "CRITICAL"),
             "high_risk_entities": sum(1 for r in state["risk_scores"] if r["risk_score"] >= 0.5),
             "incidents": len(state["incidents"] or []),
             "model_f1": ml.get("f1"),
@@ -1018,8 +1075,11 @@ def health():
 @app.get("/api/geo/flows")
 def geo_flows():
     """Aggregate the (real) branch network into inter-city flows + per-city
-    fraud hotspots for the India map view."""
-    return city_flows(state["transactions"])
+    fraud hotspots for the India map view. Cached (group-bys over 100k rows)."""
+    vc = state.setdefault("_view_cache", {})
+    if "geo" not in vc:
+        vc["geo"] = city_flows(state["transactions"])
+    return vc["geo"]
 
 
 # ── Persistent taint memory ─────────────────────────────────────────────────
@@ -1275,6 +1335,8 @@ def retrain_ml(role: str = Depends(get_role)):
     state["ml_metrics"] = ml_load_metrics(DATA_DIR, variant=ACTIVE_VARIANT)
     state["edge_scores"] = ml_load_edge_scores(DATA_DIR, variant=ACTIVE_VARIANT)
     state["ml_bundle"] = ml_load_model(DATA_DIR, variant=ACTIVE_VARIANT)
+    # New edge scores + metrics → invalidate memoised alert + dashboard views.
+    _invalidate_derived_caches()
     return {"status": "ok", "variant": ACTIVE_VARIANT, "metrics": m}
 
 
@@ -1370,6 +1432,8 @@ def dispose_case(alert_id: str, body: dict, role: str = Depends(get_role)):
         alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
         if alert and alert.get("entities"):
             state["taint"].seed(state["graph"], alert["entities"], source=f"{status}:{alert_id}")
+    # Case status / assignment changed → drop memoised alert + dashboard views.
+    _invalidate_derived_caches()
     return case
 
 
@@ -1384,7 +1448,12 @@ def add_case_note(alert_id: str, body: dict, role: str = Depends(get_role)):
         if not alert:
             raise HTTPException(404, "Alert not found")
         state["cases"].open_case(alert)
-    return state["cases"].add_note(alert_id, note=note, author=body.get("author", role.lower()))
+    result = state["cases"].add_note(alert_id, note=note, author=body.get("author", role.lower()))
+    # Defensive: a note (or its open_case fallback) touches the case store. The
+    # cached alert/dashboard views don't depend on note text today, but drop them
+    # anyway so this can't silently go stale if note semantics change later.
+    _invalidate_derived_caches()
+    return result
 
 
 @app.get("/api/cases/{alert_id}/verify")
@@ -1504,6 +1573,8 @@ def rerun_detection(role: str = Depends(get_role)):
     state["alerts"] = all_alerts
     state["incidents"] = incidents
     state["risk_scores"] = risk_scores_data
+    # Alerts / incidents / scores all replaced → invalidate memoised views.
+    _invalidate_derived_caches()
     return {
         "status": "ok",
         "alert_count": len(all_alerts),
@@ -1516,6 +1587,9 @@ def rerun_detection(role: str = Depends(get_role)):
 
 @app.get("/api/analytics/channels")
 def analytics_channels():
+    vc = state.setdefault("_view_cache", {})
+    if "channels" in vc:
+        return vc["channels"]
     df = state["transactions"]
     if "channel" not in df.columns:
         return {"by_channel": [], "by_rail": [], "by_hour": []}
@@ -1547,11 +1621,15 @@ def analytics_channels():
     ).reset_index()
     by_hour.columns = ["hour", "count", "fraud_count"]
     by_hour = by_hour.to_dict("records")
-    return {"by_channel": by_channel, "by_rail": by_rail, "by_hour": by_hour}
+    vc["channels"] = {"by_channel": by_channel, "by_rail": by_rail, "by_hour": by_hour}
+    return vc["channels"]
 
 
 @app.get("/api/analytics/branches")
 def analytics_branches():
+    vc = state.setdefault("_view_cache", {})
+    if "branches" in vc:
+        return vc["branches"]
     df = state["transactions"]
     fraud_df = df[df["is_fraud"]]
     sender_view = df.groupby("sender_branch").agg(
@@ -1582,38 +1660,8 @@ def analytics_branches():
         * 100
     ).round(2)
     merged = merged.sort_values("total_volume", ascending=False)
-    return {"branches": merged.to_dict("records")}
-
-
-@app.get("/api/analytics/products")
-def analytics_products():
-    df = state["transactions"]
-    if "sender_product" not in df.columns:
-        return {"by_product": []}
-    sender_view = df.groupby("sender_product").agg(
-        out_volume=("amount", "sum"),
-        out_count=("amount", "count"),
-        out_fraud=("is_fraud", "sum"),
-    ).rename_axis("product").reset_index()
-    receiver_view = df.groupby("receiver_product").agg(
-        in_volume=("amount", "sum"),
-        in_count=("amount", "count"),
-        in_fraud=("is_fraud", "sum"),
-    ).rename_axis("product").reset_index()
-    merged = pd.merge(sender_view, receiver_view, on="product", how="outer").fillna(0)
-    merged["total_volume"] = merged["in_volume"] + merged["out_volume"]
-    merged["total_fraud"] = merged["in_fraud"] + merged["out_fraud"]
-    return {"by_product": merged.sort_values("total_volume", ascending=False).to_dict("records")}
-
-
-# ── Live Mode ──────────────────────────────────────────────────────────────
-
-@app.get("/api/benchmark/latency")
-def benchmark_latency():
-    """Time the full pipeline + per-txn ML scoring."""
-    if state["ml_bundle"] is None:
-        return {"error": "ML model not loaded."}
-    return benchmark_pipeline(state["graph"], state["transactions"], state["ml_bundle"])
+    vc["branches"] = {"branches": merged.to_dict("records")}
+    return vc["branches"]
 
 
 # ── Account Aggregator + KYC ───────────────────────────────────────────────

@@ -26,7 +26,6 @@ export default function Dashboard() {
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [bench, setBench] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -42,16 +41,6 @@ export default function Dashboard() {
     })();
     return () => { cancelled = true; };
   }, []);
-
-  async function runBenchmark() {
-    setBench({ loading: true });
-    try {
-      const b = await fetchAPI('/api/benchmark/latency');
-      setBench(b);
-    } catch (e) {
-      setBench({ error: e.message });
-    }
-  }
 
   const dailyData = useMemo(() => data?.daily_data || [], [data]);
 
@@ -149,30 +138,11 @@ export default function Dashboard() {
       </div>
 
       {/* Latency benchmark */}
-      <div className="bg-white rounded-xl border border-gray-200 p-4 flex items-start justify-between flex-wrap gap-3">
-        <div>
-          <h3 className="text-sm font-semibold text-gray-800">Detection latency vs T+1 batch</h3>
-          <p className="text-xs text-gray-500 mt-0.5">
-            The RBI's 2023 FRM framework mandates real-time detection. T+1 batch processing wastes 24 hours.
-          </p>
-          {bench?.vs_t_plus_1 && (
-            <div className="mt-2 flex items-baseline gap-3 flex-wrap">
-              <span className="text-2xl font-bold text-emerald-700">{bench.vs_t_plus_1.speedup_factor.toLocaleString('en-IN')}×</span>
-              <span className="text-sm text-gray-600">faster than T+1</span>
-              <span className="text-xs text-gray-500">
-                ({bench.pipeline_ms.total.toFixed(0)} ms for full pipeline,
-                 ~{bench.per_txn_ms.mean.toFixed(2)} ms per txn — p95 {bench.per_txn_ms.p95.toFixed(2)} ms)
-              </span>
-            </div>
-          )}
-        </div>
-        <button
-          onClick={runBenchmark}
-          disabled={bench?.loading}
-          className="px-3 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50"
-        >
-          {bench?.loading ? 'Benchmarking...' : bench?.vs_t_plus_1 ? 'Re-run benchmark' : 'Run benchmark'}
-        </button>
+      <div className="bg-white rounded-xl border border-gray-200 p-4">
+        <h3 className="text-sm font-semibold text-gray-800">Detection latency vs T+1 batch</h3>
+        <p className="text-xs text-gray-500 mt-0.5">
+          The RBI's 2023 FRM framework mandates real-time detection. T+1 batch processing wastes 24 hours.
+        </p>
       </div>
 
       {/* Charts */}

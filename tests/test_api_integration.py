@@ -129,7 +129,7 @@ def test_config_write_accepts_valid_then_resets(client):
 PARAM_FREE_GETS = [
     "/", "/api/health", "/api/me", "/api/dashboard", "/api/alerts", "/api/cases",
     "/api/incidents", "/api/entities", "/api/graph", "/api/integrations/status",
-    "/api/analytics/branches", "/api/analytics/channels", "/api/analytics/products",
+    "/api/analytics/branches", "/api/analytics/channels",
     "/api/ml/metrics", "/api/ml/variants", "/api/config/thresholds", "/api/geo/flows",
     "/api/taint", "/api/simulate/scenarios", "/api/stream/status", "/api/stream/recent",
 ]
@@ -211,11 +211,13 @@ def isolated_stores(tmp_path):
     orig_cases, orig_taint = main.state.get("cases"), main.state.get("taint")
     main.state["cases"] = CaseStore(str(tmp_path))
     main.state["taint"] = TaintStore(str(tmp_path / "rudra.db"))
+    main._invalidate_derived_caches()   # cached views must not reflect the old store
     try:
         yield
     finally:
         main.state["cases"] = orig_cases
         main.state["taint"] = orig_taint
+        main._invalidate_derived_caches()   # restore the real-store view for later tests
 
 
 def test_add_note_then_verify_chain(client, isolated_stores, real_ids):
@@ -276,7 +278,42 @@ def test_get_case_does_not_persist(client, isolated_stores, real_ids):
     assert r.status_code == 200 and r.json()["status"] == "OPEN", r.text  # transient view
     assert main.state["cases"].get(a) is None, "GET persisted a case (side-effect on read)"
     assert main.state["cases"].list() == []
+
+
+def test_alerts_cache_invalidated_on_dispose(client, isolated_stores, real_ids):
+    """The cached alert list must reflect a dispose immediately — no stale status."""
+    a = real_ids["alert"]
+    before = client.get("/api/alerts").json()["alerts"]
+    assert next(x["case_status"] for x in before if x["alert_id"] == a) == "OPEN"
+    r = client.post(f"/api/cases/{a}/dispose", headers={**INV, **JSON}, json={"status": "INVESTIGATING"})
+    assert r.status_code == 200, r.text
+    after = client.get("/api/alerts").json()["alerts"]
+    assert next(x["case_status"] for x in after if x["alert_id"] == a) == "INVESTIGATING", \
+        "cache served stale case status after dispose"
+
+
+def test_dashboard_cache_invalidated_on_dispose(client, isolated_stores, real_ids):
+    """The cached dashboard must reflect a dispose (case_status_counts is live)."""
+    a = real_ids["alert"]
+    d0 = client.get("/api/dashboard").json()["case_status_counts"]
+    r = client.post(f"/api/cases/{a}/dispose", headers={**INV, **JSON}, json={"status": "INVESTIGATING"})
+    assert r.status_code == 200, r.text
+    d1 = client.get("/api/dashboard").json()["case_status_counts"]
+    assert d1.get("INVESTIGATING", 0) == d0.get("INVESTIGATING", 0) + 1, \
+        f"dashboard served stale counts: {d0} -> {d1}"
     assert client.post("/api/taint/seed/NOPE_999", headers=INV).status_code == 404
+
+
+def test_dashboard_total_alerts_is_the_real_alert_count(client):
+    """Dashboard total_alerts must be the actual tiered alert set (what Cases /
+    Incidents show), not the pre-fuse rule count from the detection summary."""
+    import main
+    kpis = client.get("/api/dashboard").json()["kpis"]
+    assert kpis["total_alerts"] == len(main.state["alerts"])
+    assert kpis["total_alerts"] == client.get("/api/alerts").json()["total"]
+    assert kpis["critical_alerts"] == sum(
+        1 for a in main.state["alerts"] if a.get("severity") == "CRITICAL"
+    )
 
 
 # ── Stream lifecycle (in-process, reversible) ────────────────────────────────

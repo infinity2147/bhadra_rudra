@@ -853,6 +853,10 @@ class FraudDetector:
                 "entity_names": [node_name] + in_names,
                 "funnel_entity": node,
                 "funnel_name": node_name,
+                # Canonical volume field every other detector + the UI expects.
+                # A funnel's scale is its dominant flow (in for collection,
+                # out for distribution, in≈out for pass-through).
+                "total_flow": round(max(in_strength, out_strength), 2),
                 "total_inflow": round(in_strength, 2),
                 "total_outflow": round(out_strength, 2),
                 "n_sources": len(in_partners),

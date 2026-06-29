@@ -21,6 +21,9 @@ const STATUS_COLORS = {
 };
 
 const SEVERITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+// Max rows/groups painted at once. The list is priority-sorted and filters
+// operate on the full set, so capping the DOM keeps the page snappy on 8k+ alerts.
+const ROW_CAP = 200;
 
 function formatINR(n) {
   if (n == null) return '--';
@@ -497,7 +500,7 @@ export default function Cases() {
             <div className="p-12 text-center text-gray-400">No cases in this category.</div>
           ) : groupedFiltered ? (
             <div className="bg-white">
-              {groupedFiltered.map(([incidentId, items]) => (
+              {groupedFiltered.slice(0, ROW_CAP).map(([incidentId, items]) => (
                 <div key={incidentId} className="border-b-2 border-gray-300">
                   <div className="px-6 py-2 bg-indigo-50/40 border-b border-indigo-100 flex items-center justify-between">
                     <p className="text-xs font-semibold text-indigo-900 uppercase tracking-wide">
@@ -518,10 +521,24 @@ export default function Cases() {
                   </ul>
                 </div>
               ))}
+              {groupedFiltered.length > ROW_CAP && (
+                <div className="px-6 py-3 text-center text-xs text-gray-500">
+                  Showing top {ROW_CAP} of {groupedFiltered.length.toLocaleString()} incident groups — refine with search or filters.
+                </div>
+              )}
             </div>
           ) : (
             <ul className="divide-y divide-gray-200 bg-white">
-              {filtered.map(a => renderCaseRow(a))}
+              {/* Render only the top slice — painting 8k+ rows is what made this
+                  page janky (the backend is fast). List is priority-sorted, and
+                  search/filters narrow the full set, so the cap only bites when
+                  unfiltered. */}
+              {filtered.slice(0, ROW_CAP).map(a => renderCaseRow(a))}
+              {filtered.length > ROW_CAP && (
+                <li className="px-6 py-3 text-center text-xs text-gray-500">
+                  Showing top {ROW_CAP} of {filtered.length.toLocaleString()} — refine with search or filters to narrow.
+                </li>
+              )}
             </ul>
           )}
         </div>
