@@ -145,6 +145,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     # high ML score alone surfaces in the ML / graph views, not as a
     # mislabelled "profile mismatch".
     "profile_min_rule_score": 0.4,
+    # Recurrence escalation (temporal triage axis — IRB). An entity re-flagged
+    # across N distinct windows escalates L1->L2->L3. Additive only: never
+    # suppresses an alert, so recall is unchanged.
+    "recurrence_window_hours": 24,        # window size for "distinct occurrences"
+    "recurrence_l2_windows": 2,           # >= this many distinct windows -> L2 "Investigate"
+    "recurrence_l3_windows": 3,           # >= this many distinct windows -> L3 "Recurring Pattern"
     # ML
     "ml_alert_threshold": 0.6,
     # Fund tracer annotation thresholds (kept in sync with detectors)

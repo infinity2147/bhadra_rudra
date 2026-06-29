@@ -237,6 +237,25 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
                   f"| rule kept: {summary['rule_alerts_kept']}/{summary['rule_alerts_in']}")
             print(f"  Tiers — T1(ML+rule)={summary['tier1']}  T2(ML-only)={summary['tier2']}  "
                   f"T3(rule-only)={summary['tier3']}  total={summary['total']}")
+
+        # Recurrence escalation — temporal triage axis (additive; recall unchanged).
+        # Labels entities re-flagged across multiple windows L1->L2->L3.
+        try:
+            from recurrence import derive_alert_times, compute_recurrence, apply_escalation
+            from config_store import ConfigStore
+            from collections import Counter as _Counter
+            cfg = ConfigStore(os.path.join(variant_dir, "rudra.db"))
+            wh = cfg.get("recurrence_window_hours", 24)
+            l2 = cfg.get("recurrence_l2_windows", 2)
+            l3 = cfg.get("recurrence_l3_windows", 3)
+            times = derive_alert_times(combined, graph)
+            rec = compute_recurrence(combined, times, window_hours=wh, l2_windows=l2, l3_windows=l3)
+            apply_escalation(combined, rec)
+            lv = _Counter(a.get("escalation", {}).get("level", 1) for a in combined)
+            print(f"  Escalation — L1={lv.get(1, 0)}  L2={lv.get(2, 0)}  L3={lv.get(3, 0)}  (window={wh}h)")
+        except Exception as e:
+            print(f"  Recurrence escalation skipped: {e}")
+
         with open(os.path.join(variant_dir, "fraud_alerts.json"), "w") as f:
             json.dump(combined, f, indent=2, default=str)
         incidents = cluster_alerts(combined, graph=graph)
