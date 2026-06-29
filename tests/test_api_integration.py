@@ -129,7 +129,7 @@ def test_config_write_accepts_valid_then_resets(client):
 PARAM_FREE_GETS = [
     "/", "/api/health", "/api/me", "/api/dashboard", "/api/alerts", "/api/cases",
     "/api/incidents", "/api/entities", "/api/graph", "/api/integrations/status",
-    "/api/analytics/branches", "/api/analytics/channels", "/api/analytics/products",
+    "/api/analytics/branches", "/api/analytics/channels",
     "/api/ml/metrics", "/api/ml/variants", "/api/config/thresholds", "/api/geo/flows",
     "/api/taint", "/api/simulate/scenarios", "/api/stream/status", "/api/stream/recent",
 ]

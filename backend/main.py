@@ -54,7 +54,7 @@ from fiu_package import build_package as build_fiu_package
 from incident_clustering import cluster_alerts, alert_to_incident_map
 from config_store import ConfigStore, DEFAULT_CONFIG
 from rbac import get_role, require, role_capabilities, VALID_ROLES
-from live_scoring import score_live_txn, benchmark_pipeline
+from live_scoring import score_live_txn
 from integrations import AAClient, DilisenseClient
 from streaming import get_ingestor, StreamTxn
 from streaming.kafka_producer import replay_transactions
@@ -257,7 +257,7 @@ def load_or_generate():
         _alerts_with_case_status()                                 # Cases
         get_dashboard()                                            # Dashboard
         geo_flows()                                                # Geo Map
-        analytics_channels(); analytics_branches(); analytics_products()  # Channel/Branch/Product
+        analytics_channels(); analytics_branches()                 # Channel/Branch
     except Exception as e:
         print(f"[backend] cache warm skipped: {e}")
 
@@ -1662,45 +1662,6 @@ def analytics_branches():
     merged = merged.sort_values("total_volume", ascending=False)
     vc["branches"] = {"branches": merged.to_dict("records")}
     return vc["branches"]
-
-
-@app.get("/api/analytics/products")
-def analytics_products():
-    vc = state.setdefault("_view_cache", {})
-    if "products" in vc:
-        return vc["products"]
-    df = state["transactions"]
-    if "sender_product" not in df.columns:
-        return {"by_product": []}
-    fmask = df["is_fraud"].astype(bool)
-    sender_view = df.groupby("sender_product").agg(
-        out_volume=("amount", "sum"),
-        out_count=("amount", "count"),
-        out_fraud=("is_fraud", "sum"),
-        out_fraud_volume=("amount", lambda x: x[fmask.loc[x.index]].sum()),
-    ).rename_axis("product").reset_index()
-    receiver_view = df.groupby("receiver_product").agg(
-        in_volume=("amount", "sum"),
-        in_count=("amount", "count"),
-        in_fraud=("is_fraud", "sum"),
-        in_fraud_volume=("amount", lambda x: x[fmask.loc[x.index]].sum()),
-    ).rename_axis("product").reset_index()
-    merged = pd.merge(sender_view, receiver_view, on="product", how="outer").fillna(0)
-    merged["total_volume"] = merged["in_volume"] + merged["out_volume"]
-    merged["total_fraud"] = merged["in_fraud"] + merged["out_fraud"]            # count of fraud txns
-    merged["total_fraud_volume"] = merged["in_fraud_volume"] + merged["out_fraud_volume"]  # ₹ volume
-    vc["products"] = {"by_product": merged.sort_values("total_volume", ascending=False).to_dict("records")}
-    return vc["products"]
-
-
-# ── Live Mode ──────────────────────────────────────────────────────────────
-
-@app.get("/api/benchmark/latency")
-def benchmark_latency():
-    """Time the full pipeline + per-txn ML scoring."""
-    if state["ml_bundle"] is None:
-        return {"error": "ML model not loaded."}
-    return benchmark_pipeline(state["graph"], state["transactions"], state["ml_bundle"])
 
 
 # ── Account Aggregator + KYC ───────────────────────────────────────────────
