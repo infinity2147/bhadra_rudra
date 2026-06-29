@@ -8,7 +8,7 @@ export default function SeverityBadge({ severity }) {
 
   return (
     <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${cls}`}>
-      {severity}
+      {severity ?? '—'}
     </span>
   );
 }

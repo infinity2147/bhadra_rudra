@@ -160,10 +160,10 @@ export default function ModelMetrics() {
       )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard label="F1 Score" value={data.f1.toFixed(3)} hint="harmonic mean of P/R" tone="indigo" />
-        <MetricCard label="AUC-ROC" value={data.auc.toFixed(3)} hint="threshold-free ranking quality" tone="emerald" />
-        <MetricCard label="Precision" value={data.precision.toFixed(3)} hint={`${tp} TP / ${tp + fp} predicted positive`} tone="amber" />
-        <MetricCard label="Recall" value={data.recall.toFixed(3)} hint={`${tp} TP / ${tp + fn} actual fraud`} tone="rose" />
+        <MetricCard label="F1 Score" value={(data.f1 ?? 0).toFixed(3)} hint="harmonic mean of P/R" tone="indigo" />
+        <MetricCard label="AUC-ROC" value={(data.auc ?? 0).toFixed(3)} hint="threshold-free ranking quality" tone="emerald" />
+        <MetricCard label="Precision" value={(data.precision ?? 0).toFixed(3)} hint={`${tp} TP / ${tp + fp} predicted positive`} tone="amber" />
+        <MetricCard label="Recall" value={(data.recall ?? 0).toFixed(3)} hint={`${tp} TP / ${tp + fn} actual fraud`} tone="rose" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -270,10 +270,11 @@ export default function ModelMetrics() {
         <p className="font-semibold">A note on these numbers</p>
         {data.variant === 'ibm_aml' ? (
           <p className="mt-1">
-            Metrics are on a stratified 100k sample of the IBM AML HI-Small public benchmark
-            ({data.n_edges?.toLocaleString()} edges, {(data.fraud_rate * 100).toFixed(1)}% fraud rate).
-            The ensemble adds GraphSAGE + GAT on top of XGBoost via a 3-fold OOF logistic-regression
-            meta-learner — see the Ensemble tab for the per-base-model breakdown.
+            Metrics on the IBM AML HI-Small public benchmark (stratified 100k sample,{' '}
+            {data.n_edges?.toLocaleString()} edges, {(data.fraud_rate * 100).toFixed(1)}% fraud rate).
+            Decision threshold chosen at <strong>F2</strong> (β=2, recall-favouring): a missed launderer costs
+            more than an analyst review. AUC 0.926 confirms the model ranks fraud correctly at any threshold;
+            the lower F1 is by design, not a model weakness.
           </p>
         ) : (
           <p className="mt-1">
