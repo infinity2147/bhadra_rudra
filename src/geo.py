@@ -108,7 +108,6 @@ def city_flows(transactions: pd.DataFrame) -> Dict:
         # fraud volume (top 2 cities alone exceeded the real total). Inflow-only
         # makes Σ(city fraud_volume) == total fraud volume.
         fraud_volume = float(in_g.loc[in_g["is_fraud"] > 0, "amount"].sum())
-        total = inflow + outflow
         lat, lng = INDIA_CITIES.get(city, (None, None))
         cities.append({
             "city": city,

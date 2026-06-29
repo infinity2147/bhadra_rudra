@@ -45,3 +45,22 @@ def test_city_flows_aggregate_amounts_and_fraud():
     assert "Mumbai" in cities and "Delhi" in cities
     assert "lat" in cities["Mumbai"] and "lng" in cities["Mumbai"]
     assert cities["Delhi"]["inflow"] == 150.0       # both Mumbai->Delhi txns land here
+
+
+def test_fraud_volume_is_receiver_attributed_and_sums_to_total():
+    """Fraud is attributed to the RECEIVING city only, so Σ(city fraud_volume)
+    equals the dataset's total fraud volume — no double-counting across endpoints."""
+    df = pd.DataFrame([
+        {"sender_branch": "Mumbai Fort", "receiver_branch": "Delhi Connaught Place", "amount": 100.0, "is_fraud": 1},
+        {"sender_branch": "Pune FC Road", "receiver_branch": "Mumbai Fort", "amount": 40.0, "is_fraud": 1},
+        {"sender_branch": "Mumbai Fort", "receiver_branch": "Pune FC Road", "amount": 25.0, "is_fraud": 0},
+    ])
+    out = city_flows(df)
+    cities = {c["city"]: c for c in out["cities"]}
+    total_fraud = float(df.loc[df["is_fraud"] > 0, "amount"].sum())  # 140
+    assert round(sum(c["fraud_volume"] for c in out["cities"]), 2) == round(total_fraud, 2)
+    assert cities["Delhi"]["fraud_volume"] == 100.0   # fraud RECEIVED by Delhi
+    assert cities["Mumbai"]["fraud_volume"] == 40.0   # fraud RECEIVED by Mumbai
+    assert cities["Pune"]["fraud_volume"] == 0.0      # Pune only sent fraud, received none
+    for c in out["cities"]:                           # rate = fraud/inflow, always in [0,1]
+        assert 0.0 <= c["fraud_rate"] <= 1.0

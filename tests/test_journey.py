@@ -30,3 +30,19 @@ def test_trace_for_alert_scopes_to_alert_entities(synthetic_pipeline):
     # Every alert entity should be in the result
     for e in circ["entities"]:
         assert e in node_ids
+
+
+def test_bfs_caps_frontier_and_has_no_dangling_edges():
+    """A high-degree hub must not explode the journey BFS — the frontier is
+    capped at max_nodes, and every emitted edge connects two visited nodes
+    (the invariant that keeps the force-graph render valid)."""
+    import networkx as nx
+    from fund_tracer import _bfs_in_direction
+    g = nx.DiGraph()
+    for i in range(600):                       # one hub fanning out to 600 leaves
+        g.add_edge("HUB", f"L{i}", total_amount=1000.0)
+    depth, edges = _bfs_in_direction(g, "HUB", "forward", max_hops=3, min_amount=0, max_nodes=400)
+    assert len(depth) <= 400                   # cap holds (would be 601 uncapped)
+    visited = set(depth)
+    for u, v in edges:                         # no dangling edge endpoints
+        assert u in visited and v in visited

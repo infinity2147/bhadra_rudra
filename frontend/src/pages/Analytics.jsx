@@ -147,7 +147,7 @@ export default function Analytics() {
                     {b.fraud_rate}%
                   </span>
                 </td>
-                <td className="px-3 py-2 text-right tabular-nums">{b.total_fraud_count}</td>
+                <td className="px-3 py-2 text-right tabular-nums">{Math.round(b.total_fraud_count || 0).toLocaleString('en-IN')}</td>
               </tr>
             ))}
           </tbody>

@@ -305,7 +305,7 @@ export default function GeoMap() {
                   </div>
                   <div>
                     <dt className="text-xs text-gray-500">Transactions</dt>
-                    <dd className="font-semibold text-gray-900">{inr(selected.txn_count)}</dd>
+                    <dd className="font-semibold text-gray-900">{Number(selected.txn_count || 0).toLocaleString('en-IN')}</dd>
                   </div>
                   <div>
                     <dt className="text-xs text-gray-500">Fraud volume</dt>

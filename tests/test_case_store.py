@@ -35,6 +35,18 @@ def test_dispose_transitions_status_and_appends_audit(temp_data_dir):
     assert case["audit_log"][-1]["to_status"] == "INVESTIGATING"
 
 
+def test_list_omits_audit_log_but_get_includes_it(temp_data_dir):
+    """list() skips the per-case audit query (the N+1 fix that took the Case
+    Workbench from ~5.8s to ~0.13s); get() still returns the full audit trail."""
+    from case_manager import CaseStore
+    store = CaseStore(temp_data_dir)
+    store.open_case(_sample_alert("A-1"))     # open_case appends one audit entry
+    listed = store.list()
+    assert listed and listed[0]["alert_id"] == "A-1"
+    assert listed[0]["audit_log"] == []        # list() omits audit (no N+1)
+    assert len(store.get("A-1")["audit_log"]) == 1  # get() includes it
+
+
 def test_invalid_status_raises(temp_data_dir):
     from case_manager import CaseStore
     store = CaseStore(temp_data_dir)

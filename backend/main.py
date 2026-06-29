@@ -471,7 +471,6 @@ def get_dashboard():
 def _compute_dashboard():
     df = state["transactions"]
     alerts = state["alerts"]
-    summary = state["summary"]
 
     fraud_txns = df[df["is_fraud"]]
     total_volume = float(df["amount"].sum())
@@ -531,8 +530,11 @@ def _compute_dashboard():
             "fraud_transactions": len(fraud_txns),
             "fraud_volume": round(fraud_volume, 2),
             "fraud_rate": round(len(fraud_txns) / max(len(df), 1) * 100, 1),
-            "total_alerts": summary["total_alerts"],
-            "critical_alerts": summary.get("critical_alerts", 0),
+            # Count the actual tiered alert set (what Cases/Incidents show), not
+            # summary["total_alerts"] — that's the pre-fuse rule count (~701) and
+            # under-reports the real ML+rule total (~8.7k).
+            "total_alerts": len(alerts),
+            "critical_alerts": sum(1 for a in alerts if a.get("severity") == "CRITICAL"),
             "high_risk_entities": sum(1 for r in state["risk_scores"] if r["risk_score"] >= 0.5),
             "incidents": len(state["incidents"] or []),
             "model_f1": ml.get("f1"),
@@ -1446,7 +1448,12 @@ def add_case_note(alert_id: str, body: dict, role: str = Depends(get_role)):
         if not alert:
             raise HTTPException(404, "Alert not found")
         state["cases"].open_case(alert)
-    return state["cases"].add_note(alert_id, note=note, author=body.get("author", role.lower()))
+    result = state["cases"].add_note(alert_id, note=note, author=body.get("author", role.lower()))
+    # Defensive: a note (or its open_case fallback) touches the case store. The
+    # cached alert/dashboard views don't depend on note text today, but drop them
+    # anyway so this can't silently go stale if note semantics change later.
+    _invalidate_derived_caches()
+    return result
 
 
 @app.get("/api/cases/{alert_id}/verify")

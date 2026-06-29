@@ -304,6 +304,18 @@ def test_dashboard_cache_invalidated_on_dispose(client, isolated_stores, real_id
     assert client.post("/api/taint/seed/NOPE_999", headers=INV).status_code == 404
 
 
+def test_dashboard_total_alerts_is_the_real_alert_count(client):
+    """Dashboard total_alerts must be the actual tiered alert set (what Cases /
+    Incidents show), not the pre-fuse rule count from the detection summary."""
+    import main
+    kpis = client.get("/api/dashboard").json()["kpis"]
+    assert kpis["total_alerts"] == len(main.state["alerts"])
+    assert kpis["total_alerts"] == client.get("/api/alerts").json()["total"]
+    assert kpis["critical_alerts"] == sum(
+        1 for a in main.state["alerts"] if a.get("severity") == "CRITICAL"
+    )
+
+
 # ── Stream lifecycle (in-process, reversible) ────────────────────────────────
 
 def test_stream_lifecycle(client):
