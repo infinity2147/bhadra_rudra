@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { fetchAPI } from '../api';
+import { fetchAPI, postAPI } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
 import RegBadges from '../components/RegBadges';
 
@@ -42,7 +42,7 @@ export default function SarReports() {
     setLoading(true);
     setReport(null);
     try {
-      const data = await fetchAPI(`/api/sar/generate/${selectedAlert}`);
+      const data = await postAPI(`/api/sar/generate/${selectedAlert}`, {});
       setReport(data);
     } catch {
       setReport(null);

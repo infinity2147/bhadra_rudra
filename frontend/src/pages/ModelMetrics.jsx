@@ -160,10 +160,10 @@ export default function ModelMetrics() {
       )}
 
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <MetricCard label="F1 Score" value={data.f1.toFixed(3)} hint="harmonic mean of P/R" tone="indigo" />
-        <MetricCard label="AUC-ROC" value={data.auc.toFixed(3)} hint="threshold-free ranking quality" tone="emerald" />
-        <MetricCard label="Precision" value={data.precision.toFixed(3)} hint={`${tp} TP / ${tp + fp} predicted positive`} tone="amber" />
-        <MetricCard label="Recall" value={data.recall.toFixed(3)} hint={`${tp} TP / ${tp + fn} actual fraud`} tone="rose" />
+        <MetricCard label="F1 Score" value={data.f1?.toFixed(3) ?? '—'} hint="harmonic mean of P/R" tone="indigo" />
+        <MetricCard label="AUC-ROC" value={data.auc?.toFixed(3) ?? '—'} hint="threshold-free ranking quality" tone="emerald" />
+        <MetricCard label="Precision" value={data.precision?.toFixed(3) ?? '—'} hint={`${tp} TP / ${tp + fp} predicted positive`} tone="amber" />
+        <MetricCard label="Recall" value={data.recall?.toFixed(3) ?? '—'} hint={`${tp} TP / ${tp + fn} actual fraud`} tone="rose" />
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -237,7 +237,7 @@ export default function ModelMetrics() {
             </div>
             <div>
               <dt className="text-xs text-gray-500">Fraud rate</dt>
-              <dd className="font-bold tabular-nums">{(data.fraud_rate * 100).toFixed(1)}%</dd>
+              <dd className="font-bold tabular-nums">{((data.fraud_rate ?? 0) * 100).toFixed(1)}%</dd>
             </div>
             <div>
               <dt className="text-xs text-gray-500">Avg precision</dt>

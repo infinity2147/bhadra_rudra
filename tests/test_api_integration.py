@@ -181,7 +181,7 @@ def test_path_param_gets_no_server_error(client, real_ids):
     paths = []
     if a:
         paths += [f"/api/alerts/{a}", f"/api/alerts/{a}/explain", f"/api/cases/{a}",
-                  f"/api/journey/alert/{a}", f"/api/sar/generate/{a}", f"/api/fiu/package/{a}"]
+                  f"/api/journey/alert/{a}", f"/api/fiu/package/{a}"]  # /api/sar/generate is POST
     if inc:
         paths.append(f"/api/incidents/{inc}")
     if ent:
@@ -256,6 +256,26 @@ def test_dispose_rbac_and_validation(client, isolated_stores, real_ids):
 def test_taint_seed(client, isolated_stores, real_ids):
     r = client.post(f"/api/taint/seed/{real_ids['alert']}", headers=INV)
     assert r.status_code == 200 and r.json()["seeded"] >= 0, r.text
+
+
+def test_sar_generate_is_post_not_get(client, real_ids):
+    """SAR generation is an action — POST only; GET must be rejected (405)."""
+    a = real_ids["alert"]
+    assert client.get(f"/api/sar/generate/{a}").status_code == 405
+    r = client.post(f"/api/sar/generate/{a}")
+    assert r.status_code == 200, r.text
+    assert "report_text" in r.json()
+
+
+def test_get_case_does_not_persist(client, isolated_stores, real_ids):
+    """A GET on a case must be read-only — no junk case/audit rows on a refresh."""
+    import main
+    a = real_ids["alert"]
+    assert main.state["cases"].get(a) is None          # fresh isolated store
+    r = client.get(f"/api/cases/{a}")
+    assert r.status_code == 200 and r.json()["status"] == "OPEN", r.text  # transient view
+    assert main.state["cases"].get(a) is None, "GET persisted a case (side-effect on read)"
+    assert main.state["cases"].list() == []
     assert client.post("/api/taint/seed/NOPE_999", headers=INV).status_code == 404
 
 

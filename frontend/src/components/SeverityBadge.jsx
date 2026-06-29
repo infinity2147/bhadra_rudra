@@ -1,4 +1,5 @@
 export default function SeverityBadge({ severity }) {
+  if (!severity) return null;   // no severity → render nothing, not an empty pill
   const cls = {
     CRITICAL: 'bg-red-100 text-red-700',
     HIGH: 'bg-orange-100 text-orange-700',
