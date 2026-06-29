@@ -17,6 +17,7 @@ export default function Analytics() {
   const [branches, setBranches] = useState(null);
   const [products, setProducts] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
   useEffect(() => {
     Promise.all([
@@ -29,12 +30,24 @@ export default function Analytics() {
         setBranches(b);
         setProducts(p);
       })
-      .catch(() => {})
+      .catch((e) => setError(e?.message || 'Failed to load analytics'))
       .finally(() => setLoading(false));
   }, []);
 
   if (loading) {
     return <div className="p-12 text-center text-gray-400">Loading analytics...</div>;
+  }
+
+  if (error) {
+    return (
+      <div className="p-12 max-w-xl">
+        <h1 className="text-xl font-bold text-gray-900">Analytics unavailable</h1>
+        <p className="text-sm text-red-600 mt-2">Could not load analytics data: {error}</p>
+        <p className="text-sm text-gray-500 mt-1">
+          Check that the backend is running and the pipeline has been run for this dataset.
+        </p>
+      </div>
+    );
   }
 
   return (

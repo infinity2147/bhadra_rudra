@@ -36,6 +36,7 @@ def _build_live_features(
     rail: str,
     timestamp: pd.Timestamp,
     currency: str = "INR",
+    scc_members: Optional[set] = None,
 ) -> Dict[str, float]:
     """Compute the feature row for a single (sender, receiver, amount) txn.
 
@@ -112,15 +113,24 @@ def _build_live_features(
     night_ratio = 1.0 if (hour < 6 or hour >= 22) else 0.0
     weekend_ratio = 1.0 if timestamp.weekday() >= 5 else 0.0
 
-    # Cycle membership — approximate: are both endpoints already in any SCC ≥ 3?
-    in_scc = 0
-    try:
-        for comp in nx.strongly_connected_components(graph):
-            if len(comp) >= 3 and sender in comp and receiver in comp:
-                in_scc = 1
-                break
-    except Exception:
-        pass
+    # Cycle membership — must match the TRAINING definition exactly:
+    # in_scc_3plus = both endpoints in the *union* of all SCCs of size >= 3
+    # (see ml_model.py:_build_context — node-set membership, NOT same-component).
+    # Recomputing SCCs per call is O(V+E) and destroys live latency, so reuse a
+    # member set: caller-supplied when available, else computed once and cached
+    # on the graph object (shared across all live scores until the graph rebuilds).
+    if scc_members is None:
+        scc_members = graph.graph.get("_scc3_members")
+        if scc_members is None:
+            scc_members = set()
+            try:
+                for comp in nx.strongly_connected_components(graph):
+                    if len(comp) >= 3:
+                        scc_members.update(comp)
+            except Exception:
+                pass
+            graph.graph["_scc3_members"] = scc_members
+    in_scc = 1 if (sender in scc_members and receiver in scc_members) else 0
 
     return {
         "log_total_amount": float(np.log1p(new_total)),
@@ -166,12 +176,14 @@ def score_live_txn(
     rail: str,
     timestamp: Optional[pd.Timestamp] = None,
     currency: str = "INR",
+    scc_members: Optional[set] = None,
 ) -> Dict:
     """Score one txn through the trained ML model, with feature extraction + latency."""
     if timestamp is None:
         timestamp = pd.Timestamp.now()
     t0 = time.perf_counter()
-    features = _build_live_features(graph, sender, receiver, amount, channel, rail, timestamp, currency)
+    features = _build_live_features(graph, sender, receiver, amount, channel, rail, timestamp, currency,
+                                    scc_members=scc_members)
     t1 = time.perf_counter()
 
     cols = model_bundle["feature_columns"]

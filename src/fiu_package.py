@@ -166,7 +166,10 @@ def _build_evidence_summary(
             lines.append(f"- `{nid}` — {name}")
     lines += ["", "## 4. Transaction Volume", ""]
     if not entity_txns.empty:
-        fraud_txns = entity_txns[entity_txns["is_fraud"]]
+        # Unlabeled real datasets may lack an is_fraud column — degrade to "none
+        # known" rather than KeyError. astype(bool) tolerates int 0/1 labels.
+        fraud_txns = (entity_txns[entity_txns["is_fraud"].astype(bool)]
+                      if "is_fraud" in entity_txns.columns else entity_txns.iloc[0:0])
         lines += [
             f"- Total transactions in scope: {len(entity_txns)}",
             f"- Flagged as fraudulent: {len(fraud_txns)}",
@@ -284,7 +287,9 @@ def _build_str_xml(
     confidence = alert.get("confidence", 0)
     tagged = tag_alert(alert)
 
-    fraud_txns = entity_txns[entity_txns["is_fraud"]].sort_values("timestamp")
+    # Tolerate datasets without an is_fraud column (unlabeled real data).
+    fraud_txns = (entity_txns[entity_txns["is_fraud"].astype(bool)]
+                  if "is_fraud" in entity_txns.columns else entity_txns.iloc[0:0]).sort_values("timestamp")
 
     lines: List[str] = []
     lines.append('<?xml version="1.0" encoding="UTF-8"?>')

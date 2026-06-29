@@ -880,7 +880,7 @@ async def copilot_query(body: dict):
 
 # ── SAR Reports ────────────────────────────────────────────────────────────
 
-@app.get("/api/sar/generate/{alert_id}")
+@app.post("/api/sar/generate/{alert_id}")
 def generate_sar(alert_id: str):
     alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
     if not alert:
@@ -1321,12 +1321,29 @@ def list_cases(status: Optional[str] = None):
 @app.get("/api/cases/{alert_id}")
 def get_case(alert_id: str):
     case = state["cases"].get(alert_id)
-    if not case:
-        alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
-        if not alert:
-            raise HTTPException(404, "Case / alert not found")
-        case = state["cases"].open_case(alert)
-    return case
+    if case:
+        return case
+    alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
+    if not alert:
+        raise HTTPException(404, "Case / alert not found")
+    # Read-only: a GET must NOT persist a case (that would spawn junk cases +
+    # audit-log entries on a mere refresh). Return a transient "unopened" view
+    # in the same shape as a real case (status OPEN, as status_counts treats
+    # caseless alerts). The case is created lazily by the first write action
+    # (dispose / note), which already call open_case().
+    return {
+        "alert_id": alert_id,
+        "pattern_type": alert.get("pattern_type", ""),
+        "severity": alert.get("severity", ""),
+        "total_flow": alert.get("total_flow", 0),
+        "entities": alert.get("entities", []),
+        "status": "OPEN",
+        "assigned_to": None,
+        "created_at": None,
+        "updated_at": None,
+        "incident_id": None,
+        "audit_log": [],
+    }
 
 
 @app.post("/api/cases/{alert_id}/dispose")
