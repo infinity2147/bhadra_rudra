@@ -15,7 +15,6 @@ function formatCr(n) {
 export default function Analytics() {
   const [channels, setChannels] = useState(null);
   const [branches, setBranches] = useState(null);
-  const [products, setProducts] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -23,12 +22,10 @@ export default function Analytics() {
     Promise.all([
       fetchAPI('/api/analytics/channels'),
       fetchAPI('/api/analytics/branches'),
-      fetchAPI('/api/analytics/products'),
     ])
-      .then(([c, b, p]) => {
+      .then(([c, b]) => {
         setChannels(c);
         setBranches(b);
-        setProducts(p);
       })
       .catch((e) => setError(e?.message || 'Failed to load analytics'))
       .finally(() => setLoading(false));
@@ -156,27 +153,6 @@ export default function Analytics() {
           </tbody>
         </table>
       </div>
-
-      {/* Products */}
-      {products?.by_product?.length > 0 && (
-        <div className="bg-white rounded-xl border border-gray-200 p-5">
-          <h2 className="text-base font-semibold text-gray-900">Volume by Product</h2>
-          <p className="text-xs text-gray-500 mt-0.5">Inbound + outbound aggregated by account type</p>
-          <div className="mt-3" style={{ height: 260 }}>
-            <ResponsiveContainer>
-              <BarChart data={products.by_product} layout="vertical">
-                <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
-                <XAxis type="number" tick={{ fontSize: 11 }} tickFormatter={v => v >= 1e7 ? `${(v / 1e7).toFixed(0)}Cr` : v >= 1e5 ? `${(v / 1e5).toFixed(0)}L` : v} />
-                <YAxis type="category" dataKey="product" tick={{ fontSize: 11 }} width={140} />
-                <Tooltip formatter={v => formatCr(v)} />
-                <Legend wrapperStyle={{ fontSize: 12 }} />
-                <Bar dataKey="total_volume" name="Total Volume" fill="#6366f1" />
-                <Bar dataKey="total_fraud" name="Fraud Count" fill="#ef4444" />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

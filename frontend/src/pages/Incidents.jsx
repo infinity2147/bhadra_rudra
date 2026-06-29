@@ -12,6 +12,8 @@ function formatINR(n) {
 }
 
 const SEVERITY_ORDER = { CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3 };
+// Cap rendered incident cards so 4k+ incidents don't choke the DOM.
+const INC_CAP = 200;
 
 // Pick the most severe legal_basis among an incident's alerts (prefer STR).
 function pickLegalBasis(alerts) {
@@ -77,7 +79,9 @@ export default function Incidents() {
             <div className="text-center text-gray-400 py-12">No incidents yet.</div>
           ) : (
             <div className="space-y-3">
-              {incidents.map((inc) => {
+              {/* Cap rendered cards — painting 4k+ incidents is what made this
+                  page slow (the data is already loaded). Sorted by severity. */}
+              {incidents.slice(0, INC_CAP).map((inc) => {
                 const isSel = inc.incident_id === selected;
                 return (
                   <button
@@ -119,6 +123,11 @@ export default function Incidents() {
                   </button>
                 );
               })}
+              {incidents.length > INC_CAP && (
+                <p className="text-center text-xs text-gray-500 py-2">
+                  Showing top {INC_CAP} of {incidents.length.toLocaleString()} incidents (by severity).
+                </p>
+              )}
             </div>
           )}
         </div>
