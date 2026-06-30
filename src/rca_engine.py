@@ -6,7 +6,7 @@ reconstruct -> diagnose_root_cause -> recommend. All functions are pure
 """
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 from fund_tracer import trace_for_alert
 from fatf_typology import TYPOLOGY, _GENERIC
@@ -15,7 +15,7 @@ STRUCTURING_THRESHOLD = 200000  # ₹2L — mirrors fund_tracer.STRUCTURING_THRE
 
 
 def _structuring_threshold(config: Optional[Dict]) -> float:
-    if config:
+    if config is not None:
         return float(config.get("structuring_threshold", STRUCTURING_THRESHOLD))
     return STRUCTURING_THRESHOLD
 
@@ -27,7 +27,7 @@ def reconstruct(primary_alert, graph, transactions, risk_scores,
         edge_ml_scores=edge_ml_scores, config=config, **tracer_caches,
     )
     if "error" in trace:
-        return {"error": trace["error"]}
+        return {"error": str(trace["error"])}
 
     nodes = trace.get("nodes", [])
     timeline = trace.get("timeline", [])
@@ -38,7 +38,10 @@ def reconstruct(primary_alert, graph, transactions, risk_scores,
     outflow: Dict[str, float] = {}
     fan_in: Dict[str, set] = {}
     for t in timeline:
-        s, r = t.get("sender_id"), t.get("receiver_id")
+        s = t.get("sender_id")
+        r = t.get("receiver_id")
+        if not s or not r:
+            continue
         amt = float(t.get("amount", 0) or 0)
         outflow[s] = outflow.get(s, 0.0) + amt
         inflow[r] = inflow.get(r, 0.0) + amt

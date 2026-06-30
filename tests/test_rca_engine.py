@@ -26,3 +26,6 @@ def test_reconstruct_shape(synthetic_pipeline):
     }
     assert out["method"]["pattern"] == alert.get("pattern_type")
     assert isinstance(out["origin"], list) and isinstance(out["cashout"], list)
+    assert out["signals"]["n_txns"] == len(out["trace"]["timeline"])
+    assert isinstance(out["signals"]["in_scc"], bool)
+    assert out["signals"]["total_amount"] >= 0
