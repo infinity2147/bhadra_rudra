@@ -343,3 +343,16 @@ def test_aa_consent_roundtrip(client):
     r = client.post("/api/aa/consent", headers={**ADMIN, **JSON}, json={"customer_id": "CUST-TEST"})
     assert r.status_code == 200 and "_real" in r.json(), r.text
     assert client.get("/api/aa/consents", headers=ADMIN).status_code == 200
+
+
+# ── Collusion rings (synthetic identity lane, variant-independent) ────────────
+
+def test_collusion_rings_endpoint(client):
+    r = client.get("/api/collusion/rings", headers=INV)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["dataset"] == "synthetic_identity"
+    assert body["total"] >= 3  # planted: forged-KYC, device-farm, both-share rings
+    ring = body["rings"][0]
+    assert {"ring_id", "account_ids", "size", "shared_identifiers"} <= set(ring)
+    assert ring["size"] >= 3

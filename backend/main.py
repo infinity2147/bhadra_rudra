@@ -41,6 +41,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from graph_engine import FundFlowGraph
 from fraud_detector import FraudDetector
 from advanced_detectors import DormantActivationDetector, ProfileMismatchDetector
+from collusion_detector import detect_collusion_rings
+from identity_generator import write_identity_dataset
 from sar_generator import SARGenerator
 from llm_copilot import LLMCopilot
 from ml_model import (
@@ -112,6 +114,7 @@ state = {
     "ingestor": None,            # Real Kafka stream ingestor (or in-process fallback)
     "taint": None,               # TaintStore — persistent decaying taint that floors risk
     "ensemble_edge_scores": None,  # lazily-loaded per-edge {xgb,sage,gat,ensemble}
+    "identity_accounts": None,     # synthetic identity dataset for collusion lane
     "loaded": False,
 }
 
@@ -229,6 +232,20 @@ def load_or_generate():
     # AA + DiliSense clients — pick up env-driven creds; fall back to mock when absent.
     state["aa_client"] = AAClient()
     state["dilisense_client"] = DilisenseClient()
+
+    # Synthetic identity lane for collusion detection (variant-independent,
+    # standalone — does NOT touch the active-variant pipeline). Generate on
+    # first boot if absent.
+    try:
+        identity_path = os.path.join(DATA_DIR, "collusion", "identity.json")
+        if os.path.exists(identity_path):
+            with open(identity_path) as f:
+                state["identity_accounts"] = json.load(f)
+        else:
+            state["identity_accounts"] = write_identity_dataset(identity_path)
+    except Exception as e:
+        print(f"[backend] collusion identity lane unavailable: {e}")
+        state["identity_accounts"] = []
 
     # Pre-build tracer auxiliary structures so per-entity flag lookups are O(1)
     # instead of recomputing from scratch on every /api/entities/{id} request.
@@ -779,6 +796,17 @@ def get_incident(incident_id: str):
     inc_full = dict(inc)
     inc_full["alerts"] = [a for a in _alerts_with_case_status() if a.get("alert_id") in inc.get("alert_ids", [])]
     return inc_full
+
+
+# ── Collusion rings (variant-independent synthetic-identity lane) ─────────────
+
+@app.get("/api/collusion/rings")
+def get_collusion_rings():
+    accounts = state.get("identity_accounts") or []
+    min_size = int(state["config"].get("collusion_min_ring_size", 3))
+    rings = detect_collusion_rings(accounts, min_ring_size=min_size)
+    return {"dataset": "synthetic_identity", "rings": rings,
+            "total": len(rings), "n_accounts": len(accounts)}
 
 
 # ── Patterns ───────────────────────────────────────────────────────────────
