@@ -35,6 +35,8 @@ TYPOLOGY: Dict[str, Dict] = {
         "fiu_advisory": "FIU-IND red-flag: funds returning to originator through intermediaries",
         "pmla_section": "PMLA 2002 §3 (offence) r/w §12 (STR)",
         "rbi_ref": _RBI_KYC,
+        "control_gap": "Round-tripping not detected because velocity/closure is evaluated per-edge, not over the closed loop.",
+        "remediation": "Add closed-loop (cycle) detection to real-time monitoring; flag funds returning to origin within N hops.",
     },
     "Rapid Layering": {
         "fatf_code": "ML-LAYERING",
@@ -42,6 +44,8 @@ TYPOLOGY: Dict[str, Dict] = {
         "fiu_advisory": "FIU-IND red-flag: rapid pass-through with no economic rationale",
         "pmla_section": "PMLA 2002 §3 r/w §12",
         "rbi_ref": _RBI_KYC,
+        "control_gap": "Cross-branch / cross-bank velocity is not correlated in real time, so rapid multi-hop layering clears before aggregation.",
+        "remediation": "Enable real-time per-entity velocity rollup across branches; alert on more than N hops within a short window.",
     },
     "Smurfing / Structuring": {
         "fatf_code": "ML-STRUCTURING",
@@ -49,6 +53,8 @@ TYPOLOGY: Dict[str, Dict] = {
         "fiu_advisory": "FIU-IND red-flag: multiple sub-threshold transactions to/from many parties",
         "pmla_section": "PMLA 2002 §12 r/w Rule 3 (cash/threshold reporting)",
         "rbi_ref": _RBI_KYC + "; PMLA Maintenance of Records Rules, 2005",
+        "control_gap": "The reporting (CTR) threshold is evaluated per transaction, not aggregated across a rolling window and across branches.",
+        "remediation": "Aggregate deposits per beneficiary over a rolling window and across branches; lower the effective structuring threshold.",
     },
     "Shell Company Funnel": {
         "fatf_code": "ML-SHELL",
@@ -56,6 +62,8 @@ TYPOLOGY: Dict[str, Dict] = {
         "fiu_advisory": "FIU-IND red-flag: high-velocity pass-through entity with no genuine business",
         "pmla_section": "PMLA 2002 §3 r/w §12",
         "rbi_ref": _RBI_KYC + " (beneficial-ownership identification)",
+        "control_gap": "Weak account-opening due diligence; beneficial ownership unverified for high-velocity new entities.",
+        "remediation": "Add a beneficial-ownership verification gate and a fan-in flag for accounts receiving from many unrelated payers within N days of opening.",
     },
     "Dormant Activation": {
         "fatf_code": "ML-DORMANT",
@@ -63,6 +71,8 @@ TYPOLOGY: Dict[str, Dict] = {
         "fiu_advisory": "FIU-IND red-flag: dormant account with abrupt high-value activity",
         "pmla_section": "PMLA 2002 §12",
         "rbi_ref": _RBI_KYC + " (ongoing due diligence)",
+        "control_gap": "No re-KYC / step-up authentication trigger when a dormant account reactivates.",
+        "remediation": "Auto-trigger Enhanced Due Diligence when an account dormant more than N days reactivates with volume above X.",
     },
     "Profile Mismatch": {
         "fatf_code": "ML-PROFILE",
@@ -70,6 +80,8 @@ TYPOLOGY: Dict[str, Dict] = {
         "fiu_advisory": "FIU-IND red-flag: activity disproportionate to KYC profile",
         "pmla_section": "PMLA 2002 §12",
         "rbi_ref": _RBI_KYC + " (risk categorisation & periodic review)",
+        "control_gap": "The KYC profile is static and is not re-scored against observed behaviour.",
+        "remediation": "Schedule periodic behavioural KYC refresh; re-score risk when transaction behaviour deviates from the declared profile.",
     },
     "Recruiter / Coordinator": {
         "fatf_code": "ML-MULE-HERDER",
@@ -77,6 +89,8 @@ TYPOLOGY: Dict[str, Dict] = {
         "fiu_advisory": "FIU-IND / I4C mule-account advisory: single funder seeding many forwarding accounts",
         "pmla_section": "PMLA 2002 §3 r/w §12",
         "rbi_ref": _RBI_KYC + "; RBI mule-account & money-mule risk guidance",
+        "control_gap": "Mule-network linkage is not surfaced at onboarding or at transaction time.",
+        "remediation": "Run a graph-proximity check to known mules/coordinators at onboarding and on the first high-value transfer.",
     },
 }
 
@@ -89,6 +103,8 @@ _GENERIC = {
     "fiu_advisory": "FIU-IND general suspicious-transaction indicators",
     "pmla_section": "PMLA 2002 §12",
     "rbi_ref": _RBI_KYC,
+    "control_gap": "An anomalous flow inconsistent with the entity profile was not caught by existing rule thresholds.",
+    "remediation": "Route to behavioural re-scoring and analyst review; tune detector thresholds against this incident's signature.",
 }
 
 
