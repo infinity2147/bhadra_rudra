@@ -81,3 +81,51 @@ def reconstruct(primary_alert, graph, transactions, risk_scores,
         "red_flags": red_flags,
         "trace": trace,
     }
+
+
+def _infer_pattern(signals: Dict, thr_count: int = 3) -> str:
+    if signals.get("in_scc"):
+        return "Rapid Layering"
+    if signals.get("shell_count", 0) > 0 and signals.get("max_fan_in", 0) >= 3:
+        return "Shell Company Funnel"
+    if signals.get("dormant_count", 0) > 0:
+        return "Dormant Activation"
+    if signals.get("subthreshold_deposits", 0) >= thr_count:
+        return "Smurfing / Structuring"
+    return ""
+
+
+def _evidence_for(pattern: str, signals: Dict, thr: float) -> str:
+    if pattern == "Smurfing / Structuring":
+        return (f"{signals.get('subthreshold_deposits', 0)} transfers between "
+                f"₹{0.5 * thr:,.0f} and ₹{thr:,.0f}, each under the ₹{thr:,.0f} "
+                f"reporting threshold")
+    if pattern == "Shell Company Funnel":
+        return (f"{signals.get('shell_count', 0)} shell entity(ies) with fan-in up to "
+                f"{signals.get('max_fan_in', 0)} counterparties")
+    if pattern == "Dormant Activation":
+        return f"{signals.get('dormant_count', 0)} dormant-then-active account(s) in the flow"
+    if pattern in ("Rapid Layering", "Circular Transaction"):
+        return (f"funds cycled through a closed loop spanning "
+                f"{signals.get('n_txns', 0)} transactions")
+    return (f"anomalous flow of ₹{signals.get('total_amount', 0):,.0f} across "
+            f"{signals.get('n_txns', 0)} transactions inconsistent with entity profiles")
+
+
+def diagnose_root_cause(incident, reconstruction, config=None) -> Dict:
+    signals = reconstruction.get("signals", {})
+    candidates = [incident.get("primary_pattern")] + list(incident.get("patterns", []))
+    matched = next((p for p in candidates if p in TYPOLOGY), "")
+    basis = "rule"
+    if not matched:
+        matched = _infer_pattern(signals)
+        basis = "inferred" if matched else "generic"
+    entry = TYPOLOGY.get(matched, _GENERIC)
+    thr = _structuring_threshold(config)
+    return {
+        "pattern_resolved": matched or "Unclassified anomaly",
+        "basis": basis,
+        "control_gap": entry["control_gap"],
+        "remediation": entry["remediation"],
+        "evidence": _evidence_for(matched, signals, thr),
+    }
