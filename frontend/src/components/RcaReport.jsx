@@ -23,7 +23,7 @@ export default function RcaReport({ dossier }) {
           Origin: {r?.origin?.join(', ') || '—'} → Cash-out: {r?.cashout?.join(', ') || '—'}
         </p>
         <p className="text-gray-500 text-xs mt-1">
-          {r?.signals?.n_txns} transactions · ₹{r?.signals?.total_amount?.toLocaleString('en-IN')}
+          {r?.signals?.n_txns} transactions · ₹{(r?.signals?.total_amount ?? 0).toLocaleString('en-IN')}
         </p>
       </section>
 
@@ -38,8 +38,8 @@ export default function RcaReport({ dossier }) {
       <section className="rounded-lg border border-gray-200 bg-gray-50 p-4">
         <h4 className="font-semibold text-gray-800 mb-2">3. What to fix (recommendations)</h4>
         <ul className="list-disc ml-5 space-y-1 text-gray-700">
-          {(rec?.policy_level || []).map((p, i) => (
-            <li key={i}>{p.recommendation}</li>
+          {(rec?.policy_level || []).map((p) => (
+            <li key={p.recommendation}>{p.recommendation}</li>
           ))}
         </ul>
         {rec?.account_level?.length > 0 && (

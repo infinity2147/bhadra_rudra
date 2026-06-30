@@ -68,6 +68,7 @@ export default function Incidents() {
     let cancelled = false;
     (async () => {
       if (!selected) { if (!cancelled) setRca(null); return; }
+      setRca(null);
       try {
         const d = await getIncidentRca(selected);
         if (!cancelled) setRca(d);
