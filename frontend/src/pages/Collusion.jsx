@@ -1,19 +1,22 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import { getCollusionRings } from '../api';
 
 function RingGraph({ ring }) {
-  const nodes = ring.account_ids.map((id) => ({ id, kind: 'account' }));
-  const links = [];
-  (ring.shared_identifiers || []).forEach((s) => {
-    const hubId = `${s.type}:${s.value}`;
-    nodes.push({ id: hubId, kind: 'identifier' });
-    ring.account_ids.forEach((a) => links.push({ source: a, target: hubId }));
-  });
+  const graphData = useMemo(() => {
+    const nodes = ring.account_ids.map((id) => ({ id, kind: 'account' }));
+    const links = [];
+    (ring.shared_identifiers || []).forEach((s) => {
+      const hubId = `${s.type}:${s.value}`;
+      nodes.push({ id: hubId, kind: 'identifier' });
+      ring.account_ids.forEach((a) => links.push({ source: a, target: hubId }));
+    });
+    return { nodes, links };
+  }, [ring]);
   return (
     <div className="h-56 border border-gray-200 rounded bg-gray-50">
       <ForceGraph2D
-        graphData={{ nodes, links }}
+        graphData={graphData}
         width={420}
         height={220}
         nodeRelSize={5}
@@ -36,6 +39,8 @@ export default function Collusion() {
   if (err) return <div className="p-6 text-red-600">{err}</div>;
   if (!data) return <div className="p-6 text-gray-500">Loading…</div>;
 
+  const rings = data.rings ?? [];
+
   return (
     <div className="p-6 space-y-4">
       <div>
@@ -50,20 +55,20 @@ export default function Collusion() {
         ({data.n_accounts} accounts). The rest of RUDRA runs on the IBM AML dataset.
       </div>
 
-      {data.rings.length === 0 && (
+      {rings.length === 0 && (
         <div className="text-gray-500">No collusion rings detected.</div>
       )}
 
       <div className="space-y-6">
-        {data.rings.map((ring) => (
+        {rings.map((ring) => (
           <div key={ring.ring_id} className="border border-gray-200 rounded-lg p-4 bg-white">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold text-gray-900">{ring.ring_id}</h3>
               <span className="text-xs text-gray-500">{ring.size} accounts</span>
             </div>
             <ul className="mt-1 text-sm text-gray-700 list-disc ml-5">
-              {ring.shared_identifiers.map((s, i) => (
-                <li key={i}>
+              {ring.shared_identifiers.map((s) => (
+                <li key={`${s.type}:${s.value}`}>
                   {s.count} accounts share <span className="font-mono">{s.type}</span> ={' '}
                   <span className="font-mono">{s.value}</span>
                 </li>
