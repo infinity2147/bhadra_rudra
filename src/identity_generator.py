@@ -58,7 +58,9 @@ def generate_identity_accounts(*, n_accounts: int = 150, seed: int = 42) -> List
 
 def write_identity_dataset(path: str, *, n_accounts: int = 150, seed: int = 42) -> List[Dict]:
     accounts = generate_identity_accounts(n_accounts=n_accounts, seed=seed)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     with open(path, "w") as f:
         json.dump(accounts, f, indent=2)
     return accounts
