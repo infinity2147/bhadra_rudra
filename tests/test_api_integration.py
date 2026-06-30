@@ -343,3 +343,21 @@ def test_aa_consent_roundtrip(client):
     r = client.post("/api/aa/consent", headers={**ADMIN, **JSON}, json={"customer_id": "CUST-TEST"})
     assert r.status_code == 200 and "_real" in r.json(), r.text
     assert client.get("/api/aa/consents", headers=ADMIN).status_code == 200
+
+
+def test_incident_rca_returns_dossier(client):
+    inc = client.get("/api/incidents").json()["incidents"]
+    if not inc:
+        import pytest
+        pytest.skip("no incidents in active dataset")
+    iid = inc[0]["incident_id"]
+    r = client.get(f"/api/incidents/{iid}/rca", headers=INV)
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert {"reconstruction", "diagnosis", "recommendations", "narrative"} <= set(body)
+    assert body["diagnosis"]["basis"] in ("rule", "inferred", "generic")
+
+
+def test_incident_rca_404_for_unknown(client):
+    r = client.get("/api/incidents/NOPE-999/rca", headers=INV)
+    assert r.status_code == 404, r.text
