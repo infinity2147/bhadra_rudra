@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { fetchAPI } from '../api';
+import { fetchAPI, getIncidentRca } from '../api';
 import SeverityBadge from '../components/SeverityBadge';
 import RegBadges from '../components/RegBadges';
+import RcaReport from '../components/RcaReport';
 
 function formatINR(n) {
   if (n == null) return '--';
@@ -29,6 +30,7 @@ export default function Incidents() {
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState(params.get('id'));
   const [detail, setDetail] = useState(null);
+  const [rca, setRca] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -57,6 +59,20 @@ export default function Incidents() {
         if (!cancelled) setDetail(d);
       } catch {
         if (!cancelled) setDetail(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [selected]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (!selected) { if (!cancelled) setRca(null); return; }
+      try {
+        const d = await getIncidentRca(selected);
+        if (!cancelled) setRca(d);
+      } catch {
+        if (!cancelled) setRca(null);
       }
     })();
     return () => { cancelled = true; };
@@ -253,6 +269,8 @@ export default function Incidents() {
                     Open in Workbench
                   </button>
                 </div>
+
+                <RcaReport dossier={rca} />
               </>
             )}
           </div>

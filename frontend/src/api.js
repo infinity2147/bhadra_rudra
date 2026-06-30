@@ -43,6 +43,8 @@ export function apiUrl(path) {
   return `${API}${path}`;
 }
 
+export const getIncidentRca = (id) => fetchAPI(`/api/incidents/${id}/rca`);
+
 export async function downloadFromAPI(path, filename) {
   const res = await fetch(`${API}${path}`, { headers: withRoleHeaders() });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
