@@ -21,6 +21,13 @@ import time
 from io import BytesIO
 from typing import Optional, List, Dict
 
+# Load .env from the backend directory before anything else reads os.environ
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+except ImportError:
+    pass
+
 import pandas as pd
 import networkx as nx
 
@@ -933,6 +940,19 @@ async def copilot_query(body: dict):
         "mode_label": result.get("mode_label", "Quick Commands (no LLM)"),
         "fallback_reason": result.get("fallback_reason"),
     }
+
+
+@app.post("/api/copilot/stream")
+async def copilot_stream(body: dict):
+    """Streaming copilot endpoint — returns SSE chunks so the UI renders tokens as they arrive."""
+    query = (body.get("query") or "").strip()
+    if not query:
+        raise HTTPException(400, "query required")
+    return StreamingResponse(
+        state["copilot"].stream_query(query),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 # ── SAR Reports ────────────────────────────────────────────────────────────

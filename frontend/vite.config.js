@@ -6,7 +6,20 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      '/api': 'http://localhost:8000',
+      '/api/copilot/stream': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+        // Disable proxy-level buffering so SSE tokens reach the browser immediately
+        configure: (proxy) => {
+          proxy.on('proxyRes', (proxyRes) => {
+            proxyRes.headers['x-accel-buffering'] = 'no';
+          });
+        },
+      },
+      '/api': {
+        target: 'http://localhost:8000',
+        changeOrigin: true,
+      },
     },
   },
 })
