@@ -53,6 +53,7 @@ from ml_model import (
 from gnn_model import load_gnn_metrics, load_gnn_edge_scores
 from shap_explainer import explain_alert as shap_explain_alert, explain_edge
 from fund_tracer import trace_journey, trace_for_alert
+from rca_engine import build_rca
 from taint_store import TaintStore
 from fatf_typology import tag_alert
 from geo import city_flows
@@ -779,6 +780,25 @@ def get_incident(incident_id: str):
     inc_full = dict(inc)
     inc_full["alerts"] = [a for a in _alerts_with_case_status() if a.get("alert_id") in inc.get("alert_ids", [])]
     return inc_full
+
+
+@app.get("/api/incidents/{incident_id}/rca")
+def get_incident_rca(incident_id: str):
+    inc = next((i for i in (state["incidents"] or []) if i.get("incident_id") == incident_id), None)
+    if not inc:
+        raise HTTPException(404, "Incident not found")
+    alerts = _alerts_with_case_status()
+    pid = inc.get("primary_alert_id")
+    primary = next((a for a in alerts if a.get("alert_id") == pid), None)
+    if primary is None:
+        ids = set(inc.get("alert_ids", []))
+        primary = next((a for a in alerts if a.get("alert_id") in ids), None)
+    if primary is None:
+        raise HTTPException(422, "Incident has no resolvable alert")
+    return build_rca(
+        inc, primary, state["graph"], state["transactions"], state["risk_scores"],
+        edge_ml_scores=state["edge_scores"], **_tracer_caches(),
+    )
 
 
 # ── Patterns ───────────────────────────────────────────────────────────────
