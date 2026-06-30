@@ -30,19 +30,30 @@ def reconstruct(primary_alert, graph, transactions, risk_scores,
         return {"error": str(trace["error"])}
 
     nodes = trace.get("nodes", [])
-    timeline = trace.get("timeline", [])
     red_flags = trace.get("summary", {}).get("red_flags", [])
     thr = _structuring_threshold(config)
+    node_set = {n["id"] for n in nodes}
 
-    inflow: Dict[str, float] = {}
-    outflow: Dict[str, float] = {}
-    fan_in: Dict[str, set] = {}
-    for t in timeline:
-        s = t.get("sender_id")
-        r = t.get("receiver_id")
+    # Forensic signals come from the FULL (uncapped) in-scope transaction set,
+    # NOT trace["timeline"] (fund_tracer caps that at 300 rows for display).
+    # Using the capped timeline would undercount n_txns/total_amount/
+    # subthreshold_deposits and mis-rank origin/cashout on large incidents.
+    mask = (transactions["sender_id"].isin(node_set)
+            & transactions["receiver_id"].isin(node_set))
+    scope = transactions.loc[mask, ["sender_id", "receiver_id", "amount"]]
+
+    inflow, outflow, fan_in = {}, {}, {}
+    n_txns = 0
+    total_amount = 0.0
+    subthreshold = 0
+    for s, r, amount in scope.itertuples(index=False, name=None):
+        amt = float(amount or 0)
+        n_txns += 1
+        total_amount += amt
+        if 0.5 * thr <= amt < thr:
+            subthreshold += 1
         if not s or not r:
             continue
-        amt = float(t.get("amount", 0) or 0)
         outflow[s] = outflow.get(s, 0.0) + amt
         inflow[r] = inflow.get(r, 0.0) + amt
         fan_in.setdefault(r, set()).add(s)
@@ -58,13 +69,10 @@ def reconstruct(primary_alert, graph, transactions, risk_scores,
         "in_scc": any(str(f).startswith("Cycle") for f in red_flags),
         "shell_count": sum(1 for n in nodes if "shell_company" in n.get("flags", [])),
         "dormant_count": sum(1 for n in nodes if "dormant_then_active" in n.get("flags", [])),
-        "subthreshold_deposits": sum(
-            1 for t in timeline
-            if 0.5 * thr <= float(t.get("amount", 0) or 0) < thr
-        ),
+        "subthreshold_deposits": subthreshold,
         "max_fan_in": max((len(v) for v in fan_in.values()), default=0),
-        "n_txns": len(timeline),
-        "total_amount": round(sum(float(t.get("amount", 0) or 0) for t in timeline), 2),
+        "n_txns": n_txns,
+        "total_amount": round(total_amount, 2),
     }
 
     entry = TYPOLOGY.get(primary_alert.get("pattern_type", ""), _GENERIC)

@@ -26,7 +26,11 @@ def test_reconstruct_shape(synthetic_pipeline):
     }
     assert out["method"]["pattern"] == alert.get("pattern_type")
     assert isinstance(out["origin"], list) and isinstance(out["cashout"], list)
-    assert out["signals"]["n_txns"] == len(out["trace"]["timeline"])
+    node_set = {n["id"] for n in out["trace"]["nodes"]}
+    df = synthetic_pipeline["df"]
+    m = df["sender_id"].isin(node_set) & df["receiver_id"].isin(node_set)
+    assert out["signals"]["n_txns"] == int(m.sum())
+    assert out["signals"]["total_amount"] == round(float(df.loc[m, "amount"].sum()), 2)
     assert isinstance(out["signals"]["in_scc"], bool)
     assert out["signals"]["total_amount"] >= 0
 
