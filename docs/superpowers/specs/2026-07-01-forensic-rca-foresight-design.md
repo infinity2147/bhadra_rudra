@@ -82,6 +82,13 @@ Extend `fatf_typology.TYPOLOGY` (or a parallel `CONTROL_GAP` map keyed by the sa
 
 Each diagnosis line is **bound to evidence**: e.g. "7 deposits of ₹1.9L each (all under the ₹2L CTR threshold) across 3 branches in 4 days" — pulled from the actual transactions in the incident, not templated.
 
+**Critical: most incidents are ML-only, not rule-typed.** ~97% of incidents carry `primary_pattern == "ML-Detected Anomaly"` (RUDRA is ML-led; rule typologies only corroborate). A taxonomy keyed *only* on the pattern name would fall to generic for almost every incident. So `diagnose_root_cause` resolves the control gap in two steps:
+
+1. **Rule-typed path** — if `primary_pattern` (or any entry in `incident["patterns"]`) matches a `TYPOLOGY` key, use that gap/remediation directly.
+2. **ML-anomaly inference path** — otherwise, infer the dominant behavioral signature from the reconstruction's node `flags` (which `fund_tracer.trace_for_alert` already computes: `shell_company`, `dormant_then_active`, `in_scc`) plus transaction structure (sub-threshold deposit count, fan-in degree), and map *that* signature to the closest control gap. Order of precedence: cycle/SCC → Layering; shell + high fan-in → Shell Company Funnel; dormant-then-active → Dormant Activation; many sub-threshold deposits → Smurfing; else a generic "anomalous flow inconsistent with profile → behavioral re-score" gap.
+
+This makes `diagnose_root_cause` consume the reconstruction output, so the call order inside `build_rca` is **reconstruct → diagnose → recommend**.
+
 ### 4.4 Foresight (§ dossier 3) — explainable, not black-box
 - **Next-target ranking**: `taint_store.get_all()` already propagates decaying suspicion over the graph from confirmed-bad seeds. Surface the top-K warm-but-unflagged neighbors of the incident's entities, each with `taint × risk_score_learner` score and the hop-distance explanation ("2 hops from confirmed mule, taint 0.7").
 - **Ring-growth trajectory**: `recurrence.compute_recurrence` → is this incident's entity set expanding across time windows? Flag "growing" vs "contained".
