@@ -72,4 +72,23 @@ def test_recommend_account_and_policy():
         "entity_id": "E1", "name": "Acme",
         "action": "Enhanced Due Diligence (EDD) + transaction hold pending review",
     }
+    assert len(recs["account_level"]) == 2
+    assert recs["account_level"][1] == {
+        "entity_id": "E2", "name": "Bravo",
+        "action": "Enhanced Due Diligence (EDD) + transaction hold pending review",
+    }
     assert recs["policy_level"] == [{"recommendation": "fix text", "closes_gap": "gap text"}]
+
+
+def test_recommend_name_falls_back_to_entity_id():
+    diag = {"control_gap": "g", "remediation": "f"}
+    incident = {"entities": ["E1", "E2"], "entity_names": ["Acme"]}  # shorter than entities
+    recs = rca_engine.recommend(diag, incident)
+    assert recs["account_level"][1]["name"] == "E2"
+
+
+def test_recommend_caps_account_level():
+    diag = {"control_gap": "g", "remediation": "f"}
+    incident = {"entities": [f"E{i}" for i in range(6)], "entity_names": []}
+    recs = rca_engine.recommend(diag, incident, max_accounts=3)
+    assert len(recs["account_level"]) == 3
