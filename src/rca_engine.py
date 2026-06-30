@@ -129,3 +129,21 @@ def diagnose_root_cause(incident, reconstruction, config=None) -> Dict:
         "remediation": entry["remediation"],
         "evidence": _evidence_for(matched, signals, thr),
     }
+
+
+def recommend(diagnosis, incident, *, max_accounts: int = 5) -> Dict:
+    ents = list(incident.get("entities", []))[:max_accounts]
+    names = list(incident.get("entity_names", []))
+    account_level = [
+        {
+            "entity_id": e,
+            "name": names[i] if i < len(names) else e,
+            "action": "Enhanced Due Diligence (EDD) + transaction hold pending review",
+        }
+        for i, e in enumerate(ents)
+    ]
+    policy_level = [{
+        "recommendation": diagnosis["remediation"],
+        "closes_gap": diagnosis["control_gap"],
+    }]
+    return {"account_level": account_level, "policy_level": policy_level}

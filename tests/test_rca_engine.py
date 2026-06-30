@@ -62,3 +62,14 @@ def test_diagnose_generic_when_no_signal():
     assert d["basis"] == "generic"
     assert d["control_gap"] == _GENERIC["control_gap"]
     assert d["pattern_resolved"] == "Unclassified anomaly"
+
+
+def test_recommend_account_and_policy():
+    diag = {"control_gap": "gap text", "remediation": "fix text"}
+    incident = {"entities": ["E1", "E2"], "entity_names": ["Acme", "Bravo"]}
+    recs = rca_engine.recommend(diag, incident)
+    assert recs["account_level"][0] == {
+        "entity_id": "E1", "name": "Acme",
+        "action": "Enhanced Due Diligence (EDD) + transaction hold pending review",
+    }
+    assert recs["policy_level"] == [{"recommendation": "fix text", "closes_gap": "gap text"}]
