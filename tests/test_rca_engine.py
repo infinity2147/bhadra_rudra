@@ -50,6 +50,7 @@ def test_diagnose_ml_anomaly_infers_from_signals():
     d = rca_engine.diagnose_root_cause(incident, recon)
     assert d["basis"] == "inferred"
     assert d["pattern_resolved"] == "Shell Company Funnel"
+    assert "2 shell entity" in d["evidence"]
 
 
 def test_diagnose_generic_when_no_signal():
@@ -60,3 +61,4 @@ def test_diagnose_generic_when_no_signal():
     d = rca_engine.diagnose_root_cause(incident, recon)
     assert d["basis"] == "generic"
     assert d["control_gap"] == _GENERIC["control_gap"]
+    assert d["pattern_resolved"] == "Unclassified anomaly"
