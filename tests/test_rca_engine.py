@@ -96,7 +96,8 @@ def test_recommend_caps_account_level():
 
 def test_build_rca_full_dossier(synthetic_pipeline):
     alerts = synthetic_pipeline["alerts"]
-    alert = next(a for a in alerts if a.get("entities"))
+    alert = next((a for a in alerts if a.get("entities")), None)
+    assert alert is not None, "No alert with entities found in synthetic_pipeline"
     incident = {
         "incident_id": "INC-TEST",
         "primary_pattern": alert.get("pattern_type"),

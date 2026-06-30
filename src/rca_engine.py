@@ -163,7 +163,7 @@ def build_rca(incident, primary_alert, graph, transactions, risk_scores,
               *, edge_ml_scores=None, config=None, **tracer_caches) -> Dict:
     recon = reconstruct(primary_alert, graph, transactions, risk_scores,
                         edge_ml_scores=edge_ml_scores, config=config, **tracer_caches)
-    if "error" in recon:
+    if recon.get("error"):
         return {"incident_id": incident.get("incident_id"), "error": recon["error"]}
     diag = diagnose_root_cause(incident, recon, config=config)
     recs = recommend(diag, incident)
