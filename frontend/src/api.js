@@ -43,6 +43,8 @@ export function apiUrl(path) {
   return `${API}${path}`;
 }
 
+export const getCollusionRings = () => fetchAPI('/api/collusion/rings');
+
 export async function downloadFromAPI(path, filename) {
   const res = await fetch(`${API}${path}`, { headers: withRoleHeaders() });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);
