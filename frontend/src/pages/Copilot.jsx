@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
 import ReactMarkdown from 'react-markdown';
-import { postAPI } from '../api';
 
 const QUICK_ACTIONS = [
   { label: 'Overview', query: 'Give me an overview of the current fraud detection status' },
@@ -13,9 +12,7 @@ export default function Copilot() {
   const [messages, setMessages] = useState([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  // Track the most recent response's mode so the header can switch between
-  // "AI Copilot (Claude)" and "Quick Commands (no LLM)" honestly — we don't
-  // claim AI when the backend is doing keyword routing.
+  const [streaming, setStreaming] = useState(false);
   const [mode, setMode] = useState(null);
   const [modeLabel, setModeLabel] = useState(null);
   const [fallbackReason, setFallbackReason] = useState(null);
@@ -33,17 +30,84 @@ export default function Copilot() {
     setMessages(prev => [...prev, { role: 'user', content: trimmed }]);
     setInput('');
     setSending(true);
+    setStreaming(false);
 
     try {
-      const data = await postAPI('/api/copilot/query', { query: trimmed });
-      setMessages(prev => [...prev, { role: 'assistant', content: data.response ?? data.message ?? data.content ?? JSON.stringify(data) }]);
-      setMode(data.mode ?? null);
-      setModeLabel(data.mode_label ?? null);
-      setFallbackReason(data.fallback_reason ?? null);
+      // Call the backend directly to bypass the Vite proxy, which buffers
+      // streaming responses and defeats the token-by-token effect.
+      const streamUrl = import.meta.env.DEV
+        ? 'http://localhost:8000/api/copilot/stream'
+        : '/api/copilot/stream';
+      const response = await fetch(streamUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-User-Role': 'INVESTIGATOR',
+        },
+        body: JSON.stringify({ query: trimmed }),
+      });
+
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let assistantMsgAdded = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // hold incomplete line for next chunk
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          let data;
+          try { data = JSON.parse(line.slice(6)); } catch { continue; }
+
+          if (data.token) {
+            if (!assistantMsgAdded) {
+              setMessages(prev => [...prev, { role: 'assistant', content: '' }]);
+              assistantMsgAdded = true;
+              setStreaming(true);
+            }
+            setMessages(prev => {
+              const msgs = [...prev];
+              const last = msgs[msgs.length - 1];
+              msgs[msgs.length - 1] = { ...last, content: last.content + data.token };
+              return msgs;
+            });
+          }
+
+          if (data.done) {
+            setMode(data.mode ?? null);
+            setModeLabel(data.mode_label ?? null);
+            setFallbackReason(data.fallback_reason ?? null);
+          }
+        }
+      }
+
+      // If backend returned nothing (empty response), add fallback message
+      if (!assistantMsgAdded) {
+        setMessages(prev => [...prev, { role: 'assistant', content: 'No response received. Please try again.' }]);
+      }
     } catch {
-      setMessages(prev => [...prev, { role: 'assistant', content: 'Sorry, I encountered an error processing your request. Please try again.' }]);
+      setMessages(prev => {
+        const msgs = [...prev];
+        const last = msgs[msgs.length - 1];
+        // If we already started streaming, append error to that message; otherwise add a new one
+        if (last?.role === 'assistant') {
+          msgs[msgs.length - 1] = { ...last, content: last.content || 'Error — please try again.' };
+        } else {
+          msgs.push({ role: 'assistant', content: 'Error — please try again.' });
+        }
+        return msgs;
+      });
     } finally {
       setSending(false);
+      setStreaming(false);
       inputRef.current?.focus();
     }
   }
@@ -108,32 +172,51 @@ export default function Copilot() {
 
         {messages.map((msg, i) => (
           <div key={i} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+            {msg.role === 'assistant' && (
+              <div className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-bold mr-2 mt-1 shrink-0">R</div>
+            )}
             <div
-              className={`max-w-[75%] rounded-2xl px-4 py-3 text-sm leading-relaxed ${
+              className={`rounded-2xl px-4 py-3 text-sm leading-relaxed ${
                 msg.role === 'user'
-                  ? 'bg-indigo-600 text-white rounded-br-md'
-                  : 'bg-gray-100 text-gray-800 rounded-bl-md'
+                  ? 'max-w-[60%] bg-indigo-600 text-white rounded-br-md'
+                  : 'max-w-[85%] bg-white border border-gray-200 shadow-sm text-gray-800 rounded-bl-md'
               }`}
             >
               {msg.role === 'user' ? (
                 <p className="whitespace-pre-wrap">{msg.content}</p>
               ) : (
-                <div className="prose prose-sm max-w-none prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5 prose-headings:my-2 prose-pre:bg-gray-800 prose-pre:text-gray-100">
+                <div className="prose prose-sm max-w-none
+                  prose-p:my-1.5 prose-p:leading-relaxed
+                  prose-ul:my-2 prose-ul:pl-4
+                  prose-ol:my-2 prose-ol:pl-4
+                  prose-li:my-1
+                  prose-headings:font-semibold prose-headings:text-gray-900 prose-headings:my-2
+                  prose-h3:text-sm prose-h2:text-base
+                  prose-strong:text-gray-900 prose-strong:font-semibold
+                  prose-code:bg-gray-100 prose-code:px-1 prose-code:rounded prose-code:text-xs
+                  prose-pre:bg-gray-900 prose-pre:text-gray-100 prose-pre:text-xs
+                  prose-hr:border-gray-200 prose-hr:my-3">
                   <ReactMarkdown>{msg.content}</ReactMarkdown>
+                  {/* Blinking cursor while this message is still streaming */}
+                  {streaming && i === messages.length - 1 && (
+                    <span className="inline-block w-0.5 h-4 bg-indigo-500 ml-0.5 align-middle animate-pulse" />
+                  )}
                 </div>
               )}
             </div>
           </div>
         ))}
 
-        {sending && (
+        {/* Thinking indicator — only before first token arrives */}
+        {sending && !streaming && (
           <div className="flex justify-start">
-            <div className="bg-gray-100 text-gray-500 rounded-2xl rounded-bl-md px-4 py-3 text-sm flex items-center gap-2">
-              <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-              </svg>
-              Thinking...
+            <div className="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-white text-xs font-bold mr-2 mt-1 shrink-0">R</div>
+            <div className="bg-white border border-gray-200 shadow-sm text-gray-500 rounded-2xl rounded-bl-md px-4 py-3 text-sm flex items-center gap-2">
+              <span className="flex gap-1">
+                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                <span className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+              </span>
             </div>
           </div>
         )}

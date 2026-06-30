@@ -9,9 +9,69 @@ Tools: trace_funds(), find_cycles(), explain_alert(), get_profile_delta()
 
 import json
 import os
+import re
 from typing import Dict, List, Optional, Any
 import pandas as pd
 import networkx as nx
+
+
+# ── Response-enforcement layer ────────────────────────────────────────────────
+# The model's formatting instructions resist prompt-only control (it keeps
+# appending option-menus and emojis). These post-processors guarantee the
+# enterprise format regardless of what the model emits.
+
+_EMOJI_RE = re.compile(
+    "[\U0001F000-\U0001FAFF\U00002600-\U000027BF\U0001F1E6-\U0001F1FF"
+    "\U00002190-\U000021FF\U00002300-\U000023FF\U00002B00-\U00002BFF️]",
+    flags=re.UNICODE,
+)
+
+# Phrases that open a trailing "what would you like to do next" menu. Whenever
+# one appears, everything from it onward is a closer-menu we strip — answers
+# should end on the answer, not a list of options.
+_MENU_TRIGGERS = (
+    "what would you like",
+    "what else would you like",
+    "would you like me to",
+    "is there anything else",
+    "anything else i can",
+    "how would you like to proceed",
+    "i can help you with",
+    "here are some things i can",
+    "you can ask me",
+    "let me know what",
+    "what can i help",
+    "how can i help you",
+)
+
+
+def _find_menu_cut(text: str) -> Optional[int]:
+    """Index where a trailing option-menu begins, or None."""
+    low = text.lower()
+    cut = None
+    for pat in _MENU_TRIGGERS:
+        i = low.find(pat)
+        if i != -1 and (cut is None or i < cut):
+            cut = i
+    return cut
+
+
+def _strip_response(text: str) -> str:
+    """Enforce enterprise format on a complete response: drop trailing menus,
+    emojis, and dangling list-header lines."""
+    cut = _find_menu_cut(text)
+    # Only cut when real content precedes the trigger. A trigger at the very
+    # start means the whole response is a standalone clarifying question
+    # ("What would you like to investigate?") — keep it, don't blank it out.
+    if cut is not None and text[:cut].strip():
+        text = text[:cut]
+    text = _EMOJI_RE.sub("", text)
+    # Drop trailing blank lines and dangling "header:" lines left behind once
+    # the menu under them was removed.
+    lines = text.rstrip().split("\n")
+    while lines and (not lines[-1].strip() or lines[-1].strip().endswith(":")):
+        lines.pop()
+    return "\n".join(lines).rstrip()
 
 
 class LLMCopilot:
@@ -366,6 +426,180 @@ class LLMCopilot:
         except Exception as e:
             return self._fallback_response(user_message, str(e))
 
+    def _build_system_prompt(self) -> str:
+        return (
+            "You are RUDRA, an AI fraud investigation copilot for Indian public-sector banks.\n\n"
+
+            "ABOUT RUDRA:\n"
+            "RUDRA is a real-time AML system replacing T+1 batch detection. It scores live "
+            "transactions off a Kafka stream in 0.56 ms mean latency. It uses a stacked ensemble: "
+            "XGBoost + GraphSAGE (3-hop SAGEConv) + GAT, with a logistic meta-learner. "
+            "Trained on IBM AML HI-Small benchmark (100k stratified sample, 87,772 edges, 5.6% fraud rate). "
+            "Threshold chosen at F2 (β=2, recall-favouring) because a missed launderer costs more than a false positive. "
+            "Key metrics: AUC-ROC 0.926, AUPRC 0.661, Recall 75.2%, F1 0.402 (lower by design — F2 operating point).\n\n"
+
+            "SEVEN DETECTORS:\n"
+            "1. Circular transactions — Johnson's algorithm + SCC decomposition for round-tripping loops.\n"
+            "2. Rapid layering — temporal-causal BFS money-following chain (≥3 hops, amount preservation gate).\n"
+            "3. Smurfing/structuring — transactions clustered below ₹2L RBI reporting threshold (sliding window + fan-out).\n"
+            "4. Shell funnel — FIFO holding-time + inflow/outflow imbalance for shell company pass-throughs.\n"
+            "5. Dormant activation — Z-score spike after months of inactivity (>2.5σ above historical baseline).\n"
+            "6. Profile mismatch — KYC behavioural deviation (individual acting like a business, etc.).\n"
+            "7. Recruiter/fan-out — single funder seeding a network of mule accounts.\n\n"
+
+            "CONFIDENCE TIERS:\n"
+            "T1 = ML + rule agree (highest priority). T2 = ML-only (novel patterns). T3 = rule-only typology.\n\n"
+
+            "REGULATORY CONTEXT (India):\n"
+            "- RBI Fraud Risk Management Master Direction: July 2024 — mandates real-time monitoring in core banking.\n"
+            "- PMLA: banks must file STR with FIU-IND within 7 days of suspicion forming.\n"
+            "- DPDP Act: live now, full compliance due May 2027 — PII minimisation, role-based access.\n"
+            "RUDRA compliance: PII redacted by default, SHA-256 hash-chain audit log, maker-checker RBAC, "
+            "one-click FIU evidence package (STR XML + SAR PDF + subgraph + audit trail).\n\n"
+
+            "RESPONSE FORMAT (STRICT — this is an enterprise banking tool, not a chatbot):\n\n"
+
+            "ANSWER-FIRST. The first line is always the answer or a headline. Never open with "
+            "'I see…', 'Sure', 'Great question', 'Let me…', or a self-introduction. Lead with the substance.\n\n"
+
+            "PICK ONE STRUCTURE based on the query:\n"
+            "1. DIRECT FACT/METRIC (e.g. 'what is AUPRC') — State the value in the first line in **bold**. "
+            "Add at most 1-2 lines of context. Stop.\n"
+            "2. ENTITY / ALERT LOOKUP — Lead with a one-line headline, then a compact key-value block "
+            "(see STAT BLOCKS), then a short reasoning paragraph if needed.\n"
+            "3. LIST / DATA RESULT (cycles, alerts, high-risk entities) — One headline line stating the count, "
+            "then a tight bulleted list sorted by importance (highest amount/severity first). No preamble.\n"
+            "4. EXPLANATION ('how does X work') — One-sentence definition, then the mechanism in 2-4 lines. "
+            "No history, no filler.\n\n"
+
+            "STAT BLOCKS — when reporting multiple related numbers, use bold-label key-value bullets, "
+            "value in backticks, NOT prose. Example:\n"
+            "- **AUPRC** — `0.661`\n"
+            "- **Recall** — `75.2%`\n"
+            "Do NOT bury numbers inside sentences when there are several of them. Never use markdown tables.\n\n"
+
+            "HARD RULES:\n"
+            "- NEVER end with a menu of options or 'What would you like to investigate?'. Answer, then stop.\n"
+            "- If you offer a follow-up, it is ONE short imperative question (e.g. 'Trace this entity's funds?') — never a list.\n"
+            "- Match length to the question. A one-line question gets a short answer, not a data dump.\n"
+            "- Report ONLY what the data/tools return. Never invent statistics (e.g. 'alert density', 'X% aligns with…') "
+            "or qualitative judgments ('healthy graph', 'typical volume'). Every number on screen must be defensible.\n"
+            "- Never use emojis. Tone is precise, calm, declarative. No exclamation marks.\n"
+            "- For specific entities/alerts/fund-flows — call the appropriate tool. For RUDRA internals/metrics/"
+            "regulations — answer directly, no tool needed.\n"
+            "- If the input is unclear, gibberish, a URL, or out of scope — reply with ONE sentence asking what "
+            "they want to investigate. Never fabricate an analysis.\n"
+            "- Use ₹ for rupee amounts (₹X Cr / ₹X L for large values). Never fabricate alert IDs or entity names."
+        )
+
+    def _build_context(self, user_message: str) -> str:
+        return (
+            f"Graph snapshot: {self.graph.number_of_nodes()} entities, "
+            f"{self.graph.number_of_edges()} connections, "
+            f"{len(self.alerts)} active alerts, {len(self.fraud_cases)} known fraud cases.\n\n"
+            f"Investigator query: {user_message}"
+        )
+
+    def _build_anthropic_tools(self) -> List[Dict]:
+        return [
+            {"name": t["name"], "description": t["description"], "input_schema": t["parameters"]}
+            for t in self._get_tool_definitions()
+        ]
+
+    def stream_query(self, user_message: str):
+        """Generator yielding SSE chunks for real-time streaming to the frontend.
+
+        Tool-calling rounds run synchronously (fast, usually <500 ms total).
+        The final answer synthesis is streamed token-by-token via the Anthropic
+        streaming API so the UI renders words as they arrive.
+        """
+        if not self.api_key:
+            result = self._fallback_response(user_message)
+            yield f"data: {json.dumps({'token': result['response']})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'mode': result['mode'], 'mode_label': result['mode_label']})}\n\n"
+            return
+
+        try:
+            import anthropic
+            client = anthropic.Anthropic(api_key=self.api_key)
+            system = self._build_system_prompt()
+            anthropic_tools = self._build_anthropic_tools()
+            messages = [{"role": "user", "content": self._build_context(user_message)}]
+
+            # Non-streaming tool-calling rounds — execute tools, build up messages
+            for _ in range(3):
+                resp = client.messages.create(
+                    model="claude-haiku-4-5-20251001",
+                    max_tokens=1024,
+                    system=system,
+                    messages=messages,
+                    tools=anthropic_tools,
+                )
+                tool_use_blocks = [b for b in resp.content if b.type == "tool_use"]
+                if not tool_use_blocks:
+                    break
+                tool_results = []
+                for block in tool_use_blocks:
+                    args = dict(block.input) if block.input else {}
+                    result = self._execute_tool(block.name, args)
+                    tool_results.append({
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": json.dumps(result, default=str),
+                    })
+                messages.append({"role": "assistant", "content": resp.content})
+                messages.append({"role": "user", "content": tool_results})
+
+            # Stream the final synthesis answer token by token, through the
+            # enforcement filter. `buf` holds an unflushed tail of up to HOLD
+            # chars so a trailing option-menu (or an emoji split across tokens)
+            # is detected and truncated before it reaches the browser.
+            HOLD = 48
+            buf = ""
+            cut = False
+            emitted_any = False
+            menu_active = True
+            with client.messages.stream(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=system,
+                messages=messages,
+            ) as stream:
+                for text in stream.text_stream:
+                    buf += text
+                    if menu_active:
+                        menu_at = _find_menu_cut(buf)
+                        if menu_at is not None:
+                            head = _strip_response(buf[:menu_at])
+                            if head or emitted_any:
+                                # Real answer precedes the trigger → it's a trailing
+                                # menu. Emit the clean head and stop.
+                                if head:
+                                    yield f"data: {json.dumps({'token': head})}\n\n"
+                                cut = True
+                                break
+                            # Trigger at the very start with nothing before it →
+                            # a standalone clarifying question. Keep streaming it.
+                            menu_active = False
+                    if len(buf) > HOLD:
+                        safe = _EMOJI_RE.sub("", buf[:-HOLD])
+                        buf = buf[-HOLD:]
+                        if safe:
+                            emitted_any = True
+                            yield f"data: {json.dumps({'token': safe})}\n\n"
+
+            # No menu hit — flush the remaining clean tail.
+            if not cut and buf:
+                tail = _EMOJI_RE.sub("", buf).rstrip()
+                if tail:
+                    yield f"data: {json.dumps({'token': tail})}\n\n"
+
+            yield f"data: {json.dumps({'done': True, 'mode': 'ai_copilot', 'mode_label': 'AI Copilot (Claude)'})}\n\n"
+
+        except Exception as e:
+            yield f"data: {json.dumps({'token': f'Error: {e}'})}\n\n"
+            yield f"data: {json.dumps({'done': True, 'mode': 'ai_copilot', 'mode_label': 'AI Copilot (Claude)'})}\n\n"
+
     def _call_claude(self, user_message: str, tools: List[Dict]) -> Dict:
         """Call Claude API with tool-calling, sending tool results back for synthesis.
 
@@ -376,25 +610,10 @@ class LLMCopilot:
         import anthropic
 
         client = anthropic.Anthropic(api_key=self.api_key)
-
-        system_prompt = (
-            "You are RUDRA, an AI fraud investigation copilot for banking. "
-            "You have access to a live fund flow graph with transaction data. "
-            "When the investigator asks something you can answer by calling a tool, "
-            "call the appropriate tool. After receiving tool results, synthesise "
-            "a clear actionable answer. Use Indian Rupee (₹). Reference RBI / PMLA "
-            "guidelines where appropriate. Be concise — investigators are busy."
-        )
+        system_prompt = self._build_system_prompt()
 
         # Anthropic uses input_schema instead of parameters
-        anthropic_tools = [
-            {
-                "name": t["name"],
-                "description": t["description"],
-                "input_schema": t["parameters"],
-            }
-            for t in tools
-        ]
+        anthropic_tools = self._build_anthropic_tools()
 
         context = (
             f"Graph snapshot: {self.graph.number_of_nodes()} entities, "
@@ -447,6 +666,9 @@ class LLMCopilot:
             final_text = self._summarize_tool_results(tool_calls)
         elif not final_text:
             final_text = self._generate_local_response(user_message)
+        else:
+            # Same enterprise-format enforcement the streaming path applies.
+            final_text = _strip_response(final_text)
 
         return {
             "response": final_text,
