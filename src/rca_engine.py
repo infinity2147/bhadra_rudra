@@ -147,3 +147,31 @@ def recommend(diagnosis, incident, *, max_accounts: int = 5) -> Dict:
         "closes_gap": diagnosis["control_gap"],
     }]
     return {"account_level": account_level, "policy_level": policy_level}
+
+
+def rca_narrative(dossier: Dict) -> str:
+    d = dossier["diagnosis"]
+    r = dossier["reconstruction"]
+    return (
+        f"Method: {r['method']['fatf_typology']} ({r['method']['fatf_code']}). "
+        f"Root cause: {d['control_gap']} Evidenced by {d['evidence']}. "
+        f"Recommended fix: {d['remediation']}"
+    )
+
+
+def build_rca(incident, primary_alert, graph, transactions, risk_scores,
+              *, edge_ml_scores=None, config=None, **tracer_caches) -> Dict:
+    recon = reconstruct(primary_alert, graph, transactions, risk_scores,
+                        edge_ml_scores=edge_ml_scores, config=config, **tracer_caches)
+    if "error" in recon:
+        return {"incident_id": incident.get("incident_id"), "error": recon["error"]}
+    diag = diagnose_root_cause(incident, recon, config=config)
+    recs = recommend(diag, incident)
+    dossier = {
+        "incident_id": incident.get("incident_id"),
+        "reconstruction": recon,
+        "diagnosis": diag,
+        "recommendations": recs,
+    }
+    dossier["narrative"] = rca_narrative(dossier)
+    return dossier

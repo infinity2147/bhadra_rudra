@@ -92,3 +92,20 @@ def test_recommend_caps_account_level():
     incident = {"entities": [f"E{i}" for i in range(6)], "entity_names": []}
     recs = rca_engine.recommend(diag, incident, max_accounts=3)
     assert len(recs["account_level"]) == 3
+
+
+def test_build_rca_full_dossier(synthetic_pipeline):
+    alerts = synthetic_pipeline["alerts"]
+    alert = next(a for a in alerts if a.get("entities"))
+    incident = {
+        "incident_id": "INC-TEST",
+        "primary_pattern": alert.get("pattern_type"),
+        "patterns": [alert.get("pattern_type")],
+        "entities": alert.get("entities"),
+        "entity_names": alert.get("entities"),
+    }
+    dossier = rca_engine.build_rca(incident, alert, synthetic_pipeline["graph"],
+                                   synthetic_pipeline["df"], risk_scores=[])
+    assert dossier["incident_id"] == "INC-TEST"
+    assert {"reconstruction", "diagnosis", "recommendations", "narrative"} <= set(dossier)
+    assert dossier["diagnosis"]["control_gap"] in dossier["narrative"]
