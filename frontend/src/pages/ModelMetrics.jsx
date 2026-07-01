@@ -74,6 +74,9 @@ export default function ModelMetrics() {
       // Refresh the variants list in case a new variant was created
       const vs = await fetchAPI('/api/ml/variants');
       setVariants(vs.variants || []);
+      // Refresh TGN predictions after retrain
+      const tgnData = await getTgnPredictions(variant);
+      setTgnPredictions(tgnData);
     } catch (e) {
       setError(e.message);
     } finally {
