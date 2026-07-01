@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RUDRA — XGBoost Feature Engineering</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: Arial, Helvetica, sans-serif; background: #fff; color: #222; padding: 40px; }
+h1 { font-size: 22px; font-weight: 700; text-align: center; margin-bottom: 6px; }
+.subtitle { font-size: 13px; color: #666; text-align: center; margin-bottom: 30px; }
+.container { display: flex; align-items: center; gap: 30px; justify-content: center; }
+.categories { display: flex; flex-direction: column; gap: 8px; }
+.category { display: flex; align-items: stretch; border: 1px solid #ddd; border-radius: 4px; overflow: hidden; }
+.cat-label { width: 160px; min-width: 160px; padding: 8px 12px; font-size: 11px; font-weight: 700; color: #fff; display: flex; flex-direction: column; justify-content: center; }
+.cat-label .count { font-weight: 400; font-size: 10px; opacity: 0.8; }
+.cat-features { flex: 1; padding: 8px 12px; display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center; background: #fafafa; }
+.feat { font-size: 10px; background: #fff; border: 1px solid #ddd; border-radius: 2px; padding: 3px 8px; white-space: nowrap; }
+.arrow-col { display: flex; flex-direction: column; align-items: center; gap: 4px; }
+.arrow-line { width: 2px; height: 40px; background: #ccc; }
+.arrow-text { font-size: 20px; color: #999; }
+.model-box { border: 2px solid #333; border-radius: 6px; padding: 20px 30px; text-align: center; background: #f8f8f8; }
+.model-box h2 { font-size: 16px; font-weight: 700; margin-bottom: 8px; }
+.model-box .detail { font-size: 11px; color: #555; line-height: 1.6; }
+.output-box { margin-top: 16px; border: 1px solid #333; border-radius: 4px; padding: 12px 20px; text-align: center; background: #fff; }
+.output-box .label { font-size: 12px; font-weight: 700; }
+.output-box .range { font-size: 11px; color: #666; }
+
+.c1 { background: #7d6608; }
+.c2 { background: #2c5f8a; }
+.c3 { background: #2d6a3f; }
+.c4 { background: #5b3a8a; }
+.c5 { background: #1a6b6a; }
+.c6 { background: #8a2c2c; }
+.c7 { background: #8a5a1e; }
+</style>
+</head>
+<body>
+
+<h1>XGBoost Feature Engineering — 30 Features</h1>
+<p class="subtitle">Hand-crafted edge-level features extracted from the transaction graph</p>
+
+<div class="container">
+  <div class="categories">
+
+    <div class="category">
+      <div class="cat-label c1">AMOUNT<span class="count">5 features</span></div>
+      <div class="cat-features">
+        <span class="feat">log_total_amount</span>
+        <span class="feat">log_avg_amount</span>
+        <span class="feat">log_max_amount</span>
+        <span class="feat">log_min_amount</span>
+        <span class="feat">txn_count</span>
+      </div>
+    </div>
+
+    <div class="category">
+      <div class="cat-label c2">STATISTICAL<span class="count">2 features</span></div>
+      <div class="cat-features">
+        <span class="feat">amount_cv (std/mean)</span>
+        <span class="feat">time_span_hours</span>
+      </div>
+    </div>
+
+    <div class="category">
+      <div class="cat-label c3">ENTITY TYPE<span class="count">6 features</span></div>
+      <div class="cat-features">
+        <span class="feat">sender_is_individual</span>
+        <span class="feat">sender_is_business</span>
+        <span class="feat">sender_is_shell</span>
+        <span class="feat">receiver_is_individual</span>
+        <span class="feat">receiver_is_business</span>
+        <span class="feat">receiver_is_shell</span>
+      </div>
+    </div>
+
+    <div class="category">
+      <div class="cat-label c4">NETWORK TOPOLOGY<span class="count">9 features</span></div>
+      <div class="cat-features">
+        <span class="feat">same_branch</span>
+        <span class="feat">sender_in_degree</span>
+        <span class="feat">sender_out_degree</span>
+        <span class="feat">sender_log_in_strength</span>
+        <span class="feat">sender_log_out_strength</span>
+        <span class="feat">receiver_in_degree</span>
+        <span class="feat">receiver_out_degree</span>
+        <span class="feat">receiver_log_in_strength</span>
+        <span class="feat">receiver_log_out_strength</span>
+      </div>
+    </div>
+
+    <div class="category">
+      <div class="cat-label c5">CHANNEL & RAIL<span class="count">4 features</span></div>
+      <div class="cat-features">
+        <span class="feat">channel_diversity</span>
+        <span class="feat">rail_diversity</span>
+        <span class="feat">high_value_rail_share</span>
+        <span class="feat">upi_share</span>
+      </div>
+    </div>
+
+    <div class="category">
+      <div class="cat-label c6">BEHAVIORAL<span class="count">3 features</span></div>
+      <div class="cat-features">
+        <span class="feat">near_threshold_score (₹2L proximity)</span>
+        <span class="feat">night_ratio (10pm–6am)</span>
+        <span class="feat">weekend_ratio</span>
+      </div>
+    </div>
+
+    <div class="category">
+      <div class="cat-label c7">STRUCTURAL<span class="count">1 feature</span></div>
+      <div class="cat-features">
+        <span class="feat">in_scc_3plus (cycle membership via Tarjan's SCC)</span>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="arrow-col">
+    <div class="arrow-text">→</div>
+  </div>
+
+  <div>
+    <div class="model-box">
+      <h2>XGBClassifier</h2>
+      <div class="detail">
+        300 trees · max depth 6<br>
+        learning rate 0.05<br>
+        scale_pos_weight = auto<br>
+        eval_metric = AUPRC<br>
+        F2-optimal threshold<br>
+        80/20 stratified split
+      </div>
+    </div>
+    <div class="output-box">
+      <div class="label">Fraud Probability</div>
+      <div class="range">0.0 → 1.0</div>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

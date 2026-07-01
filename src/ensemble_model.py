@@ -523,3 +523,43 @@ def load_ensemble_edge_scores(data_dir: str, variant: str = "ibm_aml") -> Dict[s
         return {}
     with open(path) as f:
         return json.load(f)
+
+
+def extract_gnn_embeddings(graph: nx.DiGraph, data_dir: str, variant: str = "ibm_aml") -> Tuple[Optional[np.ndarray], Optional[Dict[str, int]]]:
+    """Extract latent node embeddings from the trained GraphSAGE model."""
+    try:
+        torch, nn, F, _, _ = _torch_imports()
+    except ImportError:
+        return None, None
+
+    weight_path = os.path.join(data_dir, "ml", variant, "ensemble", "base_sage_weights.pt")
+    if not os.path.exists(weight_path):
+        return None, None
+
+    X_np, idx = _node_features(graph)
+    edge_index_np, _, _ = _edge_index_and_labels(graph, idx)
+    
+    X = torch.tensor(X_np, dtype=torch.float32)
+    edge_index = torch.tensor(edge_index_np, dtype=torch.long)
+    
+    # We must instantiate the model with the exact same edge_feat_dim it was trained with.
+    # The saved state_dict includes the MLP head which expects a specific dimension.
+    # In ensemble_model.py, it's typically 30 (len(FEATURE_COLUMNS)).
+    model = _build_sage_model(in_dim=X.shape[1], hidden=64, num_layers=3, aggr="max", edge_feat_dim=30)
+    
+    try:
+        model.load_state_dict(torch.load(weight_path, map_location="cpu"))
+    except Exception as e:
+        print(f"Error loading GNN weights for embeddings: {e}")
+        return None, None
+
+    model.eval()
+    
+    with torch.no_grad():
+        h = X
+        for i, conv in enumerate(model.convs):
+            h = conv(h, edge_index)
+            if i < len(model.convs) - 1:
+                h = F.relu(h)
+                
+    return h.numpy(), idx

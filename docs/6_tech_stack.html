@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RUDRA — Technology Stack</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: Arial, Helvetica, sans-serif; background: #fff; color: #222; padding: 40px; display: flex; justify-content: center; }
+.container { width: 1000px; border: 1px solid #ddd; padding: 30px; background: #fafafa; }
+.header { text-align: center; margin-bottom: 30px; }
+.header h1 { font-size: 28px; color: #1a2639; text-transform: uppercase; letter-spacing: 2px; }
+.header p { font-size: 16px; color: #555; margin-top: 10px; }
+.stack-grid { display: flex; flex-direction: column; gap: 20px; }
+.layer { display: flex; border: 1px solid #ccc; background: #fff; border-left: 6px solid #1a2639; }
+.layer-title { width: 250px; padding: 20px; background: #f0f4f8; font-weight: bold; font-size: 18px; color: #1a2639; display: flex; align-items: center; justify-content: center; text-align: center; border-right: 1px solid #ccc; }
+.layer-content { flex: 1; padding: 20px; display: flex; flex-wrap: wrap; gap: 15px; align-items: center; }
+.tech-box { padding: 10px 20px; border: 1px solid #ddd; background: #fdfdfd; border-radius: 4px; font-size: 15px; font-weight: bold; color: #333; text-align: center; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+.tech-box span { display: block; font-size: 12px; font-weight: normal; color: #777; margin-top: 5px; }
+.b-blue { border-bottom: 3px solid #3498db; }
+.b-green { border-bottom: 3px solid #2ecc71; }
+.b-orange { border-bottom: 3px solid #f39c12; }
+.b-red { border-bottom: 3px solid #e74c3c; }
+.b-purple { border-bottom: 3px solid #9b59b6; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="header">
+    <h1>RUDRA — Complete Technology Stack</h1>
+    <p>Open-Source, Enterprise-Grade, Zero Data Egress</p>
+  </div>
+  <div class="stack-grid">
+    <div class="layer">
+      <div class="layer-title">1. Presentation Layer</div>
+      <div class="layer-content">
+        <div class="tech-box b-blue">React 19<span>Frontend Library</span></div>
+        <div class="tech-box b-purple">Vite<span>Build Tool</span></div>
+        <div class="tech-box b-orange">D3.js / Force-Graph<span>Interactive Visualization</span></div>
+        <div class="tech-box b-green">Tailwind CSS<span>Styling</span></div>
+      </div>
+    </div>
+    <div class="layer">
+      <div class="layer-title">2. API & Streaming</div>
+      <div class="layer-content">
+        <div class="tech-box b-green">FastAPI<span>Core REST Router</span></div>
+        <div class="tech-box b-red">Apache Kafka<span>Event Streaming</span></div>
+        <div class="tech-box b-orange">Pathway (Rust)<span>Incremental Analytics</span></div>
+      </div>
+    </div>
+    <div class="layer">
+      <div class="layer-title">3. Machine Learning & Graph</div>
+      <div class="layer-content">
+        <div class="tech-box b-blue">XGBoost<span>Tabular Edge Scoring</span></div>
+        <div class="tech-box b-orange">PyTorch Geometric<span>GraphSAGE / GAT Models</span></div>
+        <div class="tech-box b-purple">NetworkX<span>In-memory Graph Topology</span></div>
+        <div class="tech-box b-red">Scikit-Learn<span>Logistic Meta-Learner</span></div>
+      </div>
+    </div>
+    <div class="layer">
+      <div class="layer-title">4. Explainability & Compliance</div>
+      <div class="layer-content">
+        <div class="tech-box b-green">SHAP Explainer<span>Game-theoretic Attribution</span></div>
+        <div class="tech-box b-blue">ReportLab<span>FIU PDF Generation</span></div>
+        <div class="tech-box b-orange">Python XML Sax<span>STR XML Parsing</span></div>
+      </div>
+    </div>
+    <div class="layer">
+      <div class="layer-title">5. Persistence & Infrastructure</div>
+      <div class="layer-content">
+        <div class="tech-box b-blue">SQLite / PostgreSQL<span>Case & Audit Ledger</span></div>
+        <div class="tech-box b-purple">SHA-256 Hash-chain<span>Cryptographic Audit Trail</span></div>
+        <div class="tech-box b-blue">Docker<span>Containerization</span></div>
+      </div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

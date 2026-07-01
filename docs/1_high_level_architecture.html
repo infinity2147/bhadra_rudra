@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>RUDRA — Core Architecture</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: Arial, sans-serif; background: #eef2f5; padding: 50px 20px; color: #333; }
+h1 { text-align: center; margin-bottom: 10px; font-size: 28px; color: #1a202c; }
+.subtitle { text-align: center; margin-bottom: 40px; font-size: 14px; color: #718096; }
+
+/* 3D Stacked Layer Effect */
+.stack { max-width: 900px; margin: 0 auto; display: flex; flex-direction: column; gap: 20px; }
+.layer { 
+  background: white; 
+  border-radius: 8px; 
+  padding: 24px; 
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  border-left: 10px solid #cbd5e0;
+  transition: transform 0.2s, box-shadow 0.2s;
+  position: relative;
+}
+.layer:hover { 
+  transform: translateY(-4px); 
+  box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+}
+.layer-title { font-size: 16px; font-weight: bold; margin-bottom: 16px; letter-spacing: 0.5px; text-transform: uppercase; color: #4a5568; display: flex; align-items: center; justify-content: space-between; }
+.layer-number { font-size: 12px; color: #a0aec0; font-weight: normal; }
+
+.boxes { display: flex; gap: 15px; flex-wrap: wrap; }
+.box { 
+  background: #f7fafc; 
+  border: 1px solid #e2e8f0; 
+  border-radius: 6px; 
+  padding: 15px; 
+  flex: 1; 
+  min-width: 180px; 
+}
+.box-title { font-size: 15px; font-weight: bold; margin-bottom: 6px; color: #2d3748; }
+.box-desc { font-size: 13px; color: #4a5568; line-height: 1.4; }
+
+/* Layer Colors */
+.l-ui { border-left-color: #3182ce; }
+.l-stream { border-left-color: #805ad5; }
+.l-ml { border-left-color: #dd6b20; }
+.l-rule { border-left-color: #38a169; }
+.l-comp { border-left-color: #e53e3e; }
+</style>
+</head>
+<body>
+
+<h1>RUDRA — Core System Architecture</h1>
+<p class="subtitle">Focused high-level view of core AML algorithms and data flow</p>
+
+<div class="stack">
+
+  <!-- Layer 1 -->
+  <div class="layer l-ui">
+    <div class="layer-title">User Interface & Presentation <span class="layer-number">LAYER 1</span></div>
+    <div class="boxes">
+      <div class="box">
+        <div class="box-title">Dashboard & Analytics</div>
+        <div class="box-desc">React 19 interface for high-level volume metrics and alert distribution.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Interactive Graph</div>
+        <div class="box-desc">Visual fund-flow tracing using force-directed network graphs.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Case Investigator</div>
+        <div class="box-desc">Workbench for human-in-the-loop review of alerts.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Layer 2 -->
+  <div class="layer l-stream">
+    <div class="layer-title">Data Ingestion & Real-Time Streaming <span class="layer-number">LAYER 2</span></div>
+    <div class="boxes">
+      <div class="box">
+        <div class="box-title">FastAPI Engine</div>
+        <div class="box-desc">Asynchronous REST backend handling all UI requests and system coordination.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Apache Kafka</div>
+        <div class="box-desc">Zero-data-loss broker handling the live stream of incoming transactions.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Pathway Engine</div>
+        <div class="box-desc">Rust-backed sliding window analytics for instant velocity burst detection.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Layer 3 -->
+  <div class="layer l-ml">
+    <div class="layer-title">Machine Learning & AI Explainability <span class="layer-number">LAYER 3</span></div>
+    <div class="boxes">
+      <div class="box">
+        <div class="box-title">XGBoost & GraphSAGE</div>
+        <div class="box-desc">Stacked ensemble combining tabular features (XGB) with 3-hop graph topologies (GNN).</div>
+      </div>
+      <div class="box">
+        <div class="box-title">GAT (Attention Network)</div>
+        <div class="box-desc">Graph Attention Network identifying the most critical money paths.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">SHAP Explainer</div>
+        <div class="box-desc">Game-theory based attributions calculating EXACTLY why an alert fired.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Layer 4 -->
+  <div class="layer l-rule">
+    <div class="layer-title">Deterministic Rule Engine (Graph-Native) <span class="layer-number">LAYER 4</span></div>
+    <div class="boxes">
+      <div class="box">
+        <div class="box-title">Circular Transactions</div>
+        <div class="box-desc">Round-tripping detection using Johnson's cycle algorithm.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Rapid Layering</div>
+        <div class="box-desc">Temporal Depth-First Search preserving 85% amount ratios.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Smurfing</div>
+        <div class="box-desc">Sub-threshold (₹2L) multi-deposit clustering.</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Shell Company Funnel</div>
+        <div class="box-desc">Identifies high flow-imbalance or immediate pass-through accounts.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Layer 5 -->
+  <div class="layer l-comp">
+    <div class="layer-title">Compliance & Reporting (RBI Aligned) <span class="layer-number">LAYER 5</span></div>
+    <div class="boxes">
+      <div class="box">
+        <div class="box-title">Deterministic SAR Generator</div>
+        <div class="box-desc">Generates human-readable narrative using SHAP outputs and Python templates (NO LLM Hallucinations).</div>
+      </div>
+      <div class="box">
+        <div class="box-title">Cryptographic Audit Trail</div>
+        <div class="box-desc">Immutable SHA-256 hash-chain ensuring case decisions cannot be tampered with.</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+</body>
+</html>

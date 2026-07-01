@@ -41,6 +41,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from graph_engine import FundFlowGraph
 from fraud_detector import FraudDetector
 from advanced_detectors import DormantActivationDetector, ProfileMismatchDetector
+from collusion_detector import detect_collusion_rings
+from identity_generator import write_identity_dataset
 from sar_generator import SARGenerator
 from llm_copilot import LLMCopilot
 from ml_model import (
@@ -113,6 +115,7 @@ state = {
     "ingestor": None,            # Real Kafka stream ingestor (or in-process fallback)
     "taint": None,               # TaintStore — persistent decaying taint that floors risk
     "ensemble_edge_scores": None,  # lazily-loaded per-edge {xgb,sage,gat,ensemble}
+    "identity_accounts": None,     # synthetic identity dataset for collusion lane
     "loaded": False,
 }
 
@@ -230,6 +233,20 @@ def load_or_generate():
     # AA + DiliSense clients — pick up env-driven creds; fall back to mock when absent.
     state["aa_client"] = AAClient()
     state["dilisense_client"] = DilisenseClient()
+
+    # Synthetic identity lane for collusion detection (variant-independent,
+    # standalone — does NOT touch the active-variant pipeline). Generate on
+    # first boot if absent.
+    try:
+        identity_path = os.path.join(DATA_DIR, "collusion", "identity.json")
+        if os.path.exists(identity_path):
+            with open(identity_path) as f:
+                state["identity_accounts"] = json.load(f)
+        else:
+            state["identity_accounts"] = write_identity_dataset(identity_path)
+    except Exception as e:
+        print(f"[backend] collusion identity lane unavailable: {e}")
+        state["identity_accounts"] = []
 
     # Pre-build tracer auxiliary structures so per-entity flag lookups are O(1)
     # instead of recomputing from scratch on every /api/entities/{id} request.
@@ -360,6 +377,12 @@ def _compute_alerts_with_case_status() -> List[Dict]:
         decorated["assigned_to"] = case.get("assigned_to") if case else None
         decorated["ml_score"] = ml_score
         decorated["incident_id"] = a2i.get(a.get("alert_id"))
+        
+        # PCI DSS Demonstration (Requirement 3: Protect stored cardholder data)
+        # We inject a mock card number but only expose the masked version by default.
+        if decorated.get("severity") in ("CRITICAL", "HIGH", "MEDIUM", "LOW"):
+            decorated["card_number"] = "453271XXXXXX2345"
+            
         # FATF typology + Indian-regulatory refs + graded legal basis (additive).
         decorated = tag_alert(decorated)
         out.append(decorated)
@@ -797,8 +820,17 @@ def get_incident_rca(incident_id: str):
         raise HTTPException(422, "Incident has no resolvable alert")
     return build_rca(
         inc, primary, state["graph"], state["transactions"], state["risk_scores"],
-        edge_ml_scores=state["edge_scores"], **_tracer_caches(),
+        edge_ml_scores=state["edge_scores"], data_dir=DATA_DIR, variant=ACTIVE_VARIANT, **_tracer_caches(),
     )
+# ── Collusion rings (variant-independent synthetic-identity lane) ─────────────
+
+@app.get("/api/collusion/rings")
+def get_collusion_rings():
+    accounts = state.get("identity_accounts") or []
+    min_size = int(state["config"].get("collusion_min_ring_size", 3))
+    rings = detect_collusion_rings(accounts, min_ring_size=min_size)
+    return {"dataset": "synthetic_identity", "rings": rings,
+            "total": len(rings), "n_accounts": len(accounts)}
 
 
 # ── Patterns ───────────────────────────────────────────────────────────────
@@ -1424,6 +1456,9 @@ def list_cases(status: Optional[str] = None):
 def get_case(alert_id: str):
     case = state["cases"].get(alert_id)
     if case:
+        # Mask card numbers for investigators
+        if "card_number" in case:
+            case["card_number"] = "****-****-****-" + str(case["card_number"])[-4:]
         return case
     alert = next((a for a in state["alerts"] if a.get("alert_id") == alert_id), None)
     if not alert:
@@ -1494,6 +1529,34 @@ def add_case_note(alert_id: str, body: dict, role: str = Depends(get_role)):
     # anyway so this can't silently go stale if note semantics change later.
     _invalidate_derived_caches()
     return result
+
+
+@app.post("/api/cases/{alert_id}/reveal-card")
+def reveal_card(
+    alert_id: str, 
+    body: dict = None, 
+    role: str = Depends(get_role),
+    x_user_name: Optional[str] = Header(None, alias="X-User-Name"),
+):
+    """PCI DSS Requirement 7 & 10: Role-based unmasking with tamper-evident audit."""
+    # Restrict Access to Cardholder Data by Business Need to Know (Req 7)
+    if role == "INVESTIGATOR":
+        raise HTTPException(403, "PCI DSS Requirement 7: Supervisor role required to unmask card numbers.")
+    require("audit.verify", role) # Basic check to ensure they are admin/supervisor
+    
+    author = body.get("author", x_user_name or role.lower()) if body else (x_user_name or role.lower())
+    
+    # Track and Monitor all Access to Cardholder Data (Req 10)
+    # Write a secure, tamper-evident audit entry to the SQLite database
+    state["cases"].audit_action(
+        alert_id=alert_id,
+        action="REVEAL_CARD",
+        note="PCI DSS compliance: Unmasked plain text card number accessed by supervisor.",
+        author=author
+    )
+    
+    # The actual unmasked mock card number
+    return {"card_number": "4532718899012345"}
 
 
 @app.get("/api/cases/{alert_id}/verify")

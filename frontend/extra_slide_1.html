@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Open+Sans:wght@400;600;700&display=swap');
+  
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { 
+    font-family: 'Open Sans', sans-serif; 
+    background: #f8f9fa; 
+    color: #1a202c; 
+    width: 1920px; 
+    height: 1080px; 
+    overflow: hidden;
+    position: relative;
+    padding: 180px 100px 100px 100px; /* Leave room for their logos at top */
+  }
+
+  .overline {
+    font-size: 24px;
+    font-weight: 700;
+    color: #d4af37; /* Gold */
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+  }
+
+  h1 {
+    font-family: 'Merriweather', serif;
+    font-size: 64px;
+    color: #102a43; /* Dark Navy */
+    margin-bottom: 40px;
+  }
+
+  .subtitle {
+    font-size: 32px;
+    color: #486581;
+    margin-bottom: 80px;
+  }
+
+  .columns {
+    display: flex;
+    gap: 40px;
+  }
+
+  .col {
+    flex: 1;
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 50px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .icon-circle {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 30px;
+  }
+
+  .c-blue { background: #3182ce; }
+  .c-orange { background: #dd6b20; }
+  .c-green { background: #38a169; }
+
+  .icon-circle svg { width: 50px; height: 50px; fill: white; }
+
+  h2 {
+    font-family: 'Merriweather', serif;
+    font-size: 36px;
+    color: #102a43;
+    margin-bottom: 25px;
+  }
+
+  p {
+    font-size: 26px;
+    line-height: 1.6;
+    color: #334e68;
+    margin-bottom: 20px;
+  }
+
+  .highlight-box {
+    background: #102a43;
+    color: white;
+    padding: 25px 40px;
+    border-radius: 8px;
+    font-size: 24px;
+    margin-top: auto;
+    font-style: italic;
+  }
+
+  /* Abstract background shape to match their theme */
+  .bg-shape {
+    position: absolute;
+    right: -200px;
+    bottom: -200px;
+    width: 1000px;
+    height: 1000px;
+    background: #fdf6e3;
+    border-radius: 30% 70% 70% 30% / 30% 30% 70% 70%;
+    z-index: -1;
+    opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+  <div class="bg-shape"></div>
+  
+  <div class="overline">E N G I N E E R I N G D E P T H · P I L L A R 2</div>
+  <h1>Sub-second velocity over 100k events.</h1>
+  <div class="subtitle">Why we offloaded incremental stream processing to Rust.</div>
+
+  <div class="columns">
+    <div class="col">
+      <div class="icon-circle c-orange">
+        <svg viewBox="0 0 24 24"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
+      </div>
+      <h2>The Python Bottleneck</h2>
+      <p>Catching "velocity bursts" (e.g., 50 micro-deposits in 5 minutes) requires sliding-window analytics over live streams.</p>
+      <p>Doing this in pure Python over a live Kafka feed is CPU-heavy and creates a massive bottleneck under true PSB transaction loads.</p>
+    </div>
+
+    <div class="col">
+      <div class="icon-circle c-blue">
+        <svg viewBox="0 0 24 24"><path d="M12 2L2 7l10 5 10-5-10-5zM2 17l10 5 10-5M2 12l10 5 10-5"/></svg>
+      </div>
+      <h2>The Pathway (Rust) Engine</h2>
+      <p>We offloaded this specific computation to <strong>Pathway</strong>, a Rust-backed incremental streaming engine.</p>
+      <p>This allows us to keep our core logic in Python while leveraging Rust's bare-metal speed for the heavy incremental math.</p>
+      <div class="highlight-box">
+        Result: End-to-end detection latency held under 0.80 ms at scale.
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>

@@ -166,9 +166,78 @@ def rca_narrative(dossier: Dict) -> str:
         f"Recommended fix: {d['remediation']}"
     )
 
+def foresight_gnn(incident, graph, data_dir, variant, max_targets: int = 5) -> Dict:
+    import numpy as np
+    try:
+        from sklearn.metrics.pairwise import cosine_similarity
+    except ImportError:
+        return {"error": "scikit-learn not available"}
+
+    from ensemble_model import extract_gnn_embeddings
+    
+    incident_entities = set(incident.get("entities", []))
+    if not incident_entities:
+        return {"next_targets": [], "exposure": 0.0}
+
+    # Extract GNN Embeddings
+    embeddings, node_idx = extract_gnn_embeddings(graph, data_dir, variant)
+    if embeddings is None or node_idx is None:
+        return {"error": "Could not load GNN embeddings"}
+
+    # Identify fraud vectors
+    fraud_indices = [node_idx[e] for e in incident_entities if e in node_idx]
+    if not fraud_indices:
+        return {"next_targets": [], "exposure": 0.0}
+    
+    fraud_embeddings = embeddings[fraud_indices]
+
+    # Find 1-hop and 2-hop unflagged neighbors
+    neighbors = set()
+    for e in incident_entities:
+        if e in graph:
+            for n1 in graph.successors(e):
+                neighbors.add(n1)
+                for n2 in graph.successors(n1):
+                    neighbors.add(n2)
+            for n1 in graph.predecessors(e):
+                neighbors.add(n1)
+                for n2 in graph.predecessors(n1):
+                    neighbors.add(n2)
+    
+    unflagged_neighbors = [n for n in neighbors if n not in incident_entities and n in node_idx]
+    if not unflagged_neighbors:
+        return {"next_targets": [], "exposure": 0.0}
+
+    unflagged_indices = [node_idx[n] for n in unflagged_neighbors]
+    unflagged_embeddings = embeddings[unflagged_indices]
+
+    # K-NN Latent Space similarity (Max similarity to any known fraudster in the incident)
+    sim_matrix = cosine_similarity(unflagged_embeddings, fraud_embeddings)
+    max_sims = sim_matrix.max(axis=1)
+
+    # Rank targets
+    targets = []
+    exposure = 0.0
+    for i, n in enumerate(unflagged_neighbors):
+        score = float(max_sims[i])
+        if score > 0.8:  # Only highly similar
+            # Calculate exposure (outbound strength)
+            out_str = sum(graph[n][v].get("total_amount", 0) for v in graph.successors(n))
+            targets.append({"entity_id": n, "similarity": round(score, 4), "exposure": out_str})
+
+    targets.sort(key=lambda x: x["similarity"], reverse=True)
+    top_targets = targets[:max_targets]
+    total_exposure = sum(t["exposure"] for t in top_targets)
+
+    return {
+        "next_targets": top_targets,
+        "exposure": round(total_exposure, 2),
+        "method": "GNN Latent Space k-NN"
+    }
+
 
 def build_rca(incident, primary_alert, graph, transactions, risk_scores,
-              *, edge_ml_scores=None, config=None, **tracer_caches) -> Dict:
+              *, edge_ml_scores=None, config=None, data_dir=None, variant=None, **tracer_caches) -> Dict:
     recon = reconstruct(primary_alert, graph, transactions, risk_scores,
                         edge_ml_scores=edge_ml_scores, config=config, **tracer_caches)
     if recon.get("error"):
@@ -181,5 +250,9 @@ def build_rca(incident, primary_alert, graph, transactions, risk_scores,
         "diagnosis": diag,
         "recommendations": recs,
     }
+    if data_dir and variant:
+        dossier["foresight"] = foresight_gnn(incident, graph, data_dir, variant)
+        
     dossier["narrative"] = rca_narrative(dossier)
     return dossier
+

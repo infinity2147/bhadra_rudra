@@ -44,6 +44,7 @@ export function apiUrl(path) {
 }
 
 export const getIncidentRca = (id) => fetchAPI(`/api/incidents/${id}/rca`);
+export const getCollusionRings = () => fetchAPI('/api/collusion/rings');
 
 export async function downloadFromAPI(path, filename) {
   const res = await fetch(`${API}${path}`, { headers: withRoleHeaders() });
