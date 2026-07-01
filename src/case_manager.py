@@ -379,6 +379,25 @@ class CaseStore:
         return self.get(alert_id)
 
     @_synchronized
+    def audit_action(self, alert_id: str, action: str, note: str, author: str = "investigator") -> Dict:
+        case = self.get(alert_id)
+        if not case:
+            raise ValueError(f"No case exists for alert {alert_id}.")
+        now = datetime.now().isoformat()
+        c = self.conn.cursor()
+        c.execute("UPDATE cases SET updated_at = ? WHERE alert_id = ?", (now, alert_id))
+        self._raw_insert_audit({
+            "timestamp": now,
+            "author": author,
+            "action": action,
+            "from_status": case["status"],
+            "to_status": case["status"],
+            "note": note,
+        }, alert_id)
+        self.conn.commit()
+        return self.get(alert_id)
+
+    @_synchronized
     def set_incident(self, alert_id: str, incident_id: Optional[str]) -> None:
         c = self.conn.cursor()
         c.execute("UPDATE cases SET incident_id = ? WHERE alert_id = ?", (incident_id, alert_id))

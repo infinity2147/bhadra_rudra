@@ -35,8 +35,36 @@ export default function RcaReport({ dossier }) {
         </p>
       </section>
 
+      {dossier.foresight && dossier.foresight.next_targets && dossier.foresight.next_targets.length > 0 && (
+        <section className="rounded-lg border border-indigo-200 bg-indigo-50/50 p-4 space-y-1">
+          <div className="flex justify-between items-center mb-1">
+            <h4 className="font-semibold text-indigo-900">3. Who's next (predictive analytics)</h4>
+            <span className="text-xs bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-medium border border-indigo-200">
+              GNN Latent Space k-NN
+            </span>
+          </div>
+          <p className="text-indigo-800 text-sm mb-2 mt-1">
+            Predicted targets based on structural similarity to known fraud cluster:
+          </p>
+          <ul className="space-y-2 mt-2">
+            {dossier.foresight.next_targets.map(t => (
+              <li key={t.entity_id} className="flex justify-between items-center bg-white p-2 rounded border border-indigo-100">
+                <span className="font-mono text-sm text-gray-800">{t.entity_id}</span>
+                <div className="flex items-center space-x-3">
+                  <span className="text-xs text-red-600 font-medium">₹{t.exposure.toLocaleString('en-IN')} exposure</span>
+                  <span className="text-xs bg-red-100 text-red-700 px-2 py-0.5 rounded-md">{(t.similarity * 100).toFixed(1)}% match</span>
+                </div>
+              </li>
+            ))}
+          </ul>
+          <p className="text-xs text-indigo-600 mt-2 italic pt-1 border-t border-indigo-100">
+            Total exposure at risk: ₹{dossier.foresight.exposure.toLocaleString('en-IN')}
+          </p>
+        </section>
+      )}
+
       <section className="rounded-lg border border-gray-200 bg-gray-50 p-4">
-        <h4 className="font-semibold text-gray-800 mb-2">3. What to fix (recommendations)</h4>
+        <h4 className="font-semibold text-gray-800 mb-2">{dossier.foresight ? '4' : '3'}. What to fix (recommendations)</h4>
         <ul className="list-disc ml-5 space-y-1 text-gray-700">
           {(rec?.policy_level || []).map((p) => (
             <li key={p.recommendation}>{p.recommendation}</li>

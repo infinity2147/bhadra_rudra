@@ -73,6 +73,18 @@ minimisation); the filing bank fills them in just before submission.
 
 ---
 
+## PCI DSS Compliance (Data Security)
+
+While RUDRA operates on transaction metadata, we demonstrate readiness for secure environments (such as processing environments touching credit card data) by fulfilling core Payment Card Industry Data Security Standard (PCI DSS) requirements within the application layer:
+
+| Requirement | Implementation in RUDRA | Verification Code |
+|---|---|---|
+| **Req 3: Protect Stored Account Data** | Mock card numbers are injected into the API payload but masked (`453271XXXXXX2345`) before leaving the backend, ensuring plaintext data is never exposed by default. | `backend/main.py::_compute_alerts_with_case_status` |
+| **Req 7: Restrict Access to Cardholder Data** | The `/api/cases/{alert_id}/reveal-card` endpoint enforces Role-Based Access Control (RBAC). Only `SUPERVISOR` or `ADMIN` roles can unmask the card. `INVESTIGATOR` attempts return HTTP 403 Forbidden. | `backend/main.py::reveal_card`, `tests/test_pci_dss.py` |
+| **Req 10: Log and Monitor All Access** | Every successful card unmasking action writes a secure, tamper-evident `REVEAL_CARD` event to the `CaseStore` hash-chain audit log. | `src/case_manager.py::audit_action` |
+
+---
+
 ## "Backed by running code" — the contrast that matters
 
 Several systems in this space *describe* these capabilities; RUDRA ships them.
