@@ -22,6 +22,8 @@ class GraphAttentionEmbedding(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, msg_dim: int, time_enc):
         super().__init__()
         self.time_enc = time_enc
+        if out_channels % 2 != 0:
+            raise ValueError(f"embedding_dim must be even for heads=2; got {out_channels}")
         edge_dim = msg_dim + time_enc.out_channels
         self.conv = TransformerConv(in_channels, out_channels // 2, heads=2,
                                     dropout=0.1, edge_dim=edge_dim)
@@ -54,6 +56,8 @@ def build_tgn(num_nodes: int, msg_dim: int, memory_dim: int = 100,
         message_module=IdentityMessage(msg_dim, memory_dim, time_dim),
         aggregator_module=LastAggregator(),
     )
+    # gnn.time_enc is deliberately the SAME object as memory.time_enc — shared
+    # weights, single gradient path. Save/load both modules together.
     gnn = GraphAttentionEmbedding(memory_dim, embedding_dim, msg_dim, memory.time_enc)
     decoder = FraudDecoder(embedding_dim)
     return memory, gnn, decoder

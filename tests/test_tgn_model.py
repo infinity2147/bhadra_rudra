@@ -42,3 +42,22 @@ def test_build_tgn_and_decoder_shape():
         print("OK")
     """))
     assert "OK" in r.stdout
+
+
+def test_graph_attention_embedding_forward_runs():
+    r = _ok(_run("""
+        import torch
+        from tgn_model import build_tgn
+        memory, gnn, dec = build_tgn(num_nodes=20, msg_dim=5,
+                                     memory_dim=16, time_dim=16, embedding_dim=16)
+        N, E = 6, 10
+        x = torch.randn(N, 16)
+        last_update = torch.zeros(N, dtype=torch.long)
+        edge_index = torch.randint(0, N, (2, E))
+        t = torch.zeros(E, dtype=torch.long)
+        msg = torch.randn(E, 5)
+        out = gnn(x, last_update, edge_index, t, msg)
+        assert out.shape == (N, 16), out.shape
+        print("OK")
+    """))
+    assert "OK" in r.stdout
