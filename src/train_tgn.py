@@ -108,10 +108,14 @@ def train_tgn(
     # assoc maps global node id → local index within the current batch's n_id.
     assoc = torch.empty(num_nodes, dtype=torch.long, device=device)
 
-    opt = torch.optim.Adam(
-        list(memory.parameters()) + list(gnn.parameters()) + list(decoder.parameters()),
-        lr=1e-4,
-    )
+    # Deduplicate parameters by object identity: memory.time_enc is shared with gnn.time_enc,
+    # so naive concatenation would include those params twice, causing Adam to double-step them.
+    seen, params = set(), []
+    for p in list(memory.parameters()) + list(gnn.parameters()) + list(decoder.parameters()):
+        if id(p) not in seen:
+            seen.add(id(p))
+            params.append(p)
+    opt = torch.optim.Adam(params, lr=1e-4)
 
     # Class-imbalance: weight positive (fraud) examples by neg/pos ratio on train.
     n_pos = float((train_data.y == 1).sum())
