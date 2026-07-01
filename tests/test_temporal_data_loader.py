@@ -60,7 +60,7 @@ def test_split_is_chronological_and_shaped():
         assert int(tr.t.max()) <= int(va.t.min()) <= int(te.t.min())
         # labels are 0/1 floats; msg present
         assert set(d.y.unique().tolist()) <= {0.0, 1.0}
-        assert b["msg_dim"] == d.msg.size(-1) and b["msg_dim"] >= 2
+        assert b["msg_dim"] == 10 and d.msg.size(-1) == 10
         assert b["num_nodes"] >= 1
         print("OK")
     """))

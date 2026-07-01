@@ -63,9 +63,11 @@ def load_temporal_data(csv_path: str) -> Dict:
     # partitions are non-empty.
     n = len(data.t)
     if len(val.t) == 0 or len(test.t) == 0:
+        import warnings
+        warnings.warn("temporal_data_loader: quantile split produced an empty partition; using index-based chronological fallback.")
         i_val = max(1, int(n * 0.70))
         i_test = max(i_val + 1, int(n * 0.85))
-        i_test = min(i_test, n - 1)
+        i_test = max(i_val + 1, min(i_test, n - 1))
         train, val, test = data[:i_val], data[i_val:i_test], data[i_test:]
 
     id_to_name = {}
