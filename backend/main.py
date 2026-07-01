@@ -53,6 +53,7 @@ from ml_model import (
     list_variants as ml_list_variants,
 )
 from gnn_model import load_gnn_metrics, load_gnn_edge_scores
+from train_tgn import load_tgn_metrics, load_tgn_predictions
 from shap_explainer import explain_alert as shap_explain_alert, explain_edge
 from fund_tracer import trace_journey, trace_for_alert
 from rca_engine import build_rca
@@ -1057,7 +1058,8 @@ def get_ml_metrics(variant: str = None):
         return {"trained": False, "variant": variant,
                 "message": f"Model variant '{variant}' not trained."}
     gnn_m = load_gnn_metrics(DATA_DIR, variant=variant)
-    return {"trained": True, **m, "gnn": gnn_m or None}
+    tgn_m = load_tgn_metrics(DATA_DIR, variant=variant)
+    return {"trained": True, **m, "gnn": gnn_m or None, "tgn": tgn_m or None}
 
 
 @app.get("/api/ml/ensemble")
@@ -1093,6 +1095,16 @@ def get_ensemble_edge_scores(variant: str = "ibm_aml", limit: int = 100):
         return {"trained": False, "variant": variant}
     items = [{"edge": k, **v} for k, v in list(scores.items())[:limit]]
     return {"trained": True, "variant": variant, "edges": items, "total": len(scores)}
+
+
+@app.get("/api/tgn/predictions")
+def get_tgn_predictions(variant: str = None):
+    """Return TGN predicted-fraud list (JSON only — never loads .pt weights)."""
+    v = variant or ACTIVE_VARIANT
+    data = load_tgn_predictions(DATA_DIR, variant=v)
+    preds = data.get("predictions", [])
+    trained = bool(load_tgn_metrics(DATA_DIR, variant=v))  # metrics.json is the trained sentinel
+    return {"trained": trained, "variant": v, "predictions": preds}
 
 
 @app.get("/api/ml/ensemble/edge/{u}/{v}")

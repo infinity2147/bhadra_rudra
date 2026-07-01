@@ -203,6 +203,18 @@ def main(dataset: str = None, force_retrain_ml: bool = False):
         except Exception as e:
             print(f"  SAGE failed: {e}")
 
+    # ── Temporal GNN (TGN) — optional, slowest trainer; skip if PyG absent ──
+    try:
+        from train_tgn import train_tgn
+        print(f"\n[+] Training TGN (temporal fraud model, variant={dataset})...")
+        tgn_m = train_tgn(data_dir, variant=dataset, epochs=30)
+        print(f"  TGN AUPRC={tgn_m.get('auprc')}  F2={tgn_m.get('f2')}  "
+              f"thr={tgn_m.get('threshold')}")
+    except ImportError:
+        print("  TGN skipped (torch/torch_geometric not installed).")
+    except Exception as e:
+        print(f"  TGN training failed (non-fatal): {e}")
+
     # Stacked ensemble — only worth running when both XGB and SAGE trained.
     if dataset in ("ibm_aml", "paysim"):
         ens_metrics_path = os.path.join(data_dir, "ml", dataset, "ensemble", "metrics.json")

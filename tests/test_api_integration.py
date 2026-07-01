@@ -361,6 +361,19 @@ def test_incident_rca_returns_dossier(client):
 def test_incident_rca_404_for_unknown(client):
     r = client.get("/api/incidents/NOPE-999/rca", headers=INV)
     assert r.status_code == 404, r.text
+
+
+def test_tgn_endpoints_shape(client):
+    # metrics endpoint always responds; tgn key present (may be None if untrained)
+    r = client.get("/api/ml/metrics", headers=INV)
+    assert r.status_code == 200, r.text
+    assert "tgn" in r.json()
+    # predictions endpoint returns a well-formed payload either way
+    p = client.get("/api/tgn/predictions", headers=INV)
+    assert p.status_code == 200, p.text
+    body = p.json()
+    assert "trained" in body and "predictions" in body
+    assert "variant" in body
 # ── Collusion rings (synthetic identity lane, variant-independent) ────────────
 
 def test_collusion_rings_endpoint(client):

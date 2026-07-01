@@ -46,6 +46,9 @@ export function apiUrl(path) {
 export const getIncidentRca = (id) => fetchAPI(`/api/incidents/${id}/rca`);
 export const getCollusionRings = () => fetchAPI('/api/collusion/rings');
 
+export const getTgnPredictions = (variant) =>
+  fetchAPI(`/api/tgn/predictions${variant ? `?variant=${encodeURIComponent(variant)}` : ''}`);
+
 export async function downloadFromAPI(path, filename) {
   const res = await fetch(`${API}${path}`, { headers: withRoleHeaders() });
   if (!res.ok) throw new Error(`Download failed: ${res.status}`);

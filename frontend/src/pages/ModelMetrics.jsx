@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
 } from 'recharts';
-import { fetchAPI, postAPI } from '../api';
+import { fetchAPI, postAPI, getTgnPredictions } from '../api';
 
 function MetricCard({ label, value, hint, tone = 'indigo' }) {
   const tones = {
@@ -27,6 +27,8 @@ export default function ModelMetrics() {
   const [error, setError] = useState(null);
   const [variants, setVariants] = useState([]);
   const [variant, setVariant] = useState('ibm_aml');
+  const [tgnPredictions, setTgnPredictions] = useState(null);
+  const [tgnLoading, setTgnLoading] = useState(false);
 
   const load = useCallback((v) => {
     setLoading(true);
@@ -46,6 +48,24 @@ export default function ModelMetrics() {
 
   useEffect(() => { (async () => { await load(variant); })(); }, [load, variant]);
 
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (cancelled) return;
+      setTgnLoading(true);
+      setTgnPredictions(null);
+      try {
+        const d = await getTgnPredictions(variant);
+        if (!cancelled) setTgnPredictions(d);
+      } catch {
+        if (!cancelled) setTgnPredictions(null);
+      } finally {
+        if (!cancelled) setTgnLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [variant]);
+
   async function retrain() {
     setRetraining(true);
     try {
@@ -54,6 +74,9 @@ export default function ModelMetrics() {
       // Refresh the variants list in case a new variant was created
       const vs = await fetchAPI('/api/ml/variants');
       setVariants(vs.variants || []);
+      // Refresh TGN predictions after retrain
+      const tgnData = await getTgnPredictions(variant);
+      setTgnPredictions(tgnData);
     } catch (e) {
       setError(e.message);
     } finally {
@@ -262,6 +285,96 @@ export default function ModelMetrics() {
           </div>
         </div>
       )}
+
+      {/* TGN metrics card */}
+      <div className="bg-white border border-gray-200 rounded-xl p-5">
+        <h2 className="text-base font-semibold text-gray-900">Temporal GNN (TGN)</h2>
+        <p className="text-xs text-gray-500 mt-0.5">
+          Temporal GNN (Rossi 2020) — predicts fraud from the graph&apos;s time-evolution.
+        </p>
+        {data.tgn ? (
+          <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-3">
+            <div className="rounded-lg bg-indigo-50 border border-indigo-200 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-indigo-700 opacity-70">AUPRC</p>
+              <p className="text-2xl font-bold tabular-nums text-indigo-900 mt-1">
+                {data.tgn.auprc?.toFixed(3) ?? '—'}
+              </p>
+            </div>
+            <div className="rounded-lg bg-emerald-50 border border-emerald-200 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-emerald-700 opacity-70">F2</p>
+              <p className="text-2xl font-bold tabular-nums text-emerald-900 mt-1">
+                {data.tgn.f2?.toFixed(3) ?? '—'}
+              </p>
+            </div>
+            <div className="rounded-lg bg-amber-50 border border-amber-200 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-amber-700 opacity-70">Precision</p>
+              <p className="text-2xl font-bold tabular-nums text-amber-900 mt-1">
+                {data.tgn.precision?.toFixed(3) ?? '—'}
+              </p>
+            </div>
+            <div className="rounded-lg bg-rose-50 border border-rose-200 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-rose-700 opacity-70">Recall</p>
+              <p className="text-2xl font-bold tabular-nums text-rose-900 mt-1">
+                {data.tgn.recall?.toFixed(3) ?? '—'}
+              </p>
+            </div>
+            <div className="rounded-lg bg-gray-50 border border-gray-200 p-3">
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-gray-600 opacity-70">Threshold</p>
+              <p className="text-2xl font-bold tabular-nums text-gray-900 mt-1">
+                {data.tgn.threshold?.toFixed(3) ?? '—'}
+              </p>
+            </div>
+          </div>
+        ) : (
+          <p className="mt-3 text-sm text-gray-400">TGN not trained for this variant.</p>
+        )}
+      </div>
+
+      {/* Predicted future fraud panel */}
+      <div className="bg-white border border-gray-200 rounded-xl p-5">
+        <h2 className="text-base font-semibold text-gray-900">Predicted Future Fraud</h2>
+        <p className="text-xs text-gray-500 mt-0.5">Top TGN predictions for unseen edges — edges the model flags as high-risk.</p>
+        {tgnLoading ? (
+          <p className="mt-3 text-sm text-gray-400">Loading predictions...</p>
+        ) : !tgnPredictions?.trained ? (
+          <p className="mt-3 text-sm text-gray-400">TGN not trained for this variant — no predictions available.</p>
+        ) : tgnPredictions.predictions?.length === 0 ? (
+          <p className="mt-3 text-sm text-gray-400">No predictions returned.</p>
+        ) : (
+          <table className="mt-3 w-full text-sm">
+            <thead>
+              <tr className="text-xs text-gray-500 border-b border-gray-200">
+                <th className="text-left pb-2 font-medium">Source</th>
+                <th className="text-left pb-2 font-medium">Destination</th>
+                <th className="text-right pb-2 font-medium">Probability</th>
+                <th className="text-center pb-2 font-medium">Fraud?</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {tgnPredictions.predictions.map((p) => (
+                <tr
+                  key={`${p.src_id}->${p.dst_id}`}
+                  className="hover:bg-gray-50"
+                >
+                  <td className="py-2 font-medium text-gray-800 truncate max-w-[160px]">{p.src_name}</td>
+                  <td className="py-2 text-gray-700 truncate max-w-[160px]">{p.dst_name}</td>
+                  <td className="py-2 text-right tabular-nums font-medium">
+                    <span className={p.prob >= 0.7 ? 'text-rose-700' : p.prob >= 0.4 ? 'text-amber-700' : 'text-gray-600'}>
+                      {(p.prob * 100).toFixed(1)}%
+                    </span>
+                  </td>
+                  <td className="py-2 text-center">
+                    {p.is_fraud
+                      ? <span className="text-rose-600 font-bold">✓</span>
+                      : <span className="text-gray-400">✗</span>
+                    }
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
 
       <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 text-sm text-blue-900">
         <p className="font-semibold">A note on these numbers</p>
