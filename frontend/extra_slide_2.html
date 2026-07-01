@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Merriweather:wght@700&family=Open+Sans:wght@400;600;700&display=swap');
+  
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { 
+    font-family: 'Open Sans', sans-serif; 
+    background: #f8f9fa; 
+    color: #1a202c; 
+    width: 1920px; 
+    height: 1080px; 
+    overflow: hidden;
+    position: relative;
+    padding: 180px 100px 100px 100px;
+  }
+
+  .overline {
+    font-size: 24px;
+    font-weight: 700;
+    color: #d4af37; /* Gold */
+    letter-spacing: 6px;
+    text-transform: uppercase;
+    margin-bottom: 20px;
+  }
+
+  h1 {
+    font-family: 'Merriweather', serif;
+    font-size: 64px;
+    color: #102a43; /* Dark Navy */
+    margin-bottom: 40px;
+  }
+
+  .subtitle {
+    font-size: 32px;
+    color: #486581;
+    margin-bottom: 80px;
+  }
+
+  .columns {
+    display: flex;
+    gap: 40px;
+  }
+
+  .col {
+    flex: 1;
+    background: white;
+    border: 1px solid #e2e8f0;
+    border-radius: 12px;
+    padding: 50px;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    display: flex;
+    flex-direction: column;
+  }
+
+  .icon-circle {
+    width: 100px;
+    height: 100px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-bottom: 30px;
+  }
+
+  .c-red { background: #e53e3e; }
+  .c-green { background: #38a169; }
+
+  .icon-circle svg { width: 50px; height: 50px; fill: white; }
+
+  h2 {
+    font-family: 'Merriweather', serif;
+    font-size: 36px;
+    color: #102a43;
+    margin-bottom: 25px;
+  }
+
+  p {
+    font-size: 26px;
+    line-height: 1.6;
+    color: #334e68;
+    margin-bottom: 20px;
+  }
+
+  .highlight-box {
+    background: #102a43;
+    color: white;
+    padding: 25px 40px;
+    border-radius: 8px;
+    font-size: 24px;
+    margin-top: auto;
+    font-style: italic;
+  }
+
+  .bg-shape {
+    position: absolute;
+    right: -200px;
+    bottom: -200px;
+    width: 1000px;
+    height: 1000px;
+    background: #fdf6e3;
+    border-radius: 30% 70% 70% 30% / 30% 30% 70% 70%;
+    z-index: -1;
+    opacity: 0.6;
+  }
+</style>
+</head>
+<body>
+  <div class="bg-shape"></div>
+  
+  <div class="overline">C O M P L I A N C E & I N N O V A T I O N · P I L L A R 2 & 3</div>
+  <h1>Zero LLM hallucinations in compliance.</h1>
+  <div class="subtitle">Graceful degradation and deterministic NLG templates.</div>
+
+  <div class="columns">
+    <div class="col">
+      <div class="icon-circle c-red">
+        <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z"/></svg>
+      </div>
+      <h2>The LLM Hallucination Risk</h2>
+      <p>Using public LLMs to write Suspicious Activity Reports (SARs) risks exposing PII (Data Privacy breach) and hallucinating facts (Legal liability).</p>
+      <p>Banks cannot afford "black box" compliance documents that invent details about customers.</p>
+    </div>
+
+    <div class="col">
+      <div class="icon-circle c-green">
+        <svg viewBox="0 0 24 24"><path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41z"/></svg>
+      </div>
+      <h2>Deterministic XAI Generation</h2>
+      <p>We engineered a <strong>Deterministic NLG Template Engine</strong>. It maps exact SHAP mathematical outputs directly to English sentences.</p>
+      <p>Additionally, if the API for our conversational AI Copilot fails, the system gracefully degrades to a local "Quick Commands" intent router.</p>
+      <div class="highlight-box">
+        Result: 100% factual accuracy, zero PII leakage, zero downtime.
+      </div>
+    </div>
+  </div>
+
+</body>
+</html>
