@@ -1071,7 +1071,8 @@ def get_tgn_predictions(variant: str = None):
     v = variant or ACTIVE_VARIANT
     data = load_tgn_predictions(DATA_DIR, variant=v)
     preds = data.get("predictions", [])
-    return {"trained": bool(preds), "variant": v, "predictions": preds}
+    trained = bool(load_tgn_metrics(DATA_DIR, variant=v))  # metrics.json is the trained sentinel
+    return {"trained": trained, "variant": v, "predictions": preds}
 
 
 @app.get("/api/ml/ensemble/edge/{u}/{v}")

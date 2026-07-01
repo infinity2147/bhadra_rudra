@@ -373,3 +373,4 @@ def test_tgn_endpoints_shape(client):
     assert p.status_code == 200, p.text
     body = p.json()
     assert "trained" in body and "predictions" in body
+    assert "variant" in body
