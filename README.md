@@ -3,7 +3,7 @@
 > Real-time fund-flow intelligence for Indian public sector banks.
 > Built by **Team Bhadra** for the **PSBs Hackathon Series 2026**, Problem Statement 3 Fund Flow Tracking.
 
-[![Tests](https://img.shields.io/badge/tests-136%20passing-brightgreen)](#how-to-run-locally) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#libraries-and-dependencies) [![Node](https://img.shields.io/badge/node-20%2B-blue)](#libraries-and-dependencies) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
+[![Tests](https://img.shields.io/badge/tests-202%20passing-brightgreen)](#how-to-run-locally) [![Python](https://img.shields.io/badge/python-3.10%2B-blue)](#libraries-and-dependencies) [![Node](https://img.shields.io/badge/node-20%2B-blue)](#libraries-and-dependencies) [![License](https://img.shields.io/badge/license-MIT-lightgrey)](#license)
 
 The long-form technical architecture, including the labelled component diagram, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). The two-page problem/solution brief and architecture brief are submitted separately as PDFs (see the submission dashboard).
 
@@ -14,6 +14,8 @@ The long-form technical architecture, including the labelled component diagram, 
 Indian public sector banks detect financial-crime patterns the day after they happen, by which point layered funds have already left the bank. The Reserve Bank's 2023 Framework for Real-time Fraud Risk Monitoring mandates sub-second detection, and the December 2024 Master Direction on Fraud Risk Management makes near-real-time monitoring, tamper-evident audit logs, and Digital Personal Data Protection Act compliance a hard requirement by March 2026. Most public sector banks still rely on nightly batch jobs, manual Suspicious Transaction Report drafting that takes around six hours per case, and vendor systems whose machine-learning scores cannot be defended before the Financial Intelligence Unit because the Prevention of Money Laundering Act Rules require the reasoning to be on record. The result: thousands of low-quality reports filed every year, investigators burning out on alert deduplication, and fraud detection that catches only single-digit percentages of actual losses.
 
 **RUDRA replaces this with a real-time fund-flow intelligence platform that an investigator opens like email.** It scores every transaction in well under a millisecond, automatically clusters related alerts into a single investigable case, explains every decision with feature attributions, and generates the complete Financial Intelligence Unit filing package in one click. Every action is recorded in a cryptographically-chained audit log that Reserve Bank inspection can verify on demand.
+
+Beyond real-time detection, RUDRA also **explains, anticipates, and links**: a per-incident **Forensic RCA dossier** (how a fraud moved, the control gap that let it through, and what to fix); a **Temporal Graph Network** that predicts which accounts are likely to offend next from the graph's time-evolution; and a **Collusion Rings** view that surfaces accounts secretly linked by a shared device or KYC document even when no money flows between them.
 
 The full technical architecture, with the labelled component diagram and per-subsystem rationale, is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
@@ -204,7 +206,7 @@ save_data(df, fraud_cases, 'data/ibm_aml', entities=gen.entities)
 python src/run_pipeline.py --dataset ibm_aml
 ```
 
-The synthetic dataset produces an artificially high F1 of approximately 0.99 because the embedded fraud patterns are clean by construction. On the honest IBM AML benchmark the XGBoost classifier reaches **AUC 0.927 / Average-Precision 0.661** — the ranking is strong. We then deliberately operate at the **recall-favouring F2 threshold** rather than the F1-optimal point, because a missed launderer costs far more than an analyst review: that gives **recall 0.672, precision 0.413** (at the F1-optimal threshold the same model scores F1 ≈ 0.62). The GraphSAGE graph neural network reaches AUPRC 0.623 and the stacked ensemble 0.661 with recall 0.703. Most importantly, the **ML-led tiered alerting** lifts end-to-end fraud-entity recall from ~17% (rule heuristics alone) to ~67%, which is what the platform is actually built to deliver.
+The synthetic dataset produces an artificially high F1 of approximately 0.99 because the embedded fraud patterns are clean by construction. On the honest IBM AML benchmark the XGBoost classifier reaches **AUC 0.927 / Average-Precision 0.661** — the ranking is strong. We then deliberately operate at the **recall-favouring F2 threshold** rather than the F1-optimal point, because a missed launderer costs far more than an analyst review: that gives **recall 0.672, precision 0.413** (at the F1-optimal threshold the same model scores F1 ≈ 0.62). The GraphSAGE graph neural network reaches AUPRC 0.623 and the stacked ensemble 0.661 with recall 0.703. A **Temporal Graph Network** (TGN, continuous-time), evaluated on a **strict chronological train/test split with no look-ahead leakage**, reaches AUPRC 0.615 — competitive with GraphSAGE and reported side-by-side; we do not claim it beats the static models, its value is the forward-looking "which account offends next" signal they structurally cannot provide. Most importantly, the **ML-led tiered alerting** lifts end-to-end fraud-entity recall from ~17% (rule heuristics alone) to ~67%, which is what the platform is actually built to deliver.
 
 ---
 
@@ -220,6 +222,8 @@ The synthetic dataset produces an artificially high F1 of approximately 0.99 bec
 - **Our numbers are honest, not state-of-the-art.** At the F1-optimal threshold our XGBoost classifier scores F1 ≈ 0.62 — the strong-baseline number this benchmark records for single-CPU training, the most operationally realistic baseline a public sector bank can deploy on its own hardware. The published leader (FraudGT plus BDH ensemble) reports F1 = 0.72 and needs multi-GPU training over several days. We deliberately run at the recall-favouring F2 operating point instead (recall 0.67), so the reported F1 is lower by design while recall — the metric that matters for catching laundering — is materially higher.
 - **At β=2 the ML auto-alerts are high-volume.** Scoring every edge above the recall-favouring threshold produces roughly 9,000 alerts / 5,000 incidents on the 100k IBM AML sample (heavy but tier-sorted so Tier 1 floats to the top). The alert threshold is a single configurable knob; raise it to trade recall for fewer, higher-precision alerts.
 - **Suspicious Activity Report PDFs are generated on demand.** Earlier versions pre-rendered all PDFs at pipeline time, which slowed setup considerably. The current pipeline writes a PDF only when an investigator clicks the Download FIU Package button, keeping startup fast and storage low.
+- **The Temporal Graph Network is optional and served from persisted artefacts.** Like GraphSAGE, the TGN needs PyTorch and PyTorch Geometric and trains after XGBoost; if they are absent the pipeline skips it cleanly. The backend serves its metrics and predicted-fraud rankings from JSON — it never reloads the model weights at request time, so live interactive A→B scoring is intentionally out of scope for this release.
+- **Collusion Rings runs on a synthetic identity dataset.** The IBM AML benchmark has no device, IP, or KYC-document fields, so the shared-identifier detector operates on a generated identity dataset (auto-created at startup) and is clearly labelled a synthetic-identity demo in both the API and the UI. The detection logic is real graph analysis; only the identifiers are synthetic — nothing is fabricated onto the real transaction data, and the IBM AML pipeline is left untouched.
 
 ---
 
@@ -227,14 +231,14 @@ The synthetic dataset produces an artificially high F1 of approximately 0.99 bec
 
 ```
 bhadra_rudra/
-├── backend/                FastAPI backend, 51 endpoints
+├── backend/                FastAPI backend, 62 endpoints
 │   └── main.py             ASGI entry point
 ├── frontend/               React 19 frontend (Vite + Tailwind 4)
 │   └── src/
 │       ├── api.js          Backend client with X-User-Role header
 │       ├── App.jsx         Routes and sidebar
 │       ├── components/     Reusable UI components
-│       └── pages/          One file per route (14 pages)
+│       └── pages/          One file per route (18 pages)
 ├── src/                    Python engine, importable from backend
 │   ├── data_generator.py        Synthetic dataset generator
 │   ├── real_data_loader.py      IBM AML and PaySim loaders
@@ -242,16 +246,25 @@ bhadra_rudra/
 │   ├── fraud_detector.py        Core four detectors
 │   ├── advanced_detectors.py    Dormant and profile-mismatch detectors
 │   ├── fund_tracer.py           Journey tracing engine
+│   ├── rca_engine.py            Per-incident Forensic RCA dossier (reconstruct → root cause → fix)
+│   ├── fatf_typology.py         FATF typology + control-gap/remediation tagging
 │   ├── ml_model.py              XGBoost training, inference, F2 threshold helper
 │   ├── gnn_model.py             GraphSAGE (edge-feature fusion + AUPRC selection, seeded)
 │   ├── ensemble_model.py        Stacked ensemble (XGBoost + GraphSAGE + GAT + LR meta)
 │   ├── ml_alert_generator.py    ML-driven alert generation + rule/ML confidence tiering
+│   ├── temporal_data_loader.py  Chronological TemporalData builder for the TGN (no leakage)
+│   ├── tgn_model.py             Temporal Graph Network — memory + attention + fraud decoder
+│   ├── train_tgn.py             TGN training loop (predict-then-update, val-AUPRC, F2)
 │   ├── risk_score_learner.py    Logistic-regression risk weights
+│   ├── taint_store.py           Persistent decaying taint memory (compounds across runs)
+│   ├── recurrence.py            Temporal recurrence escalation (triage axis)
 │   ├── shap_explainer.py        SHAP TreeExplainer wrapper
 │   ├── sar_generator.py         Suspicious Activity Report text and PDF
 │   ├── fiu_package.py           One-click FIU evidence zip builder
 │   ├── case_manager.py          SQLite case store with SHA-256 hash chain
 │   ├── incident_clustering.py   Union-find on entity overlap
+│   ├── collusion_detector.py    Shared-identifier collusion rings (device/IP/KYC, transitive)
+│   ├── identity_generator.py    Seeded synthetic identity dataset for the collusion lane
 │   ├── live_scoring.py          Sub-millisecond per-transaction scoring
 │   ├── config_store.py          Detector and tracer threshold persistence
 │   ├── rbac.py                  Role-based access control matrix
@@ -260,7 +273,7 @@ bhadra_rudra/
 │   ├── run_pipeline.py          End-to-end pipeline runner
 │   ├── integrations/            Sahamati AA and DiliSense KYC adapters
 │   └── streaming/               Kafka producer, consumer, and ingestor
-├── tests/                   Pytest suite, 136 tests
+├── tests/                   Pytest suite, 202 tests
 ├── docs/
 │   └── ARCHITECTURE.md           Long-form technical architecture + diagram
 ├── data/                    Generated artefacts (gitignored, regenerated by the pipeline)
