@@ -82,7 +82,7 @@
 
 ### 2.2 Backend (FastAPI)
 
-- Single ASGI app (`backend/main.py`) with 51 endpoints.
+- Single ASGI app (`backend/main.py`) with 62 endpoints.
 - State loaded once at startup for the active dataset (`RUDRA_DATASET`, default `ibm_aml`): transactions + graph + alerts + incidents + case store + config store + ML bundle. The backend refuses to start if the variant's artefacts are missing, printing the exact regenerate command — it never silently serves stale or fake data.
 - `Depends(get_role)` extracts the role header; `require(action, role)` raises HTTP 403 on disallowed actions.
 - CORS open in dev; production would tighten to the bank's domain.
@@ -106,6 +106,7 @@ Every detector reads its thresholds from `ConfigStore`; nothing is hardcoded exc
   - A transit-ratio / velocity-burst feature set was trialled and **reverted** — it gave no AUPRC gain on the held-out set (0.661 → 0.662; a clean test since trees are scale-invariant) because the signals are too sparse on real data. Documented so it isn't re-attempted blind.
 - **GraphSAGE GNN** is a full co-detector, not just a structural baseline. 3 SAGEConv layers (3-hop receptive field) + max aggregation (resists neighbour-dilution camouflage), seeded for reproducibility, with two changes that lifted its AUPRC from ~0.13 to **0.62**: (a) the edge head **fuses the per-edge transaction features** alongside the two endpoint embeddings — node embeddings alone were blind to amount/rail/temporal signal; (b) early-stopping / model selection on **validation AUPRC** rather than threshold-dependent F1.
 - **Stacked ensemble** = XGBoost + GraphSAGE + GAT base models with a logistic-regression meta-learner trained on out-of-fold predictions. AUPRC 0.661, recall 0.703; the meta-learner now genuinely weights all three bases.
+- **Temporal Graph Network (TGN)** adds the axis the static models lack — the *time-evolution* of each account. Per Rossi et al. (2020): a GRU per-node **memory** updated by every transaction, a temporal-attention embedding (`TransformerConv` over recent neighbours), and a single-logit **fraud** decoder. It is supervised on `is_fraud` (not link-existence), trained/evaluated on a **strict chronological split** (train on the past, test on the future — no look-ahead leakage), selected on val AUPRC at the shared F2 operating point. On IBM AML it reaches **AUPRC 0.615**, competitive with GraphSAGE and reported side-by-side — no claim it beats the static models; its value is the forward-looking "which account offends next" signal. Optional (needs torch/PyG), trained after XGBoost, served from persisted JSON (weights never reloaded at runtime).
 - **IEEE-CIS tabular XGBoost** is a separate baseline trained on the public Kaggle dataset the evaluators suggested. ~400 anonymised features, no graph structure. Surfaced under "ML → Baselines" tab. Honest because IEEE-CIS is credit-card fraud, not fund flow.
 - **SHAP TreeExplainer** computes per-edge attributions on the XGBoost model. Cached background sample stashed in the model pickle so the explainer is cheap to instantiate at request time.
 
@@ -119,6 +120,14 @@ The ML model is the **primary detector**, not a decoration. Every edge it scores
 - **Suppressed** — noisy rule-only alerts (smurfing / profile-mismatch / shell-funnel firing without ML agreement), which alone are near-noise.
 
 Why this and not pure rules: on the IBM AML benchmark ~84% of laundering is structureless single transfers (degree ≤ 2, not in any cycle/chain), so graph-pattern rules have a hard recall ceiling (~17%). The ML edge classifier catches ~67%. Fusing the two lifts end-to-end fraud-entity recall from ~17% to ~67% while every alert stays explainable: SHAP attributions for ML alerts (served lazily by `/api/alerts/{id}/explain`), typology narratives for rule alerts.
+
+### 2.4b Post-detection: explain, anticipate, link
+
+Three lanes sit *on top of* detection — they change no recall/precision and add no alerts:
+
+- **Forensic RCA dossier** (`rca_engine.py`, `GET /api/incidents/{id}/rca`). For a clustered incident it reconstructs the fund journey (wrapping `fund_tracer`), diagnoses the **root-cause control gap** — either from the matched FATF typology or, for the ~97% of incidents that are `ML-Detected Anomaly` (no rule typology), **inferred** from behavioural signals (cycle → layering; shell + fan-in → funnel; dormant reactivation; sub-threshold structuring) — and emits **prescriptive recommendations** plus a plain-language narrative. A pure, read-only layer; signals are computed from the uncapped transaction set.
+- **Prediction** — the TGN (§2.4) is the forward-looking lane: it ranks which accounts are likely to transact fraudulently next, surfaced as a watchlist on the Model Metrics page.
+- **Collusion Rings** (`collusion_detector.py`, `GET /api/collusion/rings`). Union-find over accounts sharing a `device_id` / `ip` / `kyc_doc_hash` (transitive across identifier types) — it catches mule rings that never transact with each other, which the money-flow graph is structurally blind to. Because IBM AML has none of those identity fields, this runs on a **standalone synthetic identity dataset**, clearly labelled a synthetic-identity demo in API and UI; the detection logic is real, only the identifiers are synthetic, and the IBM AML pipeline is untouched. Missing identifier columns → zero rings (tested no-op).
 
 ### 2.5 Workflow + persistence
 
@@ -213,6 +222,8 @@ Two numbers matter, and they are different things:
 - Streaming replays the loaded dataset onto the ingest bus (Kafka when a broker is reachable, in-process `asyncio.Queue` otherwise) — there is no live bank feed in the demo, but the transport, scoring, and ring buffer are the real production path. A production deployment swaps the replay source for the bank's live transaction bus + Pathway as outlined in the PoA.
 - Account Aggregator + DiliSense are mocks with realistic shapes. Production calls Sahamati-licensed AAs and the DiliSense API directly.
 - Single-user mode in the demo; RBAC is via header switcher, not real auth.
+- The **TGN** is optional (needs torch/PyG) and served from persisted artefacts — no live A→B scoring this release; its metrics are reported side-by-side with the static models, not claimed to beat them (AUPRC ~0.615, competitive with GraphSAGE).
+- **Collusion Rings** runs on a synthetic identity dataset because IBM AML has no device/IP/KYC fields — clearly labelled a synthetic-identity demo; the detection logic is real graph analysis, only the identifiers are synthetic, and the IBM AML pipeline is untouched.
 
 ---
 
@@ -223,6 +234,7 @@ Two numbers matter, and they are different things:
 | **NetworkX** over Neo4j | Pure Python, no daemon, sub-millisecond queries on a 1,800-edge graph. Migrating to Neo4j is a search-and-replace job if scale demands it. |
 | **XGBoost** as primary detector | Industry-standard tabular fraud-detection model. Fast inference (<1 ms per edge), no GPU needed, exact SHAP explanations via TreeExplainer. Generates first-class alerts at the F2 operating point. |
 | **GraphSAGE + GAT** co-detectors | "See your neighbours" relational signal XGBoost lacks, without FraudGT's training cost. Edge-feature fusion + AUPRC selection make them competitive (AUPRC ~0.62), not just a baseline; they feed the stacked ensemble. |
+| **TGN** for prediction | Adds the *temporal* axis the static models lack — a per-account memory of behaviour over time. Answers "which account offends next", evaluated leak-free on a chronological split. Optional and served from JSON, so it never complicates the runtime path. |
 | **Confidence tiers** over a blended score | Averaging a high-recall ML probability with a low-precision rule signal helps nothing (measured). Tiering by ML/rule agreement keeps each lane's strength: ML recall, rule precision + auditability. |
 | **SQLite** over Postgres | Single-file, zero-config, atomic per-statement. Right call for a hackathon POC. Schema is portable to Postgres in production. |
 | **SHA-256 hash chain** | Tamper-evidence is what regulators ask for. Implementing it client-side is one function and one column; outsourcing to a real blockchain would be overkill. |
